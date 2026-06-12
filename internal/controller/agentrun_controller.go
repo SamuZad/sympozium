@@ -977,6 +977,9 @@ func (r *AgentRunReconciler) triggerSequentialSuccessors(ctx context.Context, lo
 					AuthSecretRef:            resolveAuthSecret(&targetInst),
 					ProviderHeaders:          targetInst.Spec.Agents.Default.ProviderHeaders,
 					ProviderHeadersSecretRef: targetInst.Spec.Agents.Default.ProviderHeadersSecretRef,
+					Thinking:                 targetInst.Spec.Agents.Default.Thinking,
+					MaxTokens:                targetInst.Spec.Agents.Default.MaxTokens,
+					Temperature:              targetInst.Spec.Agents.Default.Temperature,
 				},
 				ImagePullSecrets: targetInst.Spec.ImagePullSecrets,
 				Lifecycle:        targetInst.Spec.Agents.Default.Lifecycle,
@@ -1818,12 +1821,25 @@ func (r *AgentRunReconciler) buildContainers(
 		{Name: "AGENT_RUN_ID", Value: agentRun.Name},
 		{Name: "AGENT_ID", Value: agentRun.Spec.AgentID},
 		{Name: "SESSION_KEY", Value: agentRun.Spec.SessionKey},
+		{Name: "INSTANCE_NAME", Value: agentRun.Spec.AgentRef},
+		{Name: "ENSEMBLE_NAME", Value: agentRun.Labels["sympozium.ai/ensemble"]},
+		{Name: "AGENT_NAMESPACE", Value: agentRun.Namespace},
 		{Name: "TASK", Value: agentRun.Spec.Task},
 		{Name: "SYSTEM_PROMPT", Value: agentRun.Spec.SystemPrompt},
 		{Name: "MODEL_PROVIDER", Value: agentRun.Spec.Model.Provider},
 		{Name: "MODEL_NAME", Value: agentRun.Spec.Model.Model},
 		{Name: "MODEL_BASE_URL", Value: agentRun.Spec.Model.BaseURL},
 		{Name: "THINKING_MODE", Value: agentRun.Spec.Model.Thinking},
+	}
+	if agentRun.Spec.Model.MaxTokens != nil {
+		agentEnv = append(agentEnv, corev1.EnvVar{
+			Name: "MAX_TOKENS", Value: fmt.Sprintf("%d", *agentRun.Spec.Model.MaxTokens),
+		})
+	}
+	if agentRun.Spec.Model.Temperature != "" {
+		agentEnv = append(agentEnv, corev1.EnvVar{
+			Name: "TEMPERATURE", Value: agentRun.Spec.Model.Temperature,
+		})
 	}
 
 	// Inject RUN_TIMEOUT from the AgentRun spec or instance config.
@@ -1868,20 +1884,7 @@ func (r *AgentRunReconciler) buildContainers(
 					Drop: []corev1.Capability{"ALL"},
 				},
 			},
-			Env: []corev1.EnvVar{
-				{Name: "AGENT_RUN_ID", Value: agentRun.Name},
-				{Name: "AGENT_ID", Value: agentRun.Spec.AgentID},
-				{Name: "SESSION_KEY", Value: agentRun.Spec.SessionKey},
-				{Name: "INSTANCE_NAME", Value: agentRun.Spec.AgentRef},
-				{Name: "ENSEMBLE_NAME", Value: agentRun.Labels["sympozium.ai/ensemble"]},
-				{Name: "AGENT_NAMESPACE", Value: agentRun.Namespace},
-				{Name: "TASK", Value: agentRun.Spec.Task},
-				{Name: "SYSTEM_PROMPT", Value: agentRun.Spec.SystemPrompt},
-				{Name: "MODEL_PROVIDER", Value: agentRun.Spec.Model.Provider},
-				{Name: "MODEL_NAME", Value: agentRun.Spec.Model.Model},
-				{Name: "MODEL_BASE_URL", Value: agentRun.Spec.Model.BaseURL},
-				{Name: "THINKING_MODE", Value: agentRun.Spec.Model.Thinking},
-			},
+			Env:          agentEnv,
 			VolumeMounts: agentSkillVolumeMounts(agentRun.Spec.Skills),
 			Resources: corev1.ResourceRequirements{
 				Requests: corev1.ResourceList{

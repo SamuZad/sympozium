@@ -350,6 +350,13 @@ spec:
                             type: object
                           type: array
                       type: object
+                    maxTokens:
+                      description: |-
+                        MaxTokens caps the maximum number of tokens the model may emit
+                        per response. When unset the provider's own default is used.
+                      format: int32
+                      minimum: 1
+                      type: integer
                     mcpServers:
                       description: |-
                         MCPServers configures remote MCP (Model Context Protocol) servers
@@ -573,6 +580,26 @@ spec:
                     systemPrompt:
                       description: SystemPrompt is the system prompt that defines
                         the agent's role and behaviour.
+                      type: string
+                    temperature:
+                      description: |-
+                        Temperature controls sampling randomness as a decimal string
+                        (e.g. "0.7"). String type avoids float quirks in controller-gen.
+                        When unset the provider's own default is used.
+                      type: string
+                    thinking:
+                      description: |-
+                        Thinking controls extended-reasoning mode for the provider:
+                        "off"/"" (default), "minimal", "low", "medium", or "high".
+                        Maps to OpenAI reasoning_effort (o-series/gpt-5) and Anthropic
+                        thinking budget. Ignored by providers that don't support it.
+                      enum:
+                      - "off"
+                      - minimal
+                      - low
+                      - medium
+                      - high
+                      - ""
                       type: string
                     toolPolicy:
                       description: ToolPolicy defines which tools this agent config

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -573,6 +574,34 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// parseMaxTokens decodes the MAX_TOKENS env var into a positive int64.
+// Returns 0 to signal "use the provider's default" when the value is
+// empty, malformed, or non-positive.
+func parseMaxTokens(s string) int64 {
+	if s == "" {
+		return 0
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
+}
+
+// parseTemperature decodes the TEMPERATURE env var into a float64.
+// Returns NaN to signal "use the provider's default" when the value is
+// empty or malformed; callers check with math.IsNaN.
+func parseTemperature(s string) float64 {
+	if s == "" {
+		return math.NaN()
+	}
+	f, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	if err != nil {
+		return math.NaN()
+	}
+	return f
 }
 
 func firstNonEmpty(vals ...string) string {

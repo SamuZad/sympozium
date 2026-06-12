@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -20,11 +21,31 @@ import (
 // It also handles all OpenAI-compatible backends: LM Studio, Ollama, vLLM,
 // llamacpp, Azure OpenAI, and any OpenAI-schema provider.
 type openaiProvider struct {
-	client   openai.Client
-	provider string // provider identifier for telemetry ("openai", "lm-studio", …)
-	model    string
-	messages []openai.ChatCompletionMessageParamUnion
-	tools    []openai.ChatCompletionToolUnionParam
+	client          openai.Client
+	provider        string // provider identifier for telemetry ("openai", "lm-studio", …)
+	model           string
+	reasoningEffort shared.ReasoningEffort // empty when extended reasoning is off
+	maxTokens       int64                  // 0 = use provider/model default
+	temperature     float64                // NaN = use provider default
+	messages        []openai.ChatCompletionMessageParamUnion
+	tools           []openai.ChatCompletionToolUnionParam
+}
+
+// openaiReasoningEffort translates the Sympozium THINKING_MODE env var (off/low/
+// medium/high; also passthroughs "minimal") into the OpenAI reasoning_effort
+// value. Returns empty when reasoning should be omitted from the request.
+// Only o-series and gpt-5 family models accept reasoning_effort; sending it to
+// other models surfaces a 400 from the provider, so the caller is expected to
+// only opt in on supported models.
+func openaiReasoningEffort(mode string) shared.ReasoningEffort {
+	switch normalized := strings.ToLower(strings.TrimSpace(mode)); normalized {
+	case "", "off", "none", "disabled":
+		return ""
+	case "minimal", "low", "medium", "high":
+		return shared.ReasoningEffort(normalized)
+	default:
+		return ""
+	}
 }
 
 // newOpenAIProvider constructs an openaiProvider with the given config.
@@ -82,9 +103,12 @@ func newOpenAIProvider(provider, apiKey, baseURL, model, systemPrompt, task stri
 	}
 
 	return &openaiProvider{
-		client:   openai.NewClient(opts...),
-		provider: provider,
-		model:    model,
+		client:          openai.NewClient(opts...),
+		provider:        provider,
+		model:           model,
+		reasoningEffort: openaiReasoningEffort(getEnv("THINKING_MODE", "")),
+		maxTokens:       parseMaxTokens(getEnv("MAX_TOKENS", "")),
+		temperature:     parseTemperature(getEnv("TEMPERATURE", "")),
 		messages: []openai.ChatCompletionMessageParamUnion{
 			openai.SystemMessage(systemPrompt),
 			openai.UserMessage(task),
@@ -103,6 +127,20 @@ func (p *openaiProvider) Chat(ctx context.Context) (ChatResult, error) {
 	}
 	if len(p.tools) > 0 {
 		params.Tools = p.tools
+	}
+	if p.reasoningEffort != "" {
+		params.ReasoningEffort = p.reasoningEffort
+	}
+	if p.maxTokens > 0 {
+		// max_completion_tokens is the modern field (required by
+		// o-series/gpt-5); max_tokens is the legacy field still honored
+		// by most OpenAI-compatible local backends (Ollama, LM Studio,
+		// vLLM). Setting both keeps cloud and local providers happy.
+		params.MaxCompletionTokens = openai.Int(p.maxTokens)
+		params.MaxTokens = openai.Int(p.maxTokens)
+	}
+	if !math.IsNaN(p.temperature) {
+		params.Temperature = openai.Float(p.temperature)
 	}
 
 	completion, err := p.client.Chat.Completions.New(ctx, params)

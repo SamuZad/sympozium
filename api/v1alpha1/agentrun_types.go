@@ -143,6 +143,19 @@ type ModelSpec struct {
 	// +optional
 	Thinking string `json:"thinking,omitempty"`
 
+	// MaxTokens caps the maximum number of output tokens per LLM
+	// completion. Inherited from AgentConfig.MaxTokens at AgentRun
+	// creation time. When nil, the provider's built-in default is used.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	MaxTokens *int32 `json:"maxTokens,omitempty"`
+
+	// Temperature controls sampling randomness, expressed as a string
+	// (e.g. "0.7") and parsed to float at runtime. Inherited from
+	// AgentConfig.Temperature at AgentRun creation time.
+	// +optional
+	Temperature string `json:"temperature,omitempty"`
+
 	// AuthSecretRef references the secret containing the API key.
 	AuthSecretRef string `json:"authSecretRef"`
 

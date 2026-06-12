@@ -375,6 +375,24 @@ type AgentConfig struct {
 	// +optional
 	Thinking string `json:"thinking,omitempty"`
 
+	// MaxTokens caps the maximum number of output tokens per LLM
+	// completion. When nil, the provider's built-in default is used
+	// (Anthropic: 8192 baseline, auto-bumped when extended thinking is
+	// enabled; OpenAI: model default with no explicit cap). For
+	// reasoning/thinking models the value must exceed the thinking
+	// budget; the agent-runner will auto-bump it when necessary.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	MaxTokens *int32 `json:"maxTokens,omitempty"`
+
+	// Temperature controls sampling randomness for the LLM, expressed
+	// as a string (e.g. "0.0", "0.7", "1.2") and parsed to float at
+	// runtime. String type avoids controller-gen float issues. Valid
+	// range depends on the provider: OpenAI accepts 0.0–2.0, Anthropic
+	// accepts 0.0–1.0. When empty, the provider default is used.
+	// +optional
+	Temperature string `json:"temperature,omitempty"`
+
 	// Sandbox configuration.
 	// +optional
 	Sandbox *SandboxSpec `json:"sandbox,omitempty"`

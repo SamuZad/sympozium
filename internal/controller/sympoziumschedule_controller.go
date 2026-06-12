@@ -228,6 +228,12 @@ func (r *SympoziumScheduleReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	if instance.Spec.Agents.Default.Thinking != "" {
 		agentRun.Spec.Model.Thinking = instance.Spec.Agents.Default.Thinking
 	}
+	if instance.Spec.Agents.Default.MaxTokens != nil {
+		agentRun.Spec.Model.MaxTokens = instance.Spec.Agents.Default.MaxTokens
+	}
+	if instance.Spec.Agents.Default.Temperature != "" {
+		agentRun.Spec.Model.Temperature = instance.Spec.Agents.Default.Temperature
+	}
 	if len(instance.Spec.Agents.Default.NodeSelector) > 0 {
 		agentRun.Spec.Model.NodeSelector = instance.Spec.Agents.Default.NodeSelector
 	}

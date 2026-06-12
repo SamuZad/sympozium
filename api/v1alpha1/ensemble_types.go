@@ -196,6 +196,26 @@ type AgentConfigSpec struct {
 	// +optional
 	BaseURL string `json:"baseURL,omitempty"`
 
+	// Thinking controls extended-reasoning mode for the provider:
+	// "off"/"" (default), "minimal", "low", "medium", or "high".
+	// Maps to OpenAI reasoning_effort (o-series/gpt-5) and Anthropic
+	// thinking budget. Ignored by providers that don't support it.
+	// +optional
+	// +kubebuilder:validation:Enum=off;minimal;low;medium;high;""
+	Thinking string `json:"thinking,omitempty"`
+
+	// MaxTokens caps the maximum number of tokens the model may emit
+	// per response. When unset the provider's own default is used.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	MaxTokens *int32 `json:"maxTokens,omitempty"`
+
+	// Temperature controls sampling randomness as a decimal string
+	// (e.g. "0.7"). String type avoids float quirks in controller-gen.
+	// When unset the provider's own default is used.
+	// +optional
+	Temperature string `json:"temperature,omitempty"`
+
 	// ProviderHeaders overrides ensemble-level provider headers for this agent configuration.
 	// Keys here take precedence over ensemble-level ProviderHeaders.
 	// +optional

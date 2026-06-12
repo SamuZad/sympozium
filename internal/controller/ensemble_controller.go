@@ -446,6 +446,54 @@ func (r *EnsembleReconciler) reconcileAgentConfig(
 			needsUpdate = true
 		}
 
+		// Propagate lifecycle hooks from persona definition.
+		if !reflect.DeepEqual(existingInst.Spec.Agents.Default.Lifecycle, persona.Lifecycle) {
+			existingInst.Spec.Agents.Default.Lifecycle = persona.Lifecycle
+			needsUpdate = true
+		}
+
+		// Propagate subagent configuration from persona definition.
+		if !reflect.DeepEqual(existingInst.Spec.Agents.Default.Subagents, persona.Subagents) {
+			existingInst.Spec.Agents.Default.Subagents = persona.Subagents
+			needsUpdate = true
+		}
+
+		// Propagate model-tuning fields (thinking, max-tokens, temperature).
+		if existingInst.Spec.Agents.Default.Thinking != persona.Thinking {
+			existingInst.Spec.Agents.Default.Thinking = persona.Thinking
+			needsUpdate = true
+		}
+		if !int32PtrEqual(existingInst.Spec.Agents.Default.MaxTokens, persona.MaxTokens) {
+			existingInst.Spec.Agents.Default.MaxTokens = persona.MaxTokens
+			needsUpdate = true
+		}
+		if existingInst.Spec.Agents.Default.Temperature != persona.Temperature {
+			existingInst.Spec.Agents.Default.Temperature = persona.Temperature
+			needsUpdate = true
+		}
+
+		// Propagate ensemble-level AgentSandbox defaults.
+		if !reflect.DeepEqual(existingInst.Spec.Agents.Default.AgentSandbox, pack.Spec.AgentSandbox) {
+			existingInst.Spec.Agents.Default.AgentSandbox = pack.Spec.AgentSandbox
+			needsUpdate = true
+		}
+
+		// Propagate ensemble-level policy reference.
+		if existingInst.Spec.PolicyRef != pack.Spec.PolicyRef {
+			existingInst.Spec.PolicyRef = pack.Spec.PolicyRef
+			needsUpdate = true
+		}
+
+		// Propagate ensemble-level volume bindings (e.g. shared scratch PVC).
+		if !reflect.DeepEqual(existingInst.Spec.Volumes, pack.Spec.Volumes) {
+			existingInst.Spec.Volumes = pack.Spec.Volumes
+			needsUpdate = true
+		}
+		if !reflect.DeepEqual(existingInst.Spec.VolumeMounts, pack.Spec.VolumeMounts) {
+			existingInst.Spec.VolumeMounts = pack.Spec.VolumeMounts
+			needsUpdate = true
+		}
+
 		if needsUpdate {
 			log.Info("Updating pack-level settings on existing instance", "instance", instanceName)
 			if err := r.Update(ctx, existingInst); err != nil {
@@ -591,6 +639,9 @@ func (r *EnsembleReconciler) buildAgent(
 					Lifecycle:                persona.Lifecycle,
 					Subagents:                persona.Subagents,
 					Env:                      persona.Env,
+					Thinking:                 persona.Thinking,
+					MaxTokens:                persona.MaxTokens,
+					Temperature:              persona.Temperature,
 				},
 			},
 			AuthRefs: authRefs,
@@ -924,6 +975,15 @@ func authRefsEqual(a, b []sympoziumv1alpha1.SecretRef) bool {
 		}
 	}
 	return true
+}
+
+// int32PtrEqual returns true when two *int32 values compare equal,
+// treating two nil pointers as equal.
+func int32PtrEqual(a, b *int32) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 
 // mergeProviderHeaders merges ensemble-level and persona-level provider headers.
@@ -1407,6 +1467,9 @@ func (r *EnsembleReconciler) deliverStimulus(ctx context.Context, log logr.Logge
 				AuthSecretRef:            resolveAuthSecret(&targetInst),
 				ProviderHeaders:          targetInst.Spec.Agents.Default.ProviderHeaders,
 				ProviderHeadersSecretRef: targetInst.Spec.Agents.Default.ProviderHeadersSecretRef,
+				Thinking:                 targetInst.Spec.Agents.Default.Thinking,
+				MaxTokens:                targetInst.Spec.Agents.Default.MaxTokens,
+				Temperature:              targetInst.Spec.Agents.Default.Temperature,
 			},
 			Skills:           targetInst.Spec.Skills,
 			ImagePullSecrets: targetInst.Spec.ImagePullSecrets,

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -79,6 +80,59 @@ func TestTruncate(t *testing.T) {
 			got := truncate(tt.s, tt.n)
 			if got != tt.want {
 				t.Errorf("truncate(%q, %d) = %q, want %q", tt.s, tt.n, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseMaxTokens(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want int64
+	}{
+		{"empty returns zero", "", 0},
+		{"valid positive", "4096", 4096},
+		{"whitespace tolerated", "  2048  ", 2048},
+		{"zero rejected", "0", 0},
+		{"negative rejected", "-1", 0},
+		{"non-numeric rejected", "lots", 0},
+		{"float rejected", "1024.5", 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := parseMaxTokens(tt.in); got != tt.want {
+				t.Errorf("parseMaxTokens(%q) = %d, want %d", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseTemperature(t *testing.T) {
+	tests := []struct {
+		name  string
+		in    string
+		want  float64
+		isNaN bool
+	}{
+		{name: "empty returns NaN", in: "", isNaN: true},
+		{name: "valid zero", in: "0", want: 0},
+		{name: "valid float", in: "0.7", want: 0.7},
+		{name: "valid above one", in: "1.5", want: 1.5},
+		{name: "whitespace tolerated", in: "  0.3  ", want: 0.3},
+		{name: "non-numeric returns NaN", in: "warm", isNaN: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseTemperature(tt.in)
+			if tt.isNaN {
+				if !math.IsNaN(got) {
+					t.Errorf("parseTemperature(%q) = %v, want NaN", tt.in, got)
+				}
+				return
+			}
+			if got != tt.want {
+				t.Errorf("parseTemperature(%q) = %v, want %v", tt.in, got, tt.want)
 			}
 		})
 	}
@@ -259,6 +313,94 @@ func TestCallOpenAI_ServerError(t *testing.T) {
 	}
 }
 
+// TestCallOpenAI_SamplingParamsInRequest asserts that when MAX_TOKENS,
+// TEMPERATURE, and THINKING_MODE env vars are set, the provider sends
+// the corresponding fields on the chat-completions request.
+func TestCallOpenAI_SamplingParamsInRequest(t *testing.T) {
+	var capturedBody map[string]any
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&capturedBody)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"id":      "chatcmpl-x",
+			"object":  "chat.completion",
+			"created": 1,
+			"model":   "gpt-4o-mini",
+			"choices": []map[string]any{{
+				"index":         0,
+				"message":       map[string]string{"role": "assistant", "content": "ok"},
+				"finish_reason": "stop",
+			}},
+			"usage": map[string]int{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+		})
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	t.Setenv("MAX_TOKENS", "1234")
+	t.Setenv("TEMPERATURE", "0.42")
+	t.Setenv("THINKING_MODE", "medium")
+
+	_, _, _, _, err := callOpenAI(t.Context(), "openai", "k", srv.URL, "gpt-4o-mini", "sys", "task", nil, nil)
+	if err != nil {
+		t.Fatalf("callOpenAI: %v", err)
+	}
+	// max_completion_tokens is the modern field; max_tokens is the legacy
+	// alias still honored by local OpenAI-compatible backends.
+	if got, _ := capturedBody["max_completion_tokens"].(float64); int64(got) != 1234 {
+		t.Errorf("max_completion_tokens = %v, want 1234", capturedBody["max_completion_tokens"])
+	}
+	if got, _ := capturedBody["max_tokens"].(float64); int64(got) != 1234 {
+		t.Errorf("max_tokens = %v, want 1234", capturedBody["max_tokens"])
+	}
+	if got, _ := capturedBody["temperature"].(float64); got != 0.42 {
+		t.Errorf("temperature = %v, want 0.42", capturedBody["temperature"])
+	}
+	if got, _ := capturedBody["reasoning_effort"].(string); got != "medium" {
+		t.Errorf("reasoning_effort = %v, want medium", capturedBody["reasoning_effort"])
+	}
+}
+
+// TestCallOpenAI_SamplingParamsOmittedWhenUnset asserts that the request
+// body contains no sampling fields when the env vars are absent, so the
+// provider's model-side defaults remain in effect.
+func TestCallOpenAI_SamplingParamsOmittedWhenUnset(t *testing.T) {
+	var capturedBody map[string]any
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&capturedBody)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"id":      "chatcmpl-x",
+			"object":  "chat.completion",
+			"created": 1,
+			"model":   "gpt-4o-mini",
+			"choices": []map[string]any{{
+				"index":         0,
+				"message":       map[string]string{"role": "assistant", "content": "ok"},
+				"finish_reason": "stop",
+			}},
+			"usage": map[string]int{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+		})
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	// Explicitly clear inherited values from the parent process / earlier tests.
+	t.Setenv("MAX_TOKENS", "")
+	t.Setenv("TEMPERATURE", "")
+	t.Setenv("THINKING_MODE", "")
+
+	_, _, _, _, err := callOpenAI(t.Context(), "openai", "k", srv.URL, "gpt-4o-mini", "sys", "task", nil, nil)
+	if err != nil {
+		t.Fatalf("callOpenAI: %v", err)
+	}
+	for _, field := range []string{"max_completion_tokens", "max_tokens", "temperature", "reasoning_effort"} {
+		if _, present := capturedBody[field]; present {
+			t.Errorf("%s should be omitted when env unset, got %v", field, capturedBody[field])
+		}
+	}
+}
+
 func TestCallAnthropic_MockServer(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/messages" {
@@ -332,6 +474,131 @@ func TestCallAnthropic_ServerError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "400") && !strings.Contains(err.Error(), "API error") {
 		t.Errorf("error should mention 400 or API error, got: %v", err)
+	}
+}
+
+// TestCallAnthropic_SamplingParamsInRequest asserts that MAX_TOKENS,
+// TEMPERATURE, and THINKING_MODE env vars surface on the Messages
+// request body — including the extended-thinking auto-bump that keeps
+// max_tokens > budget_tokens.
+func TestCallAnthropic_SamplingParamsInRequest(t *testing.T) {
+	var capturedBody map[string]any
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&capturedBody)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"id":          "msg_x",
+			"type":        "message",
+			"role":        "assistant",
+			"model":       "claude-sonnet-4-20250514",
+			"content":     []map[string]string{{"type": "text", "text": "ok"}},
+			"stop_reason": "end_turn",
+			"usage":       map[string]int{"input_tokens": 1, "output_tokens": 1},
+		})
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	t.Setenv("MAX_TOKENS", "16000")
+	t.Setenv("TEMPERATURE", "0.3")
+	t.Setenv("THINKING_MODE", "high") // budget 8192, fits under 16000
+
+	_, _, _, _, err := callAnthropic(t.Context(), "k", srv.URL, "claude-sonnet-4-20250514", "sys", "task", nil, nil)
+	if err != nil {
+		t.Fatalf("callAnthropic: %v", err)
+	}
+	if got, _ := capturedBody["max_tokens"].(float64); int64(got) != 16000 {
+		t.Errorf("max_tokens = %v, want 16000", capturedBody["max_tokens"])
+	}
+	if got, _ := capturedBody["temperature"].(float64); got != 0.3 {
+		t.Errorf("temperature = %v, want 0.3", capturedBody["temperature"])
+	}
+	thinking, _ := capturedBody["thinking"].(map[string]any)
+	if thinking == nil {
+		t.Fatalf("thinking block missing: %+v", capturedBody)
+	}
+	if thinking["type"] != "enabled" {
+		t.Errorf("thinking.type = %v, want enabled", thinking["type"])
+	}
+	if got, _ := thinking["budget_tokens"].(float64); int64(got) != 8192 {
+		t.Errorf("thinking.budget_tokens = %v, want 8192", thinking["budget_tokens"])
+	}
+}
+
+// TestCallAnthropic_MaxTokensAutoBumpsForThinking proves that when the
+// user-supplied MAX_TOKENS is smaller than the thinking budget, the
+// provider auto-bumps max_tokens above the budget — Anthropic rejects
+// the request otherwise (budget_tokens must be < max_tokens).
+func TestCallAnthropic_MaxTokensAutoBumpsForThinking(t *testing.T) {
+	var capturedBody map[string]any
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&capturedBody)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"id":          "msg_x",
+			"type":        "message",
+			"role":        "assistant",
+			"model":       "claude-test",
+			"content":     []map[string]string{{"type": "text", "text": "ok"}},
+			"stop_reason": "end_turn",
+			"usage":       map[string]int{"input_tokens": 1, "output_tokens": 1},
+		})
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	// Budget=8192 (high) but user only asked for 4096 — must be bumped.
+	t.Setenv("MAX_TOKENS", "4096")
+	t.Setenv("THINKING_MODE", "high")
+	t.Setenv("TEMPERATURE", "")
+
+	_, _, _, _, err := callAnthropic(t.Context(), "k", srv.URL, "claude-test", "sys", "task", nil, nil)
+	if err != nil {
+		t.Fatalf("callAnthropic: %v", err)
+	}
+	got, _ := capturedBody["max_tokens"].(float64)
+	if int64(got) <= 8192 {
+		t.Errorf("max_tokens = %v, want > 8192 to satisfy budget_tokens < max_tokens", got)
+	}
+}
+
+// TestCallAnthropic_DefaultMaxTokensWhenUnset asserts the historical
+// 8192 default is still sent when MAX_TOKENS is absent, preserving the
+// pre-feature behavior.
+func TestCallAnthropic_DefaultMaxTokensWhenUnset(t *testing.T) {
+	var capturedBody map[string]any
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&capturedBody)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"id":          "msg_x",
+			"type":        "message",
+			"role":        "assistant",
+			"model":       "claude-test",
+			"content":     []map[string]string{{"type": "text", "text": "ok"}},
+			"stop_reason": "end_turn",
+			"usage":       map[string]int{"input_tokens": 1, "output_tokens": 1},
+		})
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	t.Setenv("MAX_TOKENS", "")
+	t.Setenv("TEMPERATURE", "")
+	t.Setenv("THINKING_MODE", "")
+
+	_, _, _, _, err := callAnthropic(t.Context(), "k", srv.URL, "claude-test", "sys", "task", nil, nil)
+	if err != nil {
+		t.Fatalf("callAnthropic: %v", err)
+	}
+	if got, _ := capturedBody["max_tokens"].(float64); int64(got) != 8192 {
+		t.Errorf("max_tokens = %v, want 8192 (default)", got)
+	}
+	if _, present := capturedBody["temperature"]; present {
+		t.Errorf("temperature should be omitted, got %v", capturedBody["temperature"])
+	}
+	if _, present := capturedBody["thinking"]; present {
+		t.Errorf("thinking should be omitted, got %v", capturedBody["thinking"])
 	}
 }
 

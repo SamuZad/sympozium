@@ -358,6 +358,14 @@ spec:
                         Azure OpenAI:   https://<resource>.openai.azure.com/openai/deployments/<deployment>
                         Ollama:         http://ollama.default.svc:11434/v1
                     type: string
+                  maxTokens:
+                    description: |-
+                      MaxTokens caps the maximum number of output tokens per LLM
+                      completion. Inherited from AgentConfig.MaxTokens at AgentRun
+                      creation time. When nil, the provider's built-in default is used.
+                    format: int32
+                    minimum: 1
+                    type: integer
                   model:
                     description: Model is the model identifier.
                     type: string
@@ -388,6 +396,12 @@ spec:
                       ProviderHeadersSecretRef references a Kubernetes Secret whose data keys are
                       injected as provider request headers. Values from the secret override inline
                       ProviderHeaders on key collision.
+                    type: string
+                  temperature:
+                    description: |-
+                      Temperature controls sampling randomness, expressed as a string
+                      (e.g. "0.7") and parsed to float at runtime. Inherited from
+                      AgentConfig.Temperature at AgentRun creation time.
                     type: string
                   thinking:
                     description: Thinking mode (off, low, medium, high).

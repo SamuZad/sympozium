@@ -231,6 +231,103 @@ func TestBuildContainers_AgentEnvVars(t *testing.T) {
 	}
 }
 
+// envMapOf flattens a container's literal Env list (ignoring secretKeyRef
+// entries) into a name→value map for assertions.
+func envMapOf(envs []corev1.EnvVar) map[string]string {
+	out := map[string]string{}
+	for _, e := range envs {
+		if e.ValueFrom != nil {
+			continue
+		}
+		out[e.Name] = e.Value
+	}
+	return out
+}
+
+func TestBuildContainers_AgentEnvVars_SamplingOmittedByDefault(t *testing.T) {
+	r := &AgentRunReconciler{}
+	cs, _ := r.buildContainers(newTestRun(), false, nil, nil, nil)
+	env := envMapOf(cs[0].Env)
+	for _, name := range []string{"MAX_TOKENS", "TEMPERATURE"} {
+		if v, ok := env[name]; ok {
+			t.Errorf("%s should be unset when AgentRun has no value, got %q", name, v)
+		}
+	}
+}
+
+func TestBuildContainers_AgentEnvVars_MaxTokensInjected(t *testing.T) {
+	r := &AgentRunReconciler{}
+	run := newTestRun()
+	v := int32(4096)
+	run.Spec.Model.MaxTokens = &v
+	cs, _ := r.buildContainers(run, false, nil, nil, nil)
+
+	if got := envMapOf(cs[0].Env)["MAX_TOKENS"]; got != "4096" {
+		t.Errorf("MAX_TOKENS = %q, want 4096", got)
+	}
+}
+
+func TestBuildContainers_AgentEnvVars_TemperatureInjected(t *testing.T) {
+	r := &AgentRunReconciler{}
+	run := newTestRun()
+	run.Spec.Model.Temperature = "0.7"
+	cs, _ := r.buildContainers(run, false, nil, nil, nil)
+
+	if got := envMapOf(cs[0].Env)["TEMPERATURE"]; got != "0.7" {
+		t.Errorf("TEMPERATURE = %q, want 0.7", got)
+	}
+}
+
+// TestBuildContainers_AgentEnvVars_RunTimeoutInjected guards against the
+// regression where RUN_TIMEOUT was assembled into agentEnv but the agent
+// container was constructed with an inline Env literal that dropped it.
+func TestBuildContainers_AgentEnvVars_RunTimeoutInjected(t *testing.T) {
+	r := &AgentRunReconciler{}
+	run := newTestRun()
+	run.Spec.Timeout = &metav1.Duration{Duration: 15 * time.Minute}
+	cs, _ := r.buildContainers(run, false, nil, nil, nil)
+
+	if got := envMapOf(cs[0].Env)["RUN_TIMEOUT"]; got != "15m0s" {
+		t.Errorf("RUN_TIMEOUT = %q, want 15m0s", got)
+	}
+}
+
+// TestBuildContainers_AgentEnvVars_TraceparentInjected guards against the
+// regression where TRACEPARENT was assembled into agentEnv but dropped on
+// the agent container, breaking distributed tracing.
+func TestBuildContainers_AgentEnvVars_TraceparentInjected(t *testing.T) {
+	r := &AgentRunReconciler{}
+	run := newTestRun()
+	run.Annotations = map[string]string{
+		"otel.dev/traceparent": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+	}
+	cs, _ := r.buildContainers(run, false, nil, nil, nil)
+
+	if got := envMapOf(cs[0].Env)["TRACEPARENT"]; got == "" {
+		t.Error("TRACEPARENT should be set on agent container when traceparent annotation present")
+	}
+}
+
+// TestBuildContainers_AgentEnvVars_OTelInjected guards against the
+// regression where OTEL_EXPORTER_OTLP_ENDPOINT / OTEL_SERVICE_NAME were
+// assembled into agentEnv but dropped on the agent container.
+func TestBuildContainers_AgentEnvVars_OTelInjected(t *testing.T) {
+	r := &AgentRunReconciler{}
+	obs := &sympoziumv1alpha1.ObservabilitySpec{
+		Enabled:      true,
+		OTLPEndpoint: "otel-collector.observability.svc:4317",
+	}
+	cs, _ := r.buildContainers(newTestRun(), false, obs, nil, nil)
+
+	env := envMapOf(cs[0].Env)
+	if env["OTEL_EXPORTER_OTLP_ENDPOINT"] != "otel-collector.observability.svc:4317" {
+		t.Errorf("OTEL_EXPORTER_OTLP_ENDPOINT = %q", env["OTEL_EXPORTER_OTLP_ENDPOINT"])
+	}
+	if env["OTEL_SERVICE_NAME"] != "sympozium-agent-runner" {
+		t.Errorf("OTEL_SERVICE_NAME = %q", env["OTEL_SERVICE_NAME"])
+	}
+}
+
 func TestBuildContainers_AuthSecretRef(t *testing.T) {
 	r := &AgentRunReconciler{}
 	run := newTestRun()

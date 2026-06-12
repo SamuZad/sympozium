@@ -309,6 +309,17 @@ spec:
                               type: object
                             type: array
                         type: object
+                      maxTokens:
+                        description: |-
+                          MaxTokens caps the maximum number of output tokens per LLM
+                          completion. When nil, the provider's built-in default is used
+                          (Anthropic: 8192 baseline, auto-bumped when extended thinking is
+                          enabled; OpenAI: model default with no explicit cap). For
+                          reasoning/thinking models the value must exceed the thinking
+                          budget; the agent-runner will auto-bump it when necessary.
+                        format: int32
+                        minimum: 1
+                        type: integer
                       model:
                         description: Model is the LLM model to use.
                         type: string
@@ -440,6 +451,14 @@ spec:
                               sub-agents.
                             type: integer
                         type: object
+                      temperature:
+                        description: |-
+                          Temperature controls sampling randomness for the LLM, expressed
+                          as a string (e.g. "0.0", "0.7", "1.2") and parsed to float at
+                          runtime. String type avoids controller-gen float issues. Valid
+                          range depends on the provider: OpenAI accepts 0.0–2.0, Anthropic
+                          accepts 0.0–1.0. When empty, the provider default is used.
+                        type: string
                       thinking:
                         description: Thinking is the thinking mode (off, low, medium,
                           high).

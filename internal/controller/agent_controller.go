@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 	"time"
 
@@ -205,6 +206,17 @@ func (r *AgentReconciler) reconcileChannels(ctx context.Context, instance *sympo
 		} else if err != nil {
 			return err
 		} else {
+			// Detect and apply spec drift so edits to ChannelSpec (secret
+			// rotation, slack options, triggers, access control, volumes,
+			// image tag upgrades) propagate to the running channel pod
+			// without manual deletion.
+			desired := r.buildChannelDeployment(instance, ch, deployName)
+			if channelDeploymentDrift(&deploy, desired) {
+				applyChannelDeploymentSpec(&deploy, desired)
+				if err := r.Update(ctx, &deploy); err != nil {
+					return fmt.Errorf("update channel deployment %s: %w", deployName, err)
+				}
+			}
 			status := "Connected"
 			if deploy.Status.ReadyReplicas == 0 {
 				status = "Disconnected"
@@ -368,6 +380,50 @@ func (r *AgentReconciler) buildChannelDeployment(
 	}
 
 	return deploy
+}
+
+// channelDeploymentDrift compares the user-managed fields of an existing
+// channel Deployment against the desired spec. Replicas and apiserver-set
+// defaults (TerminationMessagePath, etc.) are intentionally excluded so
+// scaling and server-side mutation don't trigger spurious updates.
+func channelDeploymentDrift(existing, desired *appsv1.Deployment) bool {
+	if !reflect.DeepEqual(existing.Spec.Strategy, desired.Spec.Strategy) {
+		return true
+	}
+	if !reflect.DeepEqual(existing.Spec.Template.Spec.Volumes, desired.Spec.Template.Spec.Volumes) {
+		return true
+	}
+	if len(existing.Spec.Template.Spec.Containers) != 1 || len(desired.Spec.Template.Spec.Containers) != 1 {
+		return true
+	}
+	e := existing.Spec.Template.Spec.Containers[0]
+	d := desired.Spec.Template.Spec.Containers[0]
+	if e.Image != d.Image {
+		return true
+	}
+	if !reflect.DeepEqual(e.Env, d.Env) {
+		return true
+	}
+	if !reflect.DeepEqual(e.EnvFrom, d.EnvFrom) {
+		return true
+	}
+	if !reflect.DeepEqual(e.VolumeMounts, d.VolumeMounts) {
+		return true
+	}
+	return false
+}
+
+// applyChannelDeploymentSpec copies the user-managed fields from desired
+// into existing in-place. Mirrors channelDeploymentDrift's field list.
+func applyChannelDeploymentSpec(existing, desired *appsv1.Deployment) {
+	existing.Spec.Strategy = desired.Spec.Strategy
+	existing.Spec.Template.Spec.Volumes = desired.Spec.Template.Spec.Volumes
+	if len(existing.Spec.Template.Spec.Containers) > 0 && len(desired.Spec.Template.Spec.Containers) > 0 {
+		existing.Spec.Template.Spec.Containers[0].Image = desired.Spec.Template.Spec.Containers[0].Image
+		existing.Spec.Template.Spec.Containers[0].Env = desired.Spec.Template.Spec.Containers[0].Env
+		existing.Spec.Template.Spec.Containers[0].EnvFrom = desired.Spec.Template.Spec.Containers[0].EnvFrom
+		existing.Spec.Template.Spec.Containers[0].VolumeMounts = desired.Spec.Template.Spec.Containers[0].VolumeMounts
+	}
 }
 
 // ensureWhatsAppPVC creates a PVC for the WhatsApp credential store if it doesn't exist.
@@ -864,6 +920,9 @@ func (r *AgentReconciler) ensureWebEndpointAgentRun(ctx context.Context, instanc
 				AuthSecretRef:            resolveAuthSecret(instance),
 				ProviderHeaders:          instance.Spec.Agents.Default.ProviderHeaders,
 				ProviderHeadersSecretRef: instance.Spec.Agents.Default.ProviderHeadersSecretRef,
+				Thinking:                 instance.Spec.Agents.Default.Thinking,
+				MaxTokens:                instance.Spec.Agents.Default.MaxTokens,
+				Temperature:              instance.Spec.Agents.Default.Temperature,
 			},
 			Skills:           []sympoziumv1alpha1.SkillRef{webSkill},
 			ImagePullSecrets: instance.Spec.ImagePullSecrets,

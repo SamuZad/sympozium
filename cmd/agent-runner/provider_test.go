@@ -453,3 +453,55 @@ func TestRunAgentLoop_MaxTokensPerRun_NotSet(t *testing.T) {
 		t.Errorf("chatCalls = %d, want 2 (no budget = no halt)", p.chatCalls)
 	}
 }
+
+// ── Sampling helpers ────────────────────────────────────────────────────────
+
+func TestOpenaiReasoningEffort(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string // empty string == omitted
+	}{
+		{"", ""},
+		{"off", ""},
+		{"none", ""},
+		{"disabled", ""},
+		{"minimal", "minimal"},
+		{"low", "low"},
+		{"medium", "medium"},
+		{"high", "high"},
+		{"HIGH", "high"},
+		{"  Medium  ", "medium"},
+		{"bogus", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			if got := string(openaiReasoningEffort(tt.in)); got != tt.want {
+				t.Errorf("openaiReasoningEffort(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAnthropicThinkingBudget(t *testing.T) {
+	tests := []struct {
+		in   string
+		want int64
+	}{
+		{"", 0},
+		{"off", 0},
+		{"none", 0},
+		{"low", 2048},
+		{"medium", 4096},
+		{"high", 8192},
+		{"HIGH", 8192},
+		{"  Low  ", 2048},
+		{"bogus", 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			if got := anthropicThinkingBudget(tt.in); got != tt.want {
+				t.Errorf("anthropicThinkingBudget(%q) = %d, want %d", tt.in, got, tt.want)
+			}
+		})
+	}
+}
