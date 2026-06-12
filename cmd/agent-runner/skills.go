@@ -1,69 +1,152 @@
 package main
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
 const defaultSkillsDir = "/skills"
 
-// loadSkills reads all skill files from the skills directory and returns
-// their concatenated content suitable for prepending to the system prompt.
-func loadSkills(skillsDir string) string {
-	if skillsDir == "" {
-		skillsDir = defaultSkillsDir
-	}
+// skillIndexEntry is the lightweight summary of a single skill file that
+// the agent uses to populate the system prompt and the `skills` tool catalog.
+// Bodies stay on disk until the agent invokes the `skills` tool.
+type skillIndexEntry struct {
+	Name        string // "<pack>/<skill>" or "<skill>" for top-level
+	Path        string
+	Description string
+}
 
+// loadSkillIndex scans /skills, which is laid out as one subdirectory per
+// SkillPack mount (/skills/<pack>/<skill>.md). Top-level .md files are also
+// indexed as a defensive fallback for legacy layouts and tests.
+func loadSkillIndex(skillsDir string) []skillIndexEntry {
 	entries, err := os.ReadDir(skillsDir)
 	if err != nil {
 		slog.Info("skills.dir.not_found", "dir", skillsDir, "error", err)
-		return ""
+		return nil
 	}
 
-	var sb strings.Builder
-	count := 0
+	var out []skillIndexEntry
 	for _, entry := range entries {
-		// Skip directories and hidden files (Kubernetes projected volumes
-		// create ..data, ..timestamp, etc.).
-		if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+		name := entry.Name()
+		if strings.HasPrefix(name, ".") {
+			// Kubernetes projected volumes create ..data, ..timestamp, etc.
 			continue
 		}
-		path := filepath.Join(skillsDir, entry.Name())
-		data, err := os.ReadFile(path)
-		if err != nil {
-			slog.Warn("skills.file.read_failed", "path", path, "error", err)
+		full := filepath.Join(skillsDir, name)
+		if entry.IsDir() {
+			out = append(out, collectPackEntries(full, name)...)
 			continue
 		}
-		content := strings.TrimSpace(string(data))
-		if content == "" {
+		if filepath.Ext(name) != ".md" {
 			continue
 		}
-		if sb.Len() > 0 {
-			sb.WriteString("\n\n---\n\n")
-		}
-		sb.WriteString(content)
-		count++
+		out = append(out, makeSkillEntry(full, strings.TrimSuffix(name, ".md")))
 	}
 
-	if count > 0 {
-		slog.Info("skills.loaded", "count", count, "dir", skillsDir)
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+
+	if len(out) > 0 {
+		slog.Info("skills.indexed", "count", len(out), "dir", skillsDir)
 	}
-	return sb.String()
+	return out
 }
 
-// buildSystemPrompt assembles the full system prompt from the base prompt,
-// loaded skills, and tool availability.
-func buildSystemPrompt(base string, skills string, toolsEnabled bool) string {
-	var sb strings.Builder
+func collectPackEntries(packDir, packName string) []skillIndexEntry {
+	entries, err := os.ReadDir(packDir)
+	if err != nil {
+		slog.Warn("skills.pack.read_failed", "dir", packDir, "error", err)
+		return nil
+	}
+	var out []skillIndexEntry
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || strings.HasPrefix(name, ".") || filepath.Ext(name) != ".md" {
+			continue
+		}
+		skill := strings.TrimSuffix(name, ".md")
+		out = append(out, makeSkillEntry(filepath.Join(packDir, name), packName+"/"+skill))
+	}
+	return out
+}
 
+func makeSkillEntry(path, name string) skillIndexEntry {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		slog.Warn("skills.file.read_failed", "path", path, "error", err)
+		return skillIndexEntry{Name: name, Path: path}
+	}
+	fm, body := splitFrontmatter(string(data))
+	desc := fm["description"]
+	if desc == "" {
+		desc = firstSummaryLine(body)
+	}
+	return skillIndexEntry{Name: name, Path: path, Description: desc}
+}
+
+// splitFrontmatter peels off a leading `---\n...\n---\n` block of `key: value`
+// lines. The SkillPack reconciler is the only producer in production, so the
+// format is intentionally narrow: no comments, no nested structures, optional
+// matching single/double quotes around values.
+func splitFrontmatter(s string) (map[string]string, string) {
+	if !strings.HasPrefix(s, "---\n") {
+		return nil, s
+	}
+	end := strings.Index(s[4:], "\n---\n")
+	if end < 0 {
+		return nil, s
+	}
+	block := s[4 : 4+end]
+	body := s[4+end+len("\n---\n"):]
+
+	fm := map[string]string{}
+	for _, line := range strings.Split(block, "\n") {
+		k, v, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		fm[strings.TrimSpace(k)] = strings.Trim(strings.TrimSpace(v), `"'`)
+	}
+	return fm, body
+}
+
+// firstSummaryLine is a fallback for hand-authored ConfigMaps that don't
+// supply frontmatter: take the legacy `> blockquote` if present, otherwise
+// the first non-heading, non-blank line.
+func firstSummaryLine(body string) string {
+	for _, raw := range strings.Split(body, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "> ") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "> "))
+		}
+		return line
+	}
+	return ""
+}
+
+// buildSystemPrompt assembles the full system prompt. The skill catalog
+// itself is delivered through the `skills` tool description, not inlined
+// here — this section just points the model at the tool.
+func buildSystemPrompt(base string, skills []skillIndexEntry, toolsEnabled bool) string {
+	var sb strings.Builder
 	sb.WriteString(base)
 
-	if skills != "" {
-		sb.WriteString("\n\n## Your Skills\n\n")
-		sb.WriteString("The following skill instructions have been loaded. Follow them when they are relevant to the task:\n\n")
-		sb.WriteString(skills)
+	if len(skills) > 0 {
+		fmt.Fprintf(&sb,
+			"\n\n## Your Skills\n\nYou have %d skill(s) available. Each skill is a self-contained "+
+				"procedure (commands to run, files to read, validation steps) authored by the operator. "+
+				"The full catalog and one-line summaries are exposed through the `skills` tool. "+
+				"When a task matches a skill's domain, call `skills` with the skill name to load the "+
+				"full instructions BEFORE attempting the work — do not improvise from the summary.",
+			len(skills),
+		)
 	}
 
 	if toolsEnabled {

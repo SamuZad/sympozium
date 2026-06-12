@@ -494,18 +494,39 @@ func TestBuildVolumes_SkillsWithRefs(t *testing.T) {
 	run := newTestRun()
 	run.Spec.Skills = []sympoziumv1alpha1.SkillRef{
 		{ConfigMapRef: "my-skills"},
+		{SkillPackRef: "shared-pack"},
 	}
 	vols := r.buildVolumes(run, false, nil, nil)
 
+	var sawSkillsParent, sawCM, sawPack bool
 	for _, v := range vols {
-		if v.Name == "skills" {
-			if v.Projected == nil {
-				t.Fatal("skills volume should be projected when refs exist")
+		switch v.Name {
+		case "skills":
+			sawSkillsParent = true
+			if v.EmptyDir == nil {
+				t.Errorf("skills parent volume should be emptyDir, got %#v", v.VolumeSource)
 			}
-			return
+		case "skill-cm-my-skills":
+			sawCM = true
+			if v.ConfigMap == nil || v.ConfigMap.Name != "my-skills" {
+				t.Errorf("skill-cm-my-skills volume should be a ConfigMap of my-skills, got %#v", v.VolumeSource)
+			}
+		case "skill-cm-shared-pack":
+			sawPack = true
+			if v.ConfigMap == nil || v.ConfigMap.Name != "shared-pack" {
+				t.Errorf("skill-cm-shared-pack volume should be a ConfigMap of shared-pack, got %#v", v.VolumeSource)
+			}
 		}
 	}
-	t.Error("skills volume not found")
+	if !sawSkillsParent {
+		t.Error("missing /skills parent volume")
+	}
+	if !sawCM {
+		t.Error("missing skill-cm-my-skills volume")
+	}
+	if !sawPack {
+		t.Error("missing skill-cm-shared-pack volume")
+	}
 }
 
 func TestBuildVolumes_SkillsEmptyWhenNoRefs(t *testing.T) {

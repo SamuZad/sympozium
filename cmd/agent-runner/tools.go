@@ -27,6 +27,7 @@ const (
 	ToolScheduleTask       = "schedule_task"
 	ToolDelegateToPersona  = "delegate_to_persona"
 	ToolSpawnSubagents     = "spawn_subagents"
+	ToolSkills             = "skills"
 )
 
 // ToolDef describes a tool for LLM function calling.
@@ -316,6 +317,8 @@ func executeToolCall(ctx context.Context, name string, argsJSON string) string {
 		return delegateToPersonaTool(args)
 	case ToolSpawnSubagents:
 		return spawnSubagentsTool(args)
+	case ToolSkills:
+		return skillsTool(args)
 	default:
 		// Check if this is a memory tool from the memory-server sidecar.
 		if isMemoryTool(name) {

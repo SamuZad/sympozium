@@ -186,8 +186,10 @@ func main() {
 		}
 	}
 
-	// Load skill files and build enhanced system prompt.
-	skills := loadSkills(defaultSkillsDir)
+	// Index skill files (don't inline contents — the agent reads them
+	// on demand via the `skills` tool against /skills/<pack>/<name>.md).
+	skills := loadSkillIndex(defaultSkillsDir)
+	registerSkills(skills)
 	systemPrompt = buildSystemPrompt(systemPrompt, skills, toolsEnabled)
 
 	// If this run was triggered from a channel, inject context so the
@@ -230,6 +232,11 @@ func main() {
 	var tools []ToolDef
 	if toolsEnabled {
 		tools = defaultTools()
+		// Expose the `skills` tool only when at least one skill is mounted —
+		// an empty enum would make the tool definition invalid for some providers.
+		if skillsDef, ok := skillsToolDef(skills); ok {
+			tools = append(tools, skillsDef)
+		}
 		// Load MCP tools from manifest if the mcp-bridge sidecar is running
 		if mcpTools := loadMCPTools("/ipc/tools/mcp-tools.json"); len(mcpTools) > 0 {
 			tools = append(tools, mcpTools...)

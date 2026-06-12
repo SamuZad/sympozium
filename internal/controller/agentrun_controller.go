@@ -1882,12 +1882,7 @@ func (r *AgentRunReconciler) buildContainers(
 				{Name: "MODEL_BASE_URL", Value: agentRun.Spec.Model.BaseURL},
 				{Name: "THINKING_MODE", Value: agentRun.Spec.Model.Thinking},
 			},
-			VolumeMounts: []corev1.VolumeMount{
-				{Name: "workspace", MountPath: "/workspace"},
-				{Name: "skills", MountPath: "/skills", ReadOnly: true},
-				{Name: "ipc", MountPath: "/ipc"},
-				{Name: "tmp", MountPath: "/tmp"},
-			},
+			VolumeMounts: agentSkillVolumeMounts(agentRun.Spec.Skills),
 			Resources: corev1.ResourceRequirements{
 				Requests: corev1.ResourceList{
 					corev1.ResourceCPU:    resource.MustParse("250m"),
@@ -2986,46 +2981,22 @@ func (r *AgentRunReconciler) buildVolumes(agentRun *sympoziumv1alpha1.AgentRun, 
 		},
 	}
 
-	// Build skills projected volume from skill references
-	var sources []corev1.VolumeProjection
-	for _, skill := range agentRun.Spec.Skills {
-		if skill.SkillPackRef != "" {
-			sources = append(sources, corev1.VolumeProjection{
-				ConfigMap: &corev1.ConfigMapProjection{
-					LocalObjectReference: corev1.LocalObjectReference{
-						Name: skill.SkillPackRef,
-					},
-					Optional: boolPtr(true),
-				},
-			})
-		}
-		if skill.ConfigMapRef != "" {
-			sources = append(sources, corev1.VolumeProjection{
-				ConfigMap: &corev1.ConfigMapProjection{
-					LocalObjectReference: corev1.LocalObjectReference{
-						Name: skill.ConfigMapRef,
-					},
-					Optional: boolPtr(true),
-				},
-			})
-		}
-	}
-
-	if len(sources) > 0 {
+	// Per-SkillPack ConfigMap volumes mount at /skills/<ref>/. The parent
+	// "skills" EmptyDir guarantees /skills exists even with no skills attached.
+	volumes = append(volumes, corev1.Volume{
+		Name: "skills",
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{},
+		},
+	})
+	for _, ref := range collectSkillRefs(agentRun.Spec.Skills) {
 		volumes = append(volumes, corev1.Volume{
-			Name: "skills",
+			Name: skillVolumeName(ref),
 			VolumeSource: corev1.VolumeSource{
-				Projected: &corev1.ProjectedVolumeSource{
-					Sources: sources,
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: ref},
+					Optional:             boolPtr(true),
 				},
-			},
-		})
-	} else {
-		// Empty skills volume
-		volumes = append(volumes, corev1.Volume{
-			Name: "skills",
-			VolumeSource: corev1.VolumeSource{
-				EmptyDir: &corev1.EmptyDirVolumeSource{},
 			},
 		})
 	}
@@ -3238,6 +3209,51 @@ func hostAccessVolumeName(skillPackName string, index int) string {
 
 // boolPtr returns a pointer to a bool.
 func boolPtr(b bool) *bool { return &b }
+
+func skillVolumeName(ref string) string { return "skill-cm-" + ref }
+
+// collectSkillRefs returns the deduped, first-seen order list of ConfigMap
+// names referenced by an AgentRun's skills.
+func collectSkillRefs(skills []sympoziumv1alpha1.SkillRef) []string {
+	seen := make(map[string]struct{}, len(skills)*2)
+	out := make([]string, 0, len(skills))
+	for _, s := range skills {
+		for _, ref := range [...]string{s.SkillPackRef, s.ConfigMapRef} {
+			if ref == "" {
+				continue
+			}
+			if _, dup := seen[ref]; dup {
+				continue
+			}
+			seen[ref] = struct{}{}
+			out = append(out, ref)
+		}
+	}
+	return out
+}
+
+// agentSkillVolumeMounts nests one read-only ConfigMap mount per SkillPack
+// under /skills/<ref>/ on top of an EmptyDir-backed /skills parent.
+func agentSkillVolumeMounts(skills []sympoziumv1alpha1.SkillRef) []corev1.VolumeMount {
+	refs := collectSkillRefs(skills)
+	mounts := make([]corev1.VolumeMount, 0, 4+len(refs))
+	mounts = append(mounts,
+		corev1.VolumeMount{Name: "workspace", MountPath: "/workspace"},
+		corev1.VolumeMount{Name: "skills", MountPath: "/skills", ReadOnly: true},
+	)
+	for _, ref := range refs {
+		mounts = append(mounts, corev1.VolumeMount{
+			Name:      skillVolumeName(ref),
+			MountPath: "/skills/" + ref,
+			ReadOnly:  true,
+		})
+	}
+	mounts = append(mounts,
+		corev1.VolumeMount{Name: "ipc", MountPath: "/ipc"},
+		corev1.VolumeMount{Name: "tmp", MountPath: "/tmp"},
+	)
+	return mounts
+}
 
 // agentRunHasMemorySkill returns true if the AgentRun references the "memory" SkillPack.
 func agentRunHasMemorySkill(agentRun *sympoziumv1alpha1.AgentRun) bool {

@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
@@ -98,11 +99,7 @@ func (r *SkillPackReconciler) reconcileConfigMap(ctx context.Context, log logr.L
 	data := make(map[string]string)
 	for _, skill := range skillPack.Spec.Skills {
 		key := fmt.Sprintf("%s.md", skill.Name)
-		content := skill.Content
-		if skill.Description != "" {
-			content = fmt.Sprintf("# %s\n\n> %s\n\n%s", skill.Name, skill.Description, content)
-		}
-		data[key] = content
+		data[key] = renderSkillContent(skill.Name, skill.Description, skill.Content)
 	}
 
 	cm := &corev1.ConfigMap{
@@ -144,4 +141,34 @@ func (r *SkillPackReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&sympoziumv1alpha1.SkillPack{}).
 		Owns(&corev1.ConfigMap{}).
 		Complete(r)
+}
+
+// renderSkillContent wraps a skill body in YAML frontmatter so the
+// agent-runner can index `name` and `description` cheaply (kagent-style
+// SKILL.md). If the author already supplied their own frontmatter, the
+// content is left untouched.
+func renderSkillContent(name, description, body string) string {
+	if strings.HasPrefix(body, "---\n") || strings.HasPrefix(body, "---\r\n") {
+		return body
+	}
+	var sb strings.Builder
+	sb.WriteString("---\n")
+	fmt.Fprintf(&sb, "name: %s\n", yamlQuote(name))
+	if description != "" {
+		fmt.Fprintf(&sb, "description: %s\n", yamlQuote(description))
+	}
+	sb.WriteString("---\n\n")
+	sb.WriteString(body)
+	return sb.String()
+}
+
+// yamlQuote returns a double-quoted YAML scalar with newlines flattened
+// and `\`/`"` escaped. Always quoting is safer than a per-character
+// heuristic and the readability cost is negligible for a short header.
+func yamlQuote(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	return `"` + s + `"`
 }
