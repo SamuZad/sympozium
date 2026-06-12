@@ -3,6 +3,7 @@ package eventbus
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -94,14 +95,20 @@ func (n *NATSEventBus) Publish(ctx context.Context, topic string, event *Event) 
 }
 
 // Subscribe returns a channel that receives events for the given topic.
+//
+// The subscription uses an ephemeral JetStream consumer with a long
+// InactiveThreshold so transient NATS disconnects do not cause the
+// server to reap the consumer. If the consumer is nevertheless
+// destroyed (e.g. NATS server restart, or a disconnect that exceeds
+// the threshold), the goroutine detects ErrConsumerNotFound on the
+// next Fetch and recreates the consumer in place. Without this, a
+// brief NATS hiccup would silently and permanently break the
+// subscription — a pure regression of fanout fanned-out delivery to
+// the controller, web proxy, and other subscribers.
 func (n *NATSEventBus) Subscribe(ctx context.Context, topic string) (<-chan *Event, error) {
 	subject := topicToSubject(topic)
 
-	consumer, err := n.stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
-		FilterSubject: subject,
-		AckPolicy:     jetstream.AckExplicitPolicy,
-		DeliverPolicy: jetstream.DeliverNewPolicy,
-	})
+	consumer, err := n.createSubscribeConsumer(ctx, subject)
 	if err != nil {
 		return nil, fmt.Errorf("creating consumer for %s: %w", subject, err)
 	}
@@ -117,8 +124,35 @@ func (n *NATSEventBus) Subscribe(ctx context.Context, topic string) (<-chan *Eve
 				case <-ctx.Done():
 					return
 				default:
+				}
+				if errors.Is(err, jetstream.ErrConsumerNotFound) {
+					// The consumer was reaped on the server (likely
+					// because NATS restarted or our liveness lapsed
+					// past InactiveThreshold). Recreate it so we keep
+					// receiving future messages instead of spinning
+					// silently on the same error forever.
+					recreateCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+					newConsumer, recreateErr := n.createSubscribeConsumer(recreateCtx, subject)
+					cancel()
+					if recreateErr == nil {
+						consumer = newConsumer
+					}
+					// On recreate failure (or transient errors), back off
+					// briefly so we don't tight-loop while NATS recovers.
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(time.Second):
+					}
 					continue
 				}
+				// Transient fetch errors (timeouts, etc.) — back off and retry.
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(time.Second):
+				}
+				continue
 			}
 
 			for msg := range msgs.Messages() {
@@ -143,6 +177,23 @@ func (n *NATSEventBus) Subscribe(ctx context.Context, topic string) (<-chan *Eve
 	}()
 
 	return ch, nil
+}
+
+// createSubscribeConsumer creates the ephemeral JetStream consumer used
+// by Subscribe. Pulled out into a helper so it can be invoked both at
+// initial subscribe time and when the consumer must be recreated after
+// being reaped by the server.
+//
+// InactiveThreshold is set well above the longest disconnect we expect
+// (NATS rolling restart, brief network blip) so the server keeps the
+// consumer alive even if Fetch stops for a few minutes.
+func (n *NATSEventBus) createSubscribeConsumer(ctx context.Context, subject string) (jetstream.Consumer, error) {
+	return n.stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
+		FilterSubject:     subject,
+		AckPolicy:         jetstream.AckExplicitPolicy,
+		DeliverPolicy:     jetstream.DeliverNewPolicy,
+		InactiveThreshold: time.Hour,
+	})
 }
 
 // Close shuts down the NATS connection.

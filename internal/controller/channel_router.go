@@ -51,6 +51,12 @@ func (cr *ChannelRouter) Start(ctx context.Context) error {
 		return fmt.Errorf("subscribing to %s: %w", eventbus.TopicAgentRunCompleted, err)
 	}
 
+	// Subscribe to failed agent runs to notify channels of failures.
+	failedCh, err := cr.EventBus.Subscribe(ctx, eventbus.TopicAgentRunFailed)
+	if err != nil {
+		return fmt.Errorf("subscribing to %s: %w", eventbus.TopicAgentRunFailed, err)
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -62,6 +68,9 @@ func (cr *ChannelRouter) Start(ctx context.Context) error {
 
 		case event := <-completedCh:
 			cr.handleCompleted(ctx, event)
+
+		case event := <-failedCh:
+			cr.handleFailed(ctx, event)
 		}
 	}
 }
@@ -443,6 +452,118 @@ func (cr *ChannelRouter) handleCompleted(ctx context.Context, event *eventbus.Ev
 		"channel", replyChannel,
 		"responseLen", len(responseText),
 	)
+}
+
+// handleFailed processes a failed AgentRun and sends an error notification
+// back through the originating channel so the user knows what happened.
+func (cr *ChannelRouter) handleFailed(ctx context.Context, event *eventbus.Event) {
+	if event.Ctx != nil {
+		ctx = event.Ctx
+	}
+
+	agentRunID := event.Metadata["agentRunID"]
+	instanceName := event.Metadata["instanceName"]
+
+	if agentRunID == "" {
+		return
+	}
+
+	ctx, span := routerTracer.Start(ctx, "channel_router.handle_failed",
+		trace.WithAttributes(
+			attribute.String("sympozium.agentrun.id", agentRunID),
+			attribute.String("sympozium.instance", instanceName),
+		),
+	)
+	defer span.End()
+
+	// Find the AgentRun to check if it originated from a channel.
+	var runs sympoziumv1alpha1.AgentRunList
+	if err := cr.Client.List(ctx, &runs, client.MatchingLabels{
+		"sympozium.ai/source": "channel",
+	}); err != nil {
+		cr.Log.Error(err, "failed to list channel-sourced AgentRuns")
+		return
+	}
+
+	var run *sympoziumv1alpha1.AgentRun
+	for i := range runs.Items {
+		if runs.Items[i].Name == agentRunID {
+			run = &runs.Items[i]
+			break
+		}
+	}
+	if run == nil {
+		for i := range runs.Items {
+			if runs.Items[i].Status.PodName != "" && strings.Contains(agentRunID, runs.Items[i].Name) {
+				run = &runs.Items[i]
+				break
+			}
+		}
+	}
+
+	if run == nil {
+		// Not a channel-sourced run — ignore.
+		return
+	}
+
+	replyChannel := run.Annotations["sympozium.ai/reply-channel"]
+	replyChatID := run.Annotations["sympozium.ai/reply-chat-id"]
+	replyThreadID := run.Annotations["sympozium.ai/reply-thread-id"]
+	replyMessageTS := run.Annotations["sympozium.ai/reply-message-ts"]
+
+	if replyChannel == "" {
+		return
+	}
+
+	// Extract the error reason from the failed event.
+	var failData map[string]string
+	if err := json.Unmarshal(event.Data, &failData); err != nil {
+		cr.Log.Error(err, "failed to unmarshal failure event data")
+		return
+	}
+
+	reason := failData["error"]
+	responseText := buildFailureMessage(reason)
+
+	// Publish outbound message to the channel.
+	outMsg := channelpkg.OutboundMessage{
+		Channel:  replyChannel,
+		ChatID:   replyChatID,
+		ThreadID: replyThreadID,
+		Text:     responseText,
+	}
+	if replyMessageTS != "" {
+		outMsg.Metadata = map[string]string{"replyToTS": replyMessageTS}
+	}
+
+	outEvent, err := eventbus.NewEvent(eventbus.TopicChannelMessageSend, map[string]string{
+		"instanceName": instanceName,
+		"channel":      replyChannel,
+	}, outMsg)
+	if err != nil {
+		cr.Log.Error(err, "failed to create outbound failure event")
+		return
+	}
+
+	if err := cr.EventBus.Publish(ctx, eventbus.TopicChannelMessageSend, outEvent); err != nil {
+		cr.Log.Error(err, "failed to publish channel failure reply",
+			"channel", replyChannel, "chatId", replyChatID)
+		return
+	}
+
+	cr.Log.Info("Routed agent failure to channel",
+		"run", run.Name,
+		"channel", replyChannel,
+		"reason", reason,
+	)
+}
+
+// buildFailureMessage returns a user-friendly message based on the failure reason.
+func buildFailureMessage(reason string) string {
+	if reason == "timeout" {
+		return "⏱ The agent run timed out before completing. You can increase the timeout in the Agent configuration (`spec.agents.default.runTimeout`) or try a simpler question."
+	}
+	return fmt.Sprintf("⚠️ The agent run failed: %s", reason)
 }
 
 func truncateForLog(s string, n int) string {
