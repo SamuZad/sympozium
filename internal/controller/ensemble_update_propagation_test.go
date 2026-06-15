@@ -269,3 +269,50 @@ func TestBuildInstance_ModelTuningPropagated(t *testing.T) {
 		t.Errorf("Temperature = %q, want 0.3", inst.Spec.Agents.Default.Temperature)
 	}
 }
+
+func TestReconcileAgentConfig_PropagatesEnv(t *testing.T) {
+	pack := &sympoziumv1alpha1.Ensemble{
+		ObjectMeta: metav1.ObjectMeta{Name: "pack", Namespace: "ns"},
+		Spec:       sympoziumv1alpha1.EnsembleSpec{Enabled: true},
+	}
+	persona := &sympoziumv1alpha1.AgentConfigSpec{Name: "lead", SystemPrompt: "lead"}
+	r, _ := newEnsembleTestReconciler(t, pack)
+
+	if _, err := r.reconcileAgentConfig(context.Background(), logr.Discard(), pack, persona, 0, ""); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	persona.Env = map[string]string{
+		"MAX_TOOL_ITERATIONS": "200",
+		"CUSTOM_FLAG":         "true",
+	}
+	if _, err := r.reconcileAgentConfig(context.Background(), logr.Discard(), pack, persona, 0, ""); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	got := &sympoziumv1alpha1.Agent{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "pack-lead", Namespace: "ns"}, got); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Spec.Agents.Default.Env["MAX_TOOL_ITERATIONS"] != "200" {
+		t.Errorf("MAX_TOOL_ITERATIONS = %q, want 200", got.Spec.Agents.Default.Env["MAX_TOOL_ITERATIONS"])
+	}
+	if got.Spec.Agents.Default.Env["CUSTOM_FLAG"] != "true" {
+		t.Errorf("CUSTOM_FLAG = %q, want true", got.Spec.Agents.Default.Env["CUSTOM_FLAG"])
+	}
+
+	// Removing keys from the persona should propagate as well.
+	persona.Env = map[string]string{"MAX_TOOL_ITERATIONS": "300"}
+	if _, err := r.reconcileAgentConfig(context.Background(), logr.Discard(), pack, persona, 0, ""); err != nil {
+		t.Fatalf("update 2: %v", err)
+	}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "pack-lead", Namespace: "ns"}, got); err != nil {
+		t.Fatalf("get 2: %v", err)
+	}
+	if _, present := got.Spec.Agents.Default.Env["CUSTOM_FLAG"]; present {
+		t.Errorf("CUSTOM_FLAG should have been removed; env = %v", got.Spec.Agents.Default.Env)
+	}
+	if got.Spec.Agents.Default.Env["MAX_TOOL_ITERATIONS"] != "300" {
+		t.Errorf("MAX_TOOL_ITERATIONS = %q, want 300", got.Spec.Agents.Default.Env["MAX_TOOL_ITERATIONS"])
+	}
+}

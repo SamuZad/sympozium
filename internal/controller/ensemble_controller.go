@@ -11,6 +11,7 @@ import (
 	"github.com/go-logr/logr"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -26,6 +27,16 @@ import (
 )
 
 const ensembleFinalizer = "sympozium.ai/ensemble-finalizer"
+
+// ensembleManagedLabels is the closed set of metadata labels that the
+// Ensemble controller owns on a generated Agent. Every other label
+// (e.g. Argo tracking-id, operator-added selectors) is left alone on
+// updates.
+var ensembleManagedLabels = []string{
+	"sympozium.ai/ensemble",
+	"sympozium.ai/agent-config",
+	"sympozium.ai/provider",
+}
 
 // EnsembleReconciler reconciles Ensemble objects.
 // It stamps out Agents, SympoziumSchedules, and memory
@@ -306,191 +317,35 @@ func (r *EnsembleReconciler) reconcileAgentConfig(
 	} else if err != nil {
 		return ip, fmt.Errorf("get instance %s: %w", instanceName, err)
 	} else {
-		// Update pack-level settings on existing instances — authRefs, model,
-		// and channels are owned by the pack, not per-instance configuration.
+		// The Ensemble fully owns the Agent's Spec — compare the desired
+		// spec (rebuilt fresh from pack + persona) against the live one as
+		// a single unit. This way every AgentConfig/AgentSpec field
+		// propagates automatically when its source field on the Ensemble
+		// changes; new fields require no per-field comparison block.
+		desired := r.buildAgent(pack, persona, instanceName, modelEndpoint)
+
 		needsUpdate := false
 
-		// Propagate provider label.
-		wantProvider := persona.Provider
-		if existingInst.Labels["sympozium.ai/provider"] != wantProvider {
-			if wantProvider != "" {
-				existingInst.Labels["sympozium.ai/provider"] = wantProvider
-			} else {
-				delete(existingInst.Labels, "sympozium.ai/provider")
-			}
-			needsUpdate = true
-		}
-
-		// Propagate authRefs changes.
-		if !authRefsEqual(existingInst.Spec.AuthRefs, pack.Spec.AuthRefs) {
-			existingInst.Spec.AuthRefs = pack.Spec.AuthRefs
-			needsUpdate = true
-		}
-
-		// Propagate model changes from persona definition.
-		if persona.Model != "" && existingInst.Spec.Agents.Default.Model != persona.Model {
-			existingInst.Spec.Agents.Default.Model = persona.Model
-			needsUpdate = true
-		}
-
-		// Propagate baseURL changes (e.g. switching to/from a local provider).
-		// Per-persona baseURL overrides take precedence, then modelRef, then ensemble-level.
-		wantBaseURL := pack.Spec.BaseURL
-		if modelEndpoint != "" {
-			wantBaseURL = modelEndpoint
-		}
-		if persona.BaseURL != "" {
-			wantBaseURL = persona.BaseURL
-		}
-		if existingInst.Spec.Agents.Default.BaseURL != wantBaseURL {
-			existingInst.Spec.Agents.Default.BaseURL = wantBaseURL
-			needsUpdate = true
-		}
-
-		// When using a local model (and no per-persona provider override), clear auth refs.
-		if modelEndpoint != "" && persona.Provider == "" && len(existingInst.Spec.AuthRefs) > 0 {
-			existingInst.Spec.AuthRefs = nil
-			needsUpdate = true
-		}
-
-		// Propagate persona systemPrompt changes so edits to the pack
-		// actually reach the running agents (otherwise a pack author
-		// can't tune agent behaviour without re-stamping instances).
-		if existingInst.Spec.Memory == nil {
-			existingInst.Spec.Memory = &sympoziumv1alpha1.MemorySpec{
-				Enabled:   true,
-				MaxSizeKB: 256,
-			}
-			needsUpdate = true
-		}
-		if existingInst.Spec.Memory.SystemPrompt != persona.SystemPrompt {
-			existingInst.Spec.Memory.SystemPrompt = persona.SystemPrompt
-			needsUpdate = true
-		}
-
-		// Propagate channel list changes from persona definition.
-		wantChannels := make(map[string]bool)
-		for _, ch := range persona.Channels {
-			wantChannels[ch] = true
-		}
-		haveChannels := make(map[string]bool)
-		for _, ch := range existingInst.Spec.Channels {
-			haveChannels[ch.Type] = true
-		}
-		if len(persona.Channels) > 0 && !channelSetsEqual(wantChannels, haveChannels) {
-			var channelSpecs []sympoziumv1alpha1.ChannelSpec
-			for _, ch := range persona.Channels {
-				channelSpecs = append(channelSpecs, sympoziumv1alpha1.ChannelSpec{Type: ch})
-			}
-			existingInst.Spec.Channels = channelSpecs
-			needsUpdate = true
-		}
-
-		// Always reconcile per-channel fields (ConfigRef, AccessControl,
-		// Triggers, Volumes, VolumeMounts) so edits to ensemble/persona
-		// channel configuration propagate without requiring agent recreation.
-		for i := range existingInst.Spec.Channels {
-			ch := &existingInst.Spec.Channels[i]
-			desired := buildChannelSpec(pack, persona, ch.Type)
-			if !reflect.DeepEqual(ch.ConfigRef, desired.ConfigRef) {
-				ch.ConfigRef = desired.ConfigRef
+		// Reconcile only Ensemble-managed labels; preserve everything else
+		// (Argo tracking-ids, operator-added selectors, etc.).
+		for _, k := range ensembleManagedLabels {
+			wantValue, wantSet := desired.Labels[k]
+			haveValue, haveSet := existingInst.Labels[k]
+			switch {
+			case wantSet && (!haveSet || haveValue != wantValue):
+				if existingInst.Labels == nil {
+					existingInst.Labels = map[string]string{}
+				}
+				existingInst.Labels[k] = wantValue
 				needsUpdate = true
-			}
-			if !reflect.DeepEqual(ch.AccessControl, desired.AccessControl) {
-				ch.AccessControl = desired.AccessControl
-				needsUpdate = true
-			}
-			if !reflect.DeepEqual(ch.Triggers, desired.Triggers) {
-				ch.Triggers = desired.Triggers
-				needsUpdate = true
-			}
-			if !reflect.DeepEqual(ch.Slack, desired.Slack) {
-				ch.Slack = desired.Slack
-				needsUpdate = true
-			}
-			if !reflect.DeepEqual(ch.Volumes, desired.Volumes) {
-				ch.Volumes = desired.Volumes
-				needsUpdate = true
-			}
-			if !reflect.DeepEqual(ch.VolumeMounts, desired.VolumeMounts) {
-				ch.VolumeMounts = desired.VolumeMounts
+			case !wantSet && haveSet:
+				delete(existingInst.Labels, k)
 				needsUpdate = true
 			}
 		}
 
-		// Propagate provider headers changes.
-		wantProviderHeaders := mergeProviderHeaders(pack.Spec.ProviderHeaders, persona.ProviderHeaders)
-		if !reflect.DeepEqual(existingInst.Spec.Agents.Default.ProviderHeaders, wantProviderHeaders) {
-			existingInst.Spec.Agents.Default.ProviderHeaders = wantProviderHeaders
-			needsUpdate = true
-		}
-		wantHeadersSecretRef := pack.Spec.ProviderHeadersSecretRef
-		if persona.ProviderHeadersSecretRef != "" {
-			wantHeadersSecretRef = persona.ProviderHeadersSecretRef
-		}
-		if existingInst.Spec.Agents.Default.ProviderHeadersSecretRef != wantHeadersSecretRef {
-			existingInst.Spec.Agents.Default.ProviderHeadersSecretRef = wantHeadersSecretRef
-			needsUpdate = true
-		}
-
-		// Propagate skills changes from persona definition.
-		wantSkills := buildDesiredSkills(pack, persona)
-		if !skillRefsEqual(existingInst.Spec.Skills, wantSkills) {
-			existingInst.Spec.Skills = wantSkills
-			needsUpdate = true
-		}
-
-		// Propagate MCP server changes from persona definition.
-		if !mcpServerRefsEqual(existingInst.Spec.MCPServers, persona.MCPServers) {
-			existingInst.Spec.MCPServers = persona.MCPServers
-			needsUpdate = true
-		}
-
-		// Propagate lifecycle hooks from persona definition.
-		if !reflect.DeepEqual(existingInst.Spec.Agents.Default.Lifecycle, persona.Lifecycle) {
-			existingInst.Spec.Agents.Default.Lifecycle = persona.Lifecycle
-			needsUpdate = true
-		}
-
-		// Propagate subagent configuration from persona definition.
-		if !reflect.DeepEqual(existingInst.Spec.Agents.Default.Subagents, persona.Subagents) {
-			existingInst.Spec.Agents.Default.Subagents = persona.Subagents
-			needsUpdate = true
-		}
-
-		// Propagate model-tuning fields (thinking, max-tokens, temperature).
-		if existingInst.Spec.Agents.Default.Thinking != persona.Thinking {
-			existingInst.Spec.Agents.Default.Thinking = persona.Thinking
-			needsUpdate = true
-		}
-		if !int32PtrEqual(existingInst.Spec.Agents.Default.MaxTokens, persona.MaxTokens) {
-			existingInst.Spec.Agents.Default.MaxTokens = persona.MaxTokens
-			needsUpdate = true
-		}
-		if existingInst.Spec.Agents.Default.Temperature != persona.Temperature {
-			existingInst.Spec.Agents.Default.Temperature = persona.Temperature
-			needsUpdate = true
-		}
-
-		// Propagate ensemble-level AgentSandbox defaults.
-		if !reflect.DeepEqual(existingInst.Spec.Agents.Default.AgentSandbox, pack.Spec.AgentSandbox) {
-			existingInst.Spec.Agents.Default.AgentSandbox = pack.Spec.AgentSandbox
-			needsUpdate = true
-		}
-
-		// Propagate ensemble-level policy reference.
-		if existingInst.Spec.PolicyRef != pack.Spec.PolicyRef {
-			existingInst.Spec.PolicyRef = pack.Spec.PolicyRef
-			needsUpdate = true
-		}
-
-		// Propagate ensemble-level volume bindings (e.g. shared scratch PVC).
-		if !reflect.DeepEqual(existingInst.Spec.Volumes, pack.Spec.Volumes) {
-			existingInst.Spec.Volumes = pack.Spec.Volumes
-			needsUpdate = true
-		}
-		if !reflect.DeepEqual(existingInst.Spec.VolumeMounts, pack.Spec.VolumeMounts) {
-			existingInst.Spec.VolumeMounts = pack.Spec.VolumeMounts
+		if !equality.Semantic.DeepEqual(existingInst.Spec, desired.Spec) {
+			existingInst.Spec = desired.Spec
 			needsUpdate = true
 		}
 
@@ -964,28 +819,6 @@ func (r *EnsembleReconciler) reconcileDelete(
 	return ctrl.Result{}, nil
 }
 
-// authRefsEqual returns true if two SecretRef slices are equivalent.
-func authRefsEqual(a, b []sympoziumv1alpha1.SecretRef) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i].Provider != b[i].Provider || a[i].Secret != b[i].Secret {
-			return false
-		}
-	}
-	return true
-}
-
-// int32PtrEqual returns true when two *int32 values compare equal,
-// treating two nil pointers as equal.
-func int32PtrEqual(a, b *int32) bool {
-	if a == nil || b == nil {
-		return a == b
-	}
-	return *a == *b
-}
-
 // mergeProviderHeaders merges ensemble-level and persona-level provider headers.
 // Persona keys take precedence on collision. Returns nil if both inputs are empty.
 func mergeProviderHeaders(ensembleHeaders, personaHeaders map[string]string) map[string]string {
@@ -1000,19 +833,6 @@ func mergeProviderHeaders(ensembleHeaders, personaHeaders map[string]string) map
 		merged[k] = v
 	}
 	return merged
-}
-
-// channelSetsEqual returns true if two channel sets contain the same types.
-func channelSetsEqual(a, b map[string]bool) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k := range a {
-		if !b[k] {
-			return false
-		}
-	}
-	return true
 }
 
 // buildChannelSpec computes the desired ChannelSpec for a given channel type
@@ -1127,19 +947,6 @@ func skillRefsEqual(a, b []sympoziumv1alpha1.SkillRef) bool {
 			if b[i].Params[k] != v {
 				return false
 			}
-		}
-	}
-	return true
-}
-
-// mcpServerRefsEqual compares two MCPServerRef slices for equality.
-func mcpServerRefsEqual(a, b []sympoziumv1alpha1.MCPServerRef) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if !reflect.DeepEqual(a[i], b[i]) {
-			return false
 		}
 	}
 	return true

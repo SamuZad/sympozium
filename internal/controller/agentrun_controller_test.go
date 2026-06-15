@@ -2213,3 +2213,191 @@ func TestDerivePermeability_NoRelationships(t *testing.T) {
 		t.Errorf("solo = %q, want public (default)", rules[0].DefaultVisibility)
 	}
 }
+
+// TestAgentSkillVolumeMounts_ParentSkillsIsWritable guards against a regression
+// where the parent /skills mount was declared ReadOnly. When per-skill child
+// ConfigMaps mount under /skills/<ref>/, runc must mkdir that path inside the
+// container's rootfs; on a ReadOnlyRootFilesystem agent container, the only
+// way for that mkdir to succeed is if the parent /skills mount is writable.
+// Marking it ReadOnly caused container init to fail with exit 128 (StartError).
+func TestAgentSkillVolumeMounts_ParentSkillsIsWritable(t *testing.T) {
+	skills := []sympoziumv1alpha1.SkillRef{
+		{SkillPackRef: "alpha"},
+		{SkillPackRef: "beta"},
+	}
+	mounts := agentSkillVolumeMounts(skills)
+
+	var parent *corev1.VolumeMount
+	for i := range mounts {
+		if mounts[i].Name == "skills" && mounts[i].MountPath == "/skills" {
+			parent = &mounts[i]
+			break
+		}
+	}
+	if parent == nil {
+		t.Fatal("parent /skills mount not found")
+	}
+	if parent.ReadOnly {
+		t.Errorf("parent /skills mount must be writable so runc can mkdir per-skill child mountpoints under a ReadOnlyRootFilesystem agent container; got ReadOnly=true")
+	}
+
+	// And every per-skill child mount must still be ReadOnly.
+	for _, m := range mounts {
+		if !strings.HasPrefix(m.MountPath, "/skills/") {
+			continue
+		}
+		if !m.ReadOnly {
+			t.Errorf("per-skill mount %q at %q must be ReadOnly", m.Name, m.MountPath)
+		}
+	}
+}
+
+// ── Sidecar-failure detection tests ─────────────────────────────────────────
+
+// newSidecarFailureTestReconciler builds a reconciler whose fake client is
+// preloaded with a pod whose ContainerStatuses we can shape per-test.
+func newSidecarFailureTestReconciler(t *testing.T, pod *corev1.Pod) (*AgentRunReconciler, *sympoziumv1alpha1.AgentRun) {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add corev1 scheme: %v", err)
+	}
+	if err := sympoziumv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add sympozium scheme: %v", err)
+	}
+	run := newTestRun()
+	run.Status.PodName = pod.Name
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
+	return &AgentRunReconciler{Client: cl, Scheme: scheme}, run
+}
+
+func podWithContainerStatuses(name, ns string, statuses ...corev1.ContainerStatus) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Status:     corev1.PodStatus{ContainerStatuses: statuses},
+	}
+}
+
+func TestCheckSidecarFailures_AllHealthy(t *testing.T) {
+	pod := podWithContainerStatuses("test-run-pod", "default",
+		corev1.ContainerStatus{Name: "agent", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+		corev1.ContainerStatus{Name: "skill-foo", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+		corev1.ContainerStatus{Name: "ipc-bridge", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+	)
+	r, run := newSidecarFailureTestReconciler(t, pod)
+	if sf := r.checkSidecarFailures(context.Background(), run); sf != nil {
+		t.Fatalf("expected nil for all-healthy pod, got %+v", sf)
+	}
+}
+
+func TestCheckSidecarFailures_IgnoresAgentContainer(t *testing.T) {
+	// Agent container terminated with non-zero exit must NOT be reported by
+	// checkSidecarFailures — that's checkAgentContainer's job.
+	pod := podWithContainerStatuses("test-run-pod", "default",
+		corev1.ContainerStatus{Name: "agent", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+			ExitCode: 137, Reason: "OOMKilled",
+		}}},
+	)
+	r, run := newSidecarFailureTestReconciler(t, pod)
+	if sf := r.checkSidecarFailures(context.Background(), run); sf != nil {
+		t.Fatalf("agent container should be ignored, got %+v", sf)
+	}
+}
+
+func TestCheckSidecarFailures_IgnoresCleanSidecarExit(t *testing.T) {
+	pod := podWithContainerStatuses("test-run-pod", "default",
+		corev1.ContainerStatus{Name: "agent", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+		corev1.ContainerStatus{Name: "init-helper", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+			ExitCode: 0, Reason: "Completed",
+		}}},
+	)
+	r, run := newSidecarFailureTestReconciler(t, pod)
+	if sf := r.checkSidecarFailures(context.Background(), run); sf != nil {
+		t.Fatalf("cleanly-exited sidecar should be ignored, got %+v", sf)
+	}
+}
+
+func TestCheckSidecarFailures_OOMKilled(t *testing.T) {
+	pod := podWithContainerStatuses("test-run-pod", "default",
+		corev1.ContainerStatus{Name: "agent", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+		corev1.ContainerStatus{Name: "skill-github-gitops", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+			ExitCode: 137, Reason: "OOMKilled",
+		}}},
+	)
+	r, run := newSidecarFailureTestReconciler(t, pod)
+	sf := r.checkSidecarFailures(context.Background(), run)
+	if sf == nil {
+		t.Fatal("expected sidecar failure to be detected")
+	}
+	if sf.container != "skill-github-gitops" {
+		t.Errorf("container = %q, want %q", sf.container, "skill-github-gitops")
+	}
+	if sf.reason != "OOMKilled" {
+		t.Errorf("reason = %q, want OOMKilled", sf.reason)
+	}
+	if !strings.Contains(sf.message, "ran out of memory") {
+		t.Errorf("message should mention OOM, got: %s", sf.message)
+	}
+}
+
+func TestCheckSidecarFailures_ImagePullBackOff(t *testing.T) {
+	pod := podWithContainerStatuses("test-run-pod", "default",
+		corev1.ContainerStatus{Name: "agent", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+		corev1.ContainerStatus{Name: "skill-broken", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+			Reason: "ImagePullBackOff",
+		}}},
+	)
+	r, run := newSidecarFailureTestReconciler(t, pod)
+	sf := r.checkSidecarFailures(context.Background(), run)
+	if sf == nil {
+		t.Fatal("expected sidecar failure to be detected")
+	}
+	if sf.reason != "ImagePullBackOff" {
+		t.Errorf("reason = %q, want ImagePullBackOff", sf.reason)
+	}
+	if !strings.Contains(sf.message, "could not pull its image") {
+		t.Errorf("message should mention image pull, got: %s", sf.message)
+	}
+}
+
+func TestCheckSidecarFailures_IgnoresTransientWaiting(t *testing.T) {
+	// ContainerCreating / PodInitializing are normal and must not abort.
+	pod := podWithContainerStatuses("test-run-pod", "default",
+		corev1.ContainerStatus{Name: "agent", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+		corev1.ContainerStatus{Name: "skill-foo", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+			Reason: "ContainerCreating",
+		}}},
+	)
+	r, run := newSidecarFailureTestReconciler(t, pod)
+	if sf := r.checkSidecarFailures(context.Background(), run); sf != nil {
+		t.Fatalf("ContainerCreating should not be fatal, got %+v", sf)
+	}
+}
+
+func TestBuildSidecarFailureMessage_Variants(t *testing.T) {
+	tests := []struct {
+		name      string
+		container string
+		exitCode  int32
+		reason    string
+		wantPart  string
+	}{
+		{"oom", "skill-x", 137, "OOMKilled", "ran out of memory"},
+		{"image-pull", "skill-x", 0, "ImagePullBackOff", "could not pull its image"},
+		{"invalid-image", "skill-x", 0, "InvalidImageName", "could not pull its image"},
+		{"create-config", "skill-x", 0, "CreateContainerConfigError", "failed to start"},
+		{"unknown-reason", "skill-x", 2, "Error", "terminated unexpectedly: exit code 2"},
+		{"no-reason", "skill-x", 1, "", "terminated unexpectedly with exit code 1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := buildSidecarFailureMessage(tt.container, tt.exitCode, tt.reason)
+			if !strings.Contains(got, tt.wantPart) {
+				t.Errorf("message %q should contain %q", got, tt.wantPart)
+			}
+			if !strings.Contains(got, tt.container) {
+				t.Errorf("message %q should mention container %q", got, tt.container)
+			}
+		})
+	}
+}

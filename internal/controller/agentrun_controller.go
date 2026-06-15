@@ -722,6 +722,25 @@ func (r *AgentRunReconciler) reconcileRunning(ctx context.Context, log logr.Logg
 			}
 			return ctrl.Result{}, r.failRun(ctx, agentRun, errMsg)
 		}
+
+		// Agent is still running — but a sidecar may have crashed and is
+		// silently breaking the agent's tool calls. Detect that early so we
+		// don't wait the full RunTimeout before surfacing a generic "timeout"
+		// to the channel.
+		if sf := r.checkSidecarFailures(ctx, agentRun); sf != nil {
+			log.Info("Sidecar container failed; aborting AgentRun",
+				"container", sf.container,
+				"reason", sf.reason,
+				"exitCode", sf.exitCode,
+			)
+			r.extractAndPersistMemory(ctx, log, agentRun)
+			r.persistFailureMemory(ctx, log, agentRun, sf.message)
+			_ = r.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground))
+			if hasPostRunHooks {
+				return r.startPostRun(ctx, log, agentRun, 1, sf.message, nil)
+			}
+			return ctrl.Result{}, r.failRun(ctx, agentRun, sf.message)
+		}
 	}
 
 	// Check timeout (explicit spec timeout or hard default for scheduled runs).
@@ -771,6 +790,81 @@ func (r *AgentRunReconciler) checkAgentContainer(ctx context.Context, log logr.L
 		return false, 0, "", hasSidecars
 	}
 	return false, 0, "", hasSidecars
+}
+
+// sidecarFailure describes a fatal failure detected on a non-agent container
+// in the agent pod. The Job pod uses RestartPolicyNever, so any non-agent
+// container that has Terminated with a non-zero exit code (or is stuck in a
+// non-recoverable Waiting state like ImagePullBackOff) will never recover and
+// is silently breaking the agent's tool calls.
+type sidecarFailure struct {
+	container string
+	exitCode  int32
+	reason    string // OOMKilled, Error, ImagePullBackOff, etc.
+	message   string // human-readable, suitable for channel reply
+}
+
+// fatalWaitingReasons is the set of pod-container Waiting reasons that will
+// never resolve on their own with RestartPolicyNever and should immediately
+// fail the AgentRun.
+var fatalWaitingReasons = map[string]bool{
+	"ImagePullBackOff":          true,
+	"ErrImagePull":              true,
+	"InvalidImageName":          true,
+	"CreateContainerConfigError": true,
+	"CreateContainerError":      true,
+}
+
+// checkSidecarFailures inspects all non-"agent" containers in the agent pod
+// and returns the first one in a fatal state. Returns nil if every sidecar is
+// healthy, still starting cleanly, or the pod can't be fetched.
+func (r *AgentRunReconciler) checkSidecarFailures(ctx context.Context, agentRun *sympoziumv1alpha1.AgentRun) *sidecarFailure {
+	pod := &corev1.Pod{}
+	if err := r.Get(ctx, client.ObjectKey{
+		Namespace: agentRun.Namespace,
+		Name:      agentRun.Status.PodName,
+	}, pod); err != nil {
+		return nil
+	}
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name == "agent" {
+			continue
+		}
+		if cs.State.Terminated != nil && cs.State.Terminated.ExitCode != 0 {
+			return &sidecarFailure{
+				container: cs.Name,
+				exitCode:  cs.State.Terminated.ExitCode,
+				reason:    cs.State.Terminated.Reason,
+				message:   buildSidecarFailureMessage(cs.Name, cs.State.Terminated.ExitCode, cs.State.Terminated.Reason),
+			}
+		}
+		if cs.State.Waiting != nil && fatalWaitingReasons[cs.State.Waiting.Reason] {
+			return &sidecarFailure{
+				container: cs.Name,
+				reason:    cs.State.Waiting.Reason,
+				message:   buildSidecarFailureMessage(cs.Name, 0, cs.State.Waiting.Reason),
+			}
+		}
+	}
+	return nil
+}
+
+// buildSidecarFailureMessage turns a container name + exit code + Kubernetes
+// reason into a single-line, user-facing explanation suitable for channel
+// replies and AgentRun.Status.Error.
+func buildSidecarFailureMessage(container string, exitCode int32, reason string) string {
+	switch reason {
+	case "OOMKilled":
+		return fmt.Sprintf("skill sidecar %q ran out of memory (OOMKilled). Increase its resources.memory in the SkillPack.", container)
+	case "ImagePullBackOff", "ErrImagePull", "InvalidImageName":
+		return fmt.Sprintf("skill sidecar %q could not pull its image (%s). Check the image reference and imagePullSecrets.", container, reason)
+	case "CreateContainerConfigError", "CreateContainerError":
+		return fmt.Sprintf("skill sidecar %q failed to start (%s). Check the SkillPack sidecar spec and any referenced secrets/configmaps.", container, reason)
+	}
+	if reason != "" {
+		return fmt.Sprintf("skill sidecar %q terminated unexpectedly: exit code %d (%s)", container, exitCode, reason)
+	}
+	return fmt.Sprintf("skill sidecar %q terminated unexpectedly with exit code %d", container, exitCode)
 }
 
 // reconcileCompleted handles cleanup of completed AgentRuns.
@@ -3240,9 +3334,12 @@ func collectSkillRefs(skills []sympoziumv1alpha1.SkillRef) []string {
 func agentSkillVolumeMounts(skills []sympoziumv1alpha1.SkillRef) []corev1.VolumeMount {
 	refs := collectSkillRefs(skills)
 	mounts := make([]corev1.VolumeMount, 0, 4+len(refs))
+	// The parent /skills mount must stay writable so runc can mkdir the
+	// per-skill child mountpoints below; the child ConfigMap mounts are
+	// themselves ReadOnly, which is what protects the skill content.
 	mounts = append(mounts,
 		corev1.VolumeMount{Name: "workspace", MountPath: "/workspace"},
-		corev1.VolumeMount{Name: "skills", MountPath: "/skills", ReadOnly: true},
+		corev1.VolumeMount{Name: "skills", MountPath: "/skills"},
 	)
 	for _, ref := range refs {
 		mounts = append(mounts, corev1.VolumeMount{
