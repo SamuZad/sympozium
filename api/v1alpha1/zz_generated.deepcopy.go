@@ -74,6 +74,13 @@ func (in *AgentConfig) DeepCopyInto(out *AgentConfig) {
 			(*out)[key] = val
 		}
 	}
+	if in.Tolerations != nil {
+		in, out := &in.Tolerations, &out.Tolerations
+		*out = make([]v1.Toleration, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
 	if in.Lifecycle != nil {
 		in, out := &in.Lifecycle, &out.Lifecycle
 		*out = new(LifecycleHooks)
@@ -197,6 +204,13 @@ func (in *AgentConfigSpec) DeepCopyInto(out *AgentConfigSpec) {
 		in, out := &in.Lifecycle, &out.Lifecycle
 		*out = new(LifecycleHooks)
 		(*in).DeepCopyInto(*out)
+	}
+	if in.Tolerations != nil {
+		in, out := &in.Tolerations, &out.Tolerations
+		*out = make([]v1.Toleration, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
 	}
 	if in.ChannelAccessControl != nil {
 		in, out := &in.ChannelAccessControl, &out.ChannelAccessControl
@@ -474,6 +488,13 @@ func (in *AgentRunSpec) DeepCopyInto(out *AgentRunSpec) {
 		in, out := &in.Lifecycle, &out.Lifecycle
 		*out = new(LifecycleHooks)
 		(*in).DeepCopyInto(*out)
+	}
+	if in.Tolerations != nil {
+		in, out := &in.Tolerations, &out.Tolerations
+		*out = make([]v1.Toleration, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
 	}
 	if in.Volumes != nil {
 		in, out := &in.Volumes, &out.Volumes

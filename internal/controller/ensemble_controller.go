@@ -492,6 +492,7 @@ func (r *EnsembleReconciler) buildAgent(
 					ProviderHeadersSecretRef: providerHeadersSecretRef,
 					AgentSandbox:             pack.Spec.AgentSandbox,
 					Lifecycle:                persona.Lifecycle,
+					Tolerations:              persona.Tolerations,
 					Subagents:                persona.Subagents,
 					Env:                      persona.Env,
 					Thinking:                 persona.Thinking,
@@ -1282,6 +1283,7 @@ func (r *EnsembleReconciler) deliverStimulus(ctx context.Context, log logr.Logge
 			ImagePullSecrets: targetInst.Spec.ImagePullSecrets,
 			Volumes:          targetInst.Spec.Volumes,
 			VolumeMounts:     targetInst.Spec.VolumeMounts,
+			Tolerations:      targetInst.Spec.Agents.Default.Tolerations,
 			Env:              targetInst.Spec.Agents.Default.Env,
 		},
 	}
