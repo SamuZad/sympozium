@@ -316,3 +316,44 @@ func TestReconcileAgentConfig_PropagatesEnv(t *testing.T) {
 		t.Errorf("MAX_TOOL_ITERATIONS = %q, want 300", got.Spec.Agents.Default.Env["MAX_TOOL_ITERATIONS"])
 	}
 }
+
+func TestReconcileAgentConfig_PropagatesTolerations(t *testing.T) {
+	pack := &sympoziumv1alpha1.Ensemble{
+		ObjectMeta: metav1.ObjectMeta{Name: "pack", Namespace: "ns"},
+		Spec:       sympoziumv1alpha1.EnsembleSpec{Enabled: true},
+	}
+	persona := &sympoziumv1alpha1.AgentConfigSpec{Name: "lead", SystemPrompt: "lead"}
+	r, _ := newEnsembleTestReconciler(t, pack)
+
+	if _, err := r.reconcileAgentConfig(context.Background(), logr.Discard(), pack, persona, 0, ""); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	persona.Tolerations = []corev1.Toleration{
+		{Key: "nvidia.com/gpu", Operator: corev1.TolerationOpEqual, Value: "present", Effect: corev1.TaintEffectNoSchedule},
+		{Key: "dedicated", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute},
+	}
+	if _, err := r.reconcileAgentConfig(context.Background(), logr.Discard(), pack, persona, 0, ""); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	got := &sympoziumv1alpha1.Agent{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "pack-lead", Namespace: "ns"}, got); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if !reflect.DeepEqual(got.Spec.Agents.Default.Tolerations, persona.Tolerations) {
+		t.Errorf("Tolerations = %+v, want %+v", got.Spec.Agents.Default.Tolerations, persona.Tolerations)
+	}
+
+	// Removing tolerations should propagate as well.
+	persona.Tolerations = nil
+	if _, err := r.reconcileAgentConfig(context.Background(), logr.Discard(), pack, persona, 0, ""); err != nil {
+		t.Fatalf("update 2: %v", err)
+	}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "pack-lead", Namespace: "ns"}, got); err != nil {
+		t.Fatalf("get 2: %v", err)
+	}
+	if len(got.Spec.Agents.Default.Tolerations) != 0 {
+		t.Errorf("Tolerations should have been cleared; got %+v", got.Spec.Agents.Default.Tolerations)
+	}
+}
