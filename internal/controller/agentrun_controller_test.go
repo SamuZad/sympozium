@@ -109,8 +109,8 @@ func TestBuildJob_ServiceAccount(t *testing.T) {
 	r := &AgentRunReconciler{}
 	job := r.buildJob(newTestRun(), false, nil, nil, nil)
 
-	if job.Spec.Template.Spec.ServiceAccountName != "sympozium-agent" {
-		t.Errorf("SA = %q, want sympozium-agent", job.Spec.Template.Spec.ServiceAccountName)
+	if job.Spec.Template.Spec.ServiceAccountName != "my-instance-agent" {
+		t.Errorf("SA = %q, want my-instance-agent", job.Spec.Template.Spec.ServiceAccountName)
 	}
 }
 
@@ -641,68 +641,6 @@ func TestBuildVolumes_SkillsEmptyWhenNoRefs(t *testing.T) {
 		}
 	}
 	t.Error("skills volume not found")
-}
-
-func TestBuildVolumes_MemoryEnabled(t *testing.T) {
-	r := &AgentRunReconciler{}
-	run := newTestRun()
-	vols := r.buildVolumes(run, true, nil, nil)
-
-	for _, v := range vols {
-		if v.Name == "memory" {
-			if v.ConfigMap == nil {
-				t.Fatal("memory volume should be a ConfigMap volume")
-			}
-			expected := run.Spec.AgentRef + "-memory"
-			if v.ConfigMap.Name != expected {
-				t.Errorf("memory ConfigMap name = %q, want %q", v.ConfigMap.Name, expected)
-			}
-			return
-		}
-	}
-	t.Error("memory volume not found when memoryEnabled=true")
-}
-
-func TestBuildVolumes_MemoryDisabled(t *testing.T) {
-	r := &AgentRunReconciler{}
-	run := newTestRun()
-	vols := r.buildVolumes(run, false, nil, nil)
-
-	for _, v := range vols {
-		if v.Name == "memory" {
-			t.Error("memory volume should not exist when memoryEnabled=false")
-			return
-		}
-	}
-}
-
-func TestBuildContainers_MemoryMount(t *testing.T) {
-	r := &AgentRunReconciler{}
-	run := newTestRun()
-	cs, _ := r.buildContainers(run, true, nil, nil, nil)
-
-	agent := cs[0]
-	var hasMount bool
-	for _, vm := range agent.VolumeMounts {
-		if vm.Name == "memory" && vm.MountPath == "/memory" {
-			hasMount = true
-			break
-		}
-	}
-	if !hasMount {
-		t.Error("agent container should have /memory volume mount when memoryEnabled=true")
-	}
-
-	var hasEnv bool
-	for _, e := range agent.Env {
-		if e.Name == "MEMORY_ENABLED" && e.Value == "true" {
-			hasEnv = true
-			break
-		}
-	}
-	if !hasEnv {
-		t.Error("agent container should have MEMORY_ENABLED=true env when memoryEnabled=true")
-	}
 }
 
 // ── Skill sidecar injection tests ────────────────────────────────────────────
@@ -1298,33 +1236,6 @@ func TestBuildContainers_PreRunForwardsSpecEnv(t *testing.T) {
 	}
 }
 
-func TestBuildContainers_PreRunAppearsAfterSystemInits(t *testing.T) {
-	r := &AgentRunReconciler{}
-	run := newTestRunWithLifecycle(
-		[]sympoziumv1alpha1.LifecycleHookContainer{
-			{Name: "my-hook", Image: "busybox:1.36", Command: []string{"true"}},
-		},
-		nil, nil,
-	)
-	// Add memory skill so wait-for-memory init container is present.
-	run.Spec.Skills = []sympoziumv1alpha1.SkillRef{{SkillPackRef: "memory"}}
-
-	_, initContainers := r.buildContainers(run, true, nil, nil, nil)
-
-	if len(initContainers) < 2 {
-		t.Fatalf("expected at least 2 init containers (wait-for-memory + pre-my-hook), got %d", len(initContainers))
-	}
-
-	// The preRun hook must come AFTER system init containers.
-	lastIdx := len(initContainers) - 1
-	if initContainers[lastIdx].Name != "pre-my-hook" {
-		t.Errorf("preRun hook should be last init container, got %q at position %d", initContainers[lastIdx].Name, lastIdx)
-	}
-	if initContainers[0].Name != "wait-for-memory" {
-		t.Errorf("first init container should be wait-for-memory, got %q", initContainers[0].Name)
-	}
-}
-
 func TestBuildContainers_NoLifecycleNoExtraInits(t *testing.T) {
 	r := &AgentRunReconciler{}
 	run := newTestRun()
@@ -1593,8 +1504,8 @@ func TestBuildPostRunJob_ServiceAccount(t *testing.T) {
 
 	job := r.buildPostRunJob(run, 0, "done")
 
-	if job.Spec.Template.Spec.ServiceAccountName != "sympozium-agent" {
-		t.Errorf("postRun Job ServiceAccountName = %q, want sympozium-agent", job.Spec.Template.Spec.ServiceAccountName)
+	if job.Spec.Template.Spec.ServiceAccountName != "my-instance-agent" {
+		t.Errorf("postRun Job ServiceAccountName = %q, want my-instance-agent", job.Spec.Template.Spec.ServiceAccountName)
 	}
 }
 
@@ -1840,180 +1751,6 @@ func TestBuildVolumes_WorkspacePVCWithSandboxEnabled(t *testing.T) {
 	}
 }
 
-// ── Membrane helper tests ───────────────────────────────────────────────────
-
-func TestResolveTrustPeers_FromGroups(t *testing.T) {
-	groups := []sympoziumv1alpha1.TrustGroup{
-		{Name: "research", AgentConfigs: []string{"researcher", "writer", "editor"}},
-	}
-	peers := resolveTrustPeers("researcher", groups, nil)
-	if len(peers) != 2 {
-		t.Fatalf("expected 2 peers, got %d: %v", len(peers), peers)
-	}
-	// Should be sorted.
-	if peers[0] != "editor" || peers[1] != "writer" {
-		t.Errorf("peers = %v, want [editor writer]", peers)
-	}
-}
-
-func TestResolveTrustPeers_FromRelationships(t *testing.T) {
-	rels := []sympoziumv1alpha1.AgentConfigRelationship{
-		{Source: "planner", Target: "executor", Type: "delegation"},
-		{Source: "monitor", Target: "planner", Type: "supervision"},
-		{Source: "planner", Target: "logger", Type: "sequential"},
-	}
-	peers := resolveTrustPeers("planner", nil, rels)
-	// delegation to executor + supervision from monitor = 2 peers
-	// sequential to logger should NOT imply trust
-	if len(peers) != 2 {
-		t.Fatalf("expected 2 peers, got %d: %v", len(peers), peers)
-	}
-	peerMap := map[string]bool{}
-	for _, p := range peers {
-		peerMap[p] = true
-	}
-	if !peerMap["executor"] || !peerMap["monitor"] {
-		t.Errorf("peers = %v, want executor and monitor", peers)
-	}
-}
-
-func TestResolveTrustPeers_NoMembrane(t *testing.T) {
-	peers := resolveTrustPeers("agent-a", nil, nil)
-	if len(peers) != 0 {
-		t.Errorf("expected no peers, got %v", peers)
-	}
-}
-
-func TestResolveTrustPeers_Combined(t *testing.T) {
-	groups := []sympoziumv1alpha1.TrustGroup{
-		{Name: "team", AgentConfigs: []string{"a", "b"}},
-	}
-	rels := []sympoziumv1alpha1.AgentConfigRelationship{
-		{Source: "a", Target: "c", Type: "delegation"},
-	}
-	peers := resolveTrustPeers("a", groups, rels)
-	if len(peers) != 2 {
-		t.Fatalf("expected 2 peers (b from group, c from rel), got %d: %v", len(peers), peers)
-	}
-}
-
-func TestResolveMembraneEnvVars(t *testing.T) {
-	membrane := &sympoziumv1alpha1.MembraneSpec{
-		DefaultVisibility: "public",
-		Permeability: []sympoziumv1alpha1.PermeabilityRule{
-			{
-				AgentConfig:       "writer",
-				DefaultVisibility: "trusted",
-				AcceptTags:        []string{"research", "data"},
-			},
-		},
-		TrustGroups: []sympoziumv1alpha1.TrustGroup{
-			{Name: "team", AgentConfigs: []string{"writer", "editor"}},
-		},
-		TimeDecay: &sympoziumv1alpha1.TimeDecaySpec{
-			TTL: "168h",
-		},
-	}
-	rels := []sympoziumv1alpha1.AgentConfigRelationship{
-		{Source: "writer", Target: "reviewer", Type: "delegation"},
-	}
-
-	envs := resolveMembraneEnvVars("writer", membrane, rels)
-	envMap := map[string]string{}
-	for _, e := range envs {
-		envMap[e.Name] = e.Value
-	}
-
-	if envMap["WORKFLOW_MEMBRANE_VISIBILITY"] != "trusted" {
-		t.Errorf("visibility = %q, want trusted", envMap["WORKFLOW_MEMBRANE_VISIBILITY"])
-	}
-	if envMap["WORKFLOW_MEMBRANE_MAX_AGE"] != "168h" {
-		t.Errorf("max_age = %q, want 168h", envMap["WORKFLOW_MEMBRANE_MAX_AGE"])
-	}
-	if envMap["WORKFLOW_MEMBRANE_ACCEPT_TAGS"] != "research,data" {
-		t.Errorf("accept_tags = %q, want research,data", envMap["WORKFLOW_MEMBRANE_ACCEPT_TAGS"])
-	}
-	// Trust peers: editor (from group) + reviewer (from delegation)
-	peers := envMap["WORKFLOW_MEMBRANE_TRUST_PEERS"]
-	if !strings.Contains(peers, "editor") || !strings.Contains(peers, "reviewer") {
-		t.Errorf("trust_peers = %q, want editor and reviewer", peers)
-	}
-	// No expose tags configured for this rule → should be empty.
-	if envMap["WORKFLOW_MEMBRANE_EXPOSE_TAGS"] != "" {
-		t.Errorf("expose_tags = %q, want empty", envMap["WORKFLOW_MEMBRANE_EXPOSE_TAGS"])
-	}
-}
-
-func TestResolveMembraneEnvVars_ExposeTags(t *testing.T) {
-	membrane := &sympoziumv1alpha1.MembraneSpec{
-		DefaultVisibility: "public",
-		Permeability: []sympoziumv1alpha1.PermeabilityRule{
-			{
-				AgentConfig: "researcher",
-				ExposeTags:  []string{"findings", "summary"},
-				AcceptTags:  []string{"tasks"},
-			},
-		},
-	}
-
-	envs := resolveMembraneEnvVars("researcher", membrane, nil)
-	envMap := map[string]string{}
-	for _, e := range envs {
-		envMap[e.Name] = e.Value
-	}
-
-	if envMap["WORKFLOW_MEMBRANE_EXPOSE_TAGS"] != "findings,summary" {
-		t.Errorf("expose_tags = %q, want findings,summary", envMap["WORKFLOW_MEMBRANE_EXPOSE_TAGS"])
-	}
-}
-
-func TestResolveMembraneEnvVars_MaxTokensPerRun(t *testing.T) {
-	membrane := &sympoziumv1alpha1.MembraneSpec{
-		DefaultVisibility: "public",
-		TokenBudget: &sympoziumv1alpha1.TokenBudgetSpec{
-			MaxTokens:       100000,
-			MaxTokensPerRun: 50000,
-			Action:          "warn",
-		},
-	}
-
-	envs := resolveMembraneEnvVars("agent-a", membrane, nil)
-	envMap := map[string]string{}
-	for _, e := range envs {
-		envMap[e.Name] = e.Value
-	}
-
-	if envMap["WORKFLOW_MEMBRANE_MAX_TOKENS_PER_RUN"] != "50000" {
-		t.Errorf("max_tokens_per_run = %q, want 50000", envMap["WORKFLOW_MEMBRANE_MAX_TOKENS_PER_RUN"])
-	}
-	if envMap["WORKFLOW_MEMBRANE_TOKEN_BUDGET_ACTION"] != "warn" {
-		t.Errorf("token_budget_action = %q, want warn", envMap["WORKFLOW_MEMBRANE_TOKEN_BUDGET_ACTION"])
-	}
-}
-
-func TestResolveMembraneEnvVars_NoTokenBudget(t *testing.T) {
-	membrane := &sympoziumv1alpha1.MembraneSpec{
-		DefaultVisibility: "public",
-	}
-
-	envs := resolveMembraneEnvVars("agent-a", membrane, nil)
-	envMap := map[string]string{}
-	for _, e := range envs {
-		envMap[e.Name] = e.Value
-	}
-
-	if _, ok := envMap["WORKFLOW_MEMBRANE_MAX_TOKENS_PER_RUN"]; ok {
-		t.Error("expected no WORKFLOW_MEMBRANE_MAX_TOKENS_PER_RUN when budget is nil")
-	}
-}
-
-func TestResolveMembraneEnvVars_Nil(t *testing.T) {
-	envs := resolveMembraneEnvVars("test", nil, nil)
-	if len(envs) != 0 {
-		t.Errorf("expected no envs for nil membrane, got %d", len(envs))
-	}
-}
-
 // ── Token budget tests ──────────────────────────────────────────────────────
 
 func newMembraneTestReconciler(t *testing.T, objs ...client.Object) *AgentRunReconciler {
@@ -2173,79 +1910,6 @@ func TestUpdateTokenBudget(t *testing.T) {
 	}
 	if updated.Status.TokenBudgetUsed != 1500 {
 		t.Errorf("tokenBudgetUsed = %d, want 1500", updated.Status.TokenBudgetUsed)
-	}
-}
-
-// ── Auto-derive permeability tests ──────────────────────────────────────────
-
-func TestDerivePermeability_DelegationWorkflow(t *testing.T) {
-	configs := []sympoziumv1alpha1.AgentConfigSpec{
-		{Name: "researcher"},
-		{Name: "writer"},
-		{Name: "reviewer"},
-	}
-	rels := []sympoziumv1alpha1.AgentConfigRelationship{
-		{Source: "researcher", Target: "writer", Type: "delegation"},
-		{Source: "writer", Target: "reviewer", Type: "sequential"},
-	}
-
-	rules := derivePermeability(configs, rels, "public")
-	ruleMap := map[string]string{}
-	for _, r := range rules {
-		ruleMap[r.AgentConfig] = r.DefaultVisibility
-	}
-
-	// researcher is delegation source → trusted
-	if ruleMap["researcher"] != "trusted" {
-		t.Errorf("researcher = %q, want trusted", ruleMap["researcher"])
-	}
-	// writer is source of sequential → public (default, since sequential doesn't set trusted)
-	// but writer is also a source (of the sequential edge), so not terminal
-	if ruleMap["writer"] != "public" {
-		t.Errorf("writer = %q, want public", ruleMap["writer"])
-	}
-	// reviewer is terminal (only target, never source) → private
-	if ruleMap["reviewer"] != "private" {
-		t.Errorf("reviewer = %q, want private", ruleMap["reviewer"])
-	}
-}
-
-func TestDerivePermeability_SupervisionMakesPublic(t *testing.T) {
-	configs := []sympoziumv1alpha1.AgentConfigSpec{
-		{Name: "lead"},
-		{Name: "worker"},
-	}
-	rels := []sympoziumv1alpha1.AgentConfigRelationship{
-		{Source: "lead", Target: "worker", Type: "supervision"},
-	}
-
-	rules := derivePermeability(configs, rels, "trusted")
-	ruleMap := map[string]string{}
-	for _, r := range rules {
-		ruleMap[r.AgentConfig] = r.DefaultVisibility
-	}
-
-	// worker is supervision target → public
-	if ruleMap["worker"] != "public" {
-		t.Errorf("worker = %q, want public (supervision target)", ruleMap["worker"])
-	}
-	// lead is source only → default (trusted) since it's not a delegation source
-	if ruleMap["lead"] != "trusted" {
-		t.Errorf("lead = %q, want trusted (default)", ruleMap["lead"])
-	}
-}
-
-func TestDerivePermeability_NoRelationships(t *testing.T) {
-	configs := []sympoziumv1alpha1.AgentConfigSpec{
-		{Name: "solo"},
-	}
-
-	rules := derivePermeability(configs, nil, "public")
-	if len(rules) != 1 {
-		t.Fatalf("expected 1 rule, got %d", len(rules))
-	}
-	if rules[0].DefaultVisibility != "public" {
-		t.Errorf("solo = %q, want public (default)", rules[0].DefaultVisibility)
 	}
 }
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # API integration test: full Ensemble lifecycle journey.
 # Validates:
-#   1) Enable a Ensemble → instances + schedules + memory ConfigMaps stamped for each persona
+#   1) Enable a Ensemble → instances + schedules stamped for each persona, memory seeds written to central memory-server
 #   2) Persona-level model override propagates to stamped instance
 #   3) ExcludePersonas skips excluded persona (no instance created)
 #   4) Disable pack → all stamped resources cleaned up
@@ -61,7 +61,6 @@ cleanup() {
     kubectl delete sympoziuminstance "${PACK_NAME}-${p}" -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1 || true
     kubectl delete sympoziumschedule "${PACK_NAME}-${p}" -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1 || true
     kubectl delete sympoziumschedule "${PACK_NAME}-${p}-schedule" -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1 || true
-    kubectl delete configmap "${PACK_NAME}-${p}-memory" -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1 || true
     kubectl delete configmap -n "$NAMESPACE" -l "sympozium.ai/instance=${PACK_NAME}-${p}" --ignore-not-found >/dev/null 2>&1 || true
   done
   stop_port_forward
@@ -286,16 +285,39 @@ print("true" if any(
   fi
   pass "Schedule created for active persona"
 
-  # ── Verify memory ConfigMap seeded for persona A ──
-  memory_cm="$(kubectl get configmap "${PACK_NAME}-${PERSONA_A}-memory" -n "$NAMESPACE" -o jsonpath='{.data.MEMORY\.md}' 2>/dev/null || true)"
-  if [[ -z "$memory_cm" ]]; then
-    # Memory may be named differently; check via label
-    memory_cm="$(kubectl get configmap -n "$NAMESPACE" -l "sympozium.ai/instance=${PACK_NAME}-${PERSONA_A}" -o jsonpath='{.items[0].data.MEMORY\.md}' 2>/dev/null || true)"
-  fi
-  if [[ -n "$memory_cm" && "$memory_cm" == *"Tracking"* ]]; then
-    pass "Memory ConfigMap seeded with persona memory seeds"
+  # ── Verify memory seeds posted to central memory-server for persona A ──
+  # The ensemble controller writes seeds via memoryclient.Store(scope=agent,
+  # agentName=<instance>) tagged with "seed". We query the same store through
+  # the apiserver's admin-backed list endpoint and look for the seed content.
+  mem_elapsed=0
+  mem_ok=false
+  mem_results=""
+  while [[ "$mem_elapsed" -lt 20 ]]; do
+    mem_results="$(api_request GET "/api/v1/agents/${PACK_NAME}-${PERSONA_A}/memory?limit=20" 2>/dev/null || true)"
+    if printf "%s" "$mem_results" | python3 -c '
+import json,sys
+try:
+  d=json.load(sys.stdin)
+except Exception:
+  sys.exit(1)
+hits=d.get("results",[]) or []
+for h in hits:
+  tags=h.get("tags",[]) or []
+  content=h.get("content","") or ""
+  if "seed" in tags and "Tracking" in content:
+    sys.exit(0)
+sys.exit(1)
+' 2>/dev/null; then
+      mem_ok=true
+      break
+    fi
+    sleep 2
+    mem_elapsed=$((mem_elapsed + 2))
+  done
+  if [[ "$mem_ok" == "true" ]]; then
+    pass "Memory seed posted to central memory-server for persona '${PERSONA_A}'"
   else
-    info "Memory ConfigMap seed verification inconclusive (memory='${memory_cm:0:80}')"
+    info "Memory seed verification inconclusive (memory-server may be disabled in this cluster)"
   fi
 
   # ── Verify Ensemble status ──

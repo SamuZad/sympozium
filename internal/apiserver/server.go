@@ -36,6 +36,7 @@ import (
 	sympoziumv1alpha1 "github.com/sympozium-ai/sympozium/api/v1alpha1"
 	"github.com/sympozium-ai/sympozium/internal/controller"
 	"github.com/sympozium-ai/sympozium/internal/eventbus"
+	"github.com/sympozium-ai/sympozium/pkg/memoryclient"
 )
 
 const systemNamespace = "sympozium-system"
@@ -48,6 +49,7 @@ type Server struct {
 	log          logr.Logger
 	upgrader     websocket.Upgrader
 	densityCache *controller.DensityCache // optional: set when llmfit DaemonSet is enabled
+	memoryClient *memoryclient.Client     // optional: set when central memory-server is configured
 }
 
 // NewServer creates a new API server.
@@ -66,6 +68,12 @@ func NewServer(c client.Client, bus eventbus.EventBus, kube kubernetes.Interface
 // SetDensityCache sets the fitness cache for fitness API endpoints.
 func (s *Server) SetDensityCache(cache *controller.DensityCache) {
 	s.densityCache = cache
+}
+
+// SetMemoryClient attaches a memoryclient for the memory-viewing endpoints.
+// When unset, those endpoints return 503.
+func (s *Server) SetMemoryClient(c *memoryclient.Client) {
+	s.memoryClient = c
 }
 
 // Start starts the HTTP server (headless, no embedded UI).
@@ -150,6 +158,9 @@ func (s *Server) buildMux(frontendFS fs.FS, token string) http.Handler {
 	mux.HandleFunc("DELETE /api/v1/ensembles/{name}", s.deleteEnsemble)
 	mux.HandleFunc("POST /api/v1/ensembles/{name}/clone", s.cloneEnsemble)
 	mux.HandleFunc("GET /api/v1/ensembles/{name}/shared-memory", s.listEnsembleSharedMemory)
+	mux.HandleFunc("DELETE /api/v1/ensembles/{name}/shared-memory", s.deleteEnsembleSharedMemory)
+	mux.HandleFunc("GET /api/v1/agents/{name}/memory", s.listAgentMemory)
+	mux.HandleFunc("DELETE /api/v1/agents/{name}/memory", s.deleteAgentMemory)
 	mux.HandleFunc("POST /api/v1/ensembles/{name}/stimulus/trigger", s.triggerStimulus)
 
 	// MCP Server endpoints
@@ -578,8 +589,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				},
 			},
 			Memory: &sympoziumv1alpha1.MemorySpec{
-				Enabled:   true,
-				MaxSizeKB: 256,
+				Enabled: true,
 			},
 			Observability: &sympoziumv1alpha1.ObservabilitySpec{
 				Enabled:     true,
@@ -1967,7 +1977,9 @@ func (s *Server) cloneEnsemble(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, clone)
 }
 
-// listEnsembleSharedMemory proxies to the pack's shared memory server to list entries.
+// listEnsembleSharedMemory returns entries from the central memory-server
+// for the ensemble's shared scope. The apiserver uses its own admin SA
+// token, so it sees public+trusted entries authored by any member.
 func (s *Server) listEnsembleSharedMemory(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	ns := r.URL.Query().Get("namespace")
@@ -1975,7 +1987,12 @@ func (s *Server) listEnsembleSharedMemory(w http.ResponseWriter, r *http.Request
 		ns = "default"
 	}
 
-	// Verify the pack exists and has shared memory enabled.
+	if s.memoryClient == nil {
+		http.Error(w, "memory server not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Verify the ensemble exists and has shared memory enabled.
 	pp := &sympoziumv1alpha1.Ensemble{}
 	if err := s.client.Get(r.Context(), client.ObjectKey{Name: name, Namespace: ns}, pp); err != nil {
 		if k8serrors.IsNotFound(err) {
@@ -1987,44 +2004,122 @@ func (s *Server) listEnsembleSharedMemory(w http.ResponseWriter, r *http.Request
 	}
 
 	if pp.Spec.SharedMemory == nil || !pp.Spec.SharedMemory.Enabled {
-		http.Error(w, "shared memory not enabled for this pack", http.StatusNotFound)
+		http.Error(w, "shared memory not enabled for this ensemble", http.StatusNotFound)
 		return
 	}
 
-	// Proxy to the shared memory server's /list endpoint.
-	sharedMemoryURL := fmt.Sprintf("http://%s-shared-memory.%s.svc:8080/list", name, ns)
-
-	// Forward query params.
-	if tags := r.URL.Query().Get("tags"); tags != "" {
-		sharedMemoryURL += "?tags=" + tags
-	}
-	if limit := r.URL.Query().Get("limit"); limit != "" {
-		sep := "?"
-		if strings.Contains(sharedMemoryURL, "?") {
-			sep = "&"
+	limit := 100
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			limit = n
 		}
-		sharedMemoryURL += sep + "limit=" + limit
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, "GET", sharedMemoryURL, nil)
+	hits, err := s.memoryClient.List(ctx, memoryclient.ListRequest{
+		Namespace:    ns,
+		Scope:        "ensemble",
+		EnsembleName: name,
+		Limit:        limit,
+	})
 	if err != nil {
-		http.Error(w, "failed to create proxy request", http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("memory server: %v", err), http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, map[string]any{"results": hits})
+}
+
+// deleteEnsembleSharedMemory clears every entry in an ensemble's shared
+// memory scope. Destructive; admin-only on the memory-server side.
+func (s *Server) deleteEnsembleSharedMemory(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	ns := r.URL.Query().Get("namespace")
+	if ns == "" {
+		ns = "default"
+	}
+	if s.memoryClient == nil {
+		http.Error(w, "memory server not configured", http.StatusServiceUnavailable)
 		return
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	deleted, err := s.memoryClient.DeleteScope(ctx, memoryclient.DeleteScopeRequest{
+		Namespace:    ns,
+		Scope:        "ensemble",
+		EnsembleName: name,
+	})
 	if err != nil {
-		http.Error(w, "shared memory server unreachable", http.StatusBadGateway)
+		http.Error(w, fmt.Sprintf("memory server: %v", err), http.StatusBadGateway)
 		return
 	}
-	defer resp.Body.Close()
+	writeJSON(w, map[string]any{"deleted": deleted})
+}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+// listAgentMemory returns entries from an agent's private memory scope.
+// Uses the admin SA so all visibilities are returned regardless of authorship.
+func (s *Server) listAgentMemory(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	ns := r.URL.Query().Get("namespace")
+	if ns == "" {
+		ns = "default"
+	}
+	if s.memoryClient == nil {
+		http.Error(w, "memory server not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	limit := 100
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			limit = n
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	hits, err := s.memoryClient.List(ctx, memoryclient.ListRequest{
+		Namespace: ns,
+		Scope:     "agent",
+		AgentName: name,
+		Limit:     limit,
+	})
+	if err != nil {
+		http.Error(w, fmt.Sprintf("memory server: %v", err), http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, map[string]any{"results": hits})
+}
+
+// deleteAgentMemory clears every entry in an agent's private memory scope.
+func (s *Server) deleteAgentMemory(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	ns := r.URL.Query().Get("namespace")
+	if ns == "" {
+		ns = "default"
+	}
+	if s.memoryClient == nil {
+		http.Error(w, "memory server not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	deleted, err := s.memoryClient.DeleteScope(ctx, memoryclient.DeleteScopeRequest{
+		Namespace: ns,
+		Scope:     "agent",
+		AgentName: name,
+	})
+	if err != nil {
+		http.Error(w, fmt.Sprintf("memory server: %v", err), http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, map[string]any{"deleted": deleted})
 }
 
 func (s *Server) triggerStimulus(w http.ResponseWriter, r *http.Request) {

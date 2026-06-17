@@ -231,8 +231,9 @@ persona retains its own private memory alongside the shared pool.
 - `read-write`: persona can search, list, and store entries (default if no rules specified)
 - `read-only`: persona can search and list, but cannot store
 
-Entries stored via `workflow_memory_store` are automatically tagged with the
-source persona's name, so other agents can filter by contributor.
+Entries stored via `memory_store` with `scope: "ensemble"` are automatically
+tagged with the source persona's name, so other agents can filter by
+contributor.
 
 ### When to use shared memory
 

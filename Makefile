@@ -31,7 +31,7 @@ CHANNELS = telegram whatsapp discord slack
 # All images
 IMAGES = controller apiserver ipc-bridge webhook agent-runner web-proxy node-probe \
          channel-telegram channel-whatsapp channel-discord channel-slack \
-		 skill-k8s-ops skill-sre-observability skill-github-gitops skill-llmfit skill-memory \
+		 skill-k8s-ops skill-sre-observability skill-github-gitops skill-llmfit memory-server \
 		 llmfit-daemon mcp-bridge
 
 .PHONY: all build test clean generate manifests docker-build docker-push install help web-build web-dev web-dev-serve web-clean web-install setup-hooks integration-tests ux-tests
@@ -388,6 +388,7 @@ install: manifests ## Install Sympozium via Helm chart (CRDs, control plane, bui
 		--set image.tag=$(TAG) \
 		--set certManager.enabled=false \
 		--set webhook.enabled=false \
+		--set memory.postgres.enabled=true \
 		--skip-crds
 
 uninstall: ## Uninstall Sympozium (Helm release, CRDs, namespace)
@@ -429,7 +430,9 @@ deploy-samples: ## Deploy sample CRs
 
 db-migrate: ## Run database migrations
 	@echo "Running migrations against $${DATABASE_URL}"
-	psql "$${DATABASE_URL}" -f migrations/001_initial.sql
+	@DATABASE_URL="$${DATABASE_URL}" \
+		MEMORY_EMBEDDING_DIM="$${MEMORY_EMBEDDING_DIM:-1536}" \
+		go run ./cmd/memory-server migrate
 
 ##@ Helm
 

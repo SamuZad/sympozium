@@ -48,7 +48,6 @@ spec:
       systemPrompt: "Agent editor."
   sharedMemory:
     enabled: true
-    storageSize: "256Mi"
 `;
     cy.writeFile(`cypress/tmp/${PACK}.yaml`, manifest);
     cy.exec(`kubectl apply -f cypress/tmp/${PACK}.yaml`);
@@ -74,7 +73,6 @@ spec:
       body: {
         sharedMemory: {
           enabled: true,
-          storageSize: "256Mi",
           membrane: {
             defaultVisibility: "public",
           },
@@ -110,7 +108,6 @@ spec:
       body: {
         sharedMemory: {
           enabled: true,
-          storageSize: "256Mi",
           membrane: {
             defaultVisibility: "public",
             permeability: [
@@ -153,7 +150,6 @@ spec:
       body: {
         sharedMemory: {
           enabled: true,
-          storageSize: "256Mi",
           membrane: {
             defaultVisibility: "public",
             trustGroups: [
@@ -187,7 +183,6 @@ spec:
       body: {
         sharedMemory: {
           enabled: true,
-          storageSize: "256Mi",
         },
       },
     }).then((resp) => {
@@ -515,7 +510,6 @@ spec:
       type: sequential
   sharedMemory:
     enabled: true
-    storageSize: "512Mi"
     accessRules:
       - agentConfig: researcher
         access: read-write
@@ -574,7 +568,6 @@ spec:
 
       // Shared memory base config
       expect(spec.sharedMemory.enabled).to.eq(true);
-      expect(spec.sharedMemory.storageSize).to.eq("512Mi");
       expect(spec.sharedMemory.accessRules).to.have.length(3);
 
       // Membrane permeability
@@ -615,7 +608,6 @@ spec:
       body: {
         sharedMemory: {
           enabled: true,
-          storageSize: "512Mi",
           accessRules: [
             { agentConfig: "researcher", access: "read-write" },
             { agentConfig: "writer", access: "read-write" },
@@ -736,7 +728,6 @@ spec:
       type: delegation
   sharedMemory:
     enabled: true
-    storageSize: "512Mi"
     accessRules:
       - agentConfig: researcher
         access: read-write

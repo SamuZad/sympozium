@@ -198,35 +198,44 @@ func TestReconcileChannels_AllowsMissingSecretWhenCSIVolumePresent(t *testing.T)
 func TestEnsureChannelServiceAccount_CreatesWhenMissing(t *testing.T) {
 	r, cl := newChannelTestReconciler(t)
 
-	if err := r.ensureChannelServiceAccount(context.Background(), "ns"); err != nil {
+	instance := &sympoziumv1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "inst", Namespace: "ns"},
+	}
+	if err := r.ensureChannelServiceAccount(context.Background(), instance); err != nil {
 		t.Fatalf("ensureChannelServiceAccount: %v", err)
 	}
 
 	var sa corev1.ServiceAccount
-	if err := cl.Get(context.Background(), types.NamespacedName{Name: channelServiceAccountName, Namespace: "ns"}, &sa); err != nil {
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: ChannelServiceAccountName(instance), Namespace: "ns"}, &sa); err != nil {
 		t.Fatalf("get sa: %v", err)
 	}
 	if sa.Labels["app.kubernetes.io/managed-by"] != "sympozium" {
 		t.Errorf("missing managed-by label, got: %v", sa.Labels)
 	}
+	if sa.Labels["sympozium.ai/instance"] != "inst" {
+		t.Errorf("missing instance label, got: %v", sa.Labels)
+	}
 }
 
 func TestEnsureChannelServiceAccount_NoopWhenPresent(t *testing.T) {
+	instance := &sympoziumv1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "inst", Namespace: "ns"},
+	}
 	existing := &corev1.ServiceAccount{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      channelServiceAccountName,
+			Name:      ChannelServiceAccountName(instance),
 			Namespace: "ns",
 			Labels:    map[string]string{"existing": "true"},
 		},
 	}
 	r, cl := newChannelTestReconciler(t, existing)
 
-	if err := r.ensureChannelServiceAccount(context.Background(), "ns"); err != nil {
+	if err := r.ensureChannelServiceAccount(context.Background(), instance); err != nil {
 		t.Fatalf("ensureChannelServiceAccount: %v", err)
 	}
 
 	var sa corev1.ServiceAccount
-	if err := cl.Get(context.Background(), types.NamespacedName{Name: channelServiceAccountName, Namespace: "ns"}, &sa); err != nil {
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: ChannelServiceAccountName(instance), Namespace: "ns"}, &sa); err != nil {
 		t.Fatalf("get sa: %v", err)
 	}
 	if sa.Labels["existing"] != "true" {
@@ -254,18 +263,19 @@ func TestReconcileChannels_CreatesServiceAccount(t *testing.T) {
 	}
 
 	var sa corev1.ServiceAccount
-	if err := cl.Get(context.Background(), types.NamespacedName{Name: channelServiceAccountName, Namespace: "ns"}, &sa); err != nil {
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: ChannelServiceAccountName(instance), Namespace: "ns"}, &sa); err != nil {
 		t.Fatalf("expected channel SA to be created: %v", err)
 	}
 }
 
-// ── buildChannelDeployment: SA wiring ────────────────────────────────────────
+// ── buildChannelDeployment: SA wiring ──────────────────────────────────
 
 func TestBuildChannelDeployment_UsesChannelServiceAccount(t *testing.T) {
 	r := &AgentReconciler{}
 	instance := newTestInstance()
 	deploy := r.buildChannelDeployment(instance, instance.Spec.Channels[0], "test-instance-channel-telegram")
-	if got := deploy.Spec.Template.Spec.ServiceAccountName; got != channelServiceAccountName {
-		t.Errorf("ServiceAccountName = %q, want %s", got, channelServiceAccountName)
+	want := ChannelServiceAccountName(instance)
+	if got := deploy.Spec.Template.Spec.ServiceAccountName; got != want {
+		t.Errorf("ServiceAccountName = %q, want %s", got, want)
 	}
 }

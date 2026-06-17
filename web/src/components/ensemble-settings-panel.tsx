@@ -178,7 +178,7 @@ export function EnsembleSettingsPanel({
               onChange={(e) =>
                 update({
                   sharedMemory: e.target.checked
-                    ? { enabled: true, storageSize: "1Gi" }
+                    ? { enabled: true }
                     : null,
                 })
               }
@@ -190,28 +190,9 @@ export function EnsembleSettingsPanel({
           </div>
           {settings.sharedMemory?.enabled && (
             <div className="space-y-3 pl-5">
-              <div className="space-y-1.5">
-                <Label htmlFor="sm-size" className="text-xs">
-                  Storage Size
-                </Label>
-                <Input
-                  id="sm-size"
-                  value={settings.sharedMemory.storageSize || "1Gi"}
-                  onChange={(e) =>
-                    update({
-                      sharedMemory: {
-                        ...settings.sharedMemory!,
-                        storageSize: e.target.value,
-                      },
-                    })
-                  }
-                  placeholder="e.g. 1Gi"
-                  className="h-8 text-sm font-mono"
-                />
-                <p className="text-[10px] text-muted-foreground">
-                  Access rules are configured per-persona after saving.
-                </p>
-              </div>
+              <p className="text-[10px] text-muted-foreground">
+                Access rules are configured per-persona after saving.
+              </p>
 
               {/* Membrane settings */}
               <div className="space-y-2 border-t pt-2">

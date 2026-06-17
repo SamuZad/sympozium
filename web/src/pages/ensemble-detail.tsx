@@ -348,11 +348,6 @@ export function EnsembleDetailPage() {
                         Ready
                       </Badge>
                     )}
-                    {pack.spec.sharedMemory.storageSize && (
-                      <span className="text-muted-foreground">
-                        Storage: {pack.spec.sharedMemory.storageSize}
-                      </span>
-                    )}
                   </div>
                   {pack.spec.sharedMemory.accessRules &&
                     pack.spec.sharedMemory.accessRules.length > 0 && (

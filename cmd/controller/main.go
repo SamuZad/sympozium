@@ -24,6 +24,7 @@ import (
 	"github.com/sympozium-ai/sympozium/internal/controller"
 	"github.com/sympozium-ai/sympozium/internal/eventbus"
 	"github.com/sympozium-ai/sympozium/internal/orchestrator"
+	"github.com/sympozium-ai/sympozium/pkg/memoryclient"
 	"github.com/sympozium-ai/sympozium/pkg/telemetry"
 )
 
@@ -119,16 +120,27 @@ func main() {
 		setupLog.Info("Agent Sandbox explicitly disabled via AGENT_SANDBOX_ENABLED=false")
 	}
 
+	// Central memory-server URL is only set by the Helm chart when
+	// memory.enabled=true. When empty, all memory-aware code paths
+	// (agent pod env injection, ensemble seed POSTs) are no-ops.
+	memoryServiceURL := os.Getenv("MEMORY_SERVER_URL")
+	var memoryClient *memoryclient.Client
+	if memoryServiceURL != "" {
+		memoryClient = memoryclient.New(memoryServiceURL)
+	}
+
 	agentRunReconciler := &controller.AgentRunReconciler{
-		Client:          mgr.GetClient(),
-		APIReader:       mgr.GetAPIReader(),
-		Scheme:          mgr.GetScheme(),
-		Log:             ctrl.Log.WithName("controllers").WithName("AgentRun"),
-		PodBuilder:      podBuilder,
-		Clientset:       clientset,
-		ImageTag:        imageTag,
-		RunHistoryLimit: maxRunHistory,
-		DynamicClient:   dynamicClient,
+		Client:           mgr.GetClient(),
+		APIReader:        mgr.GetAPIReader(),
+		Scheme:           mgr.GetScheme(),
+		Log:              ctrl.Log.WithName("controllers").WithName("AgentRun"),
+		PodBuilder:       podBuilder,
+		Clientset:        clientset,
+		ImageTag:         imageTag,
+		RunHistoryLimit:  maxRunHistory,
+		DynamicClient:    dynamicClient,
+		MemoryServerURL: memoryServiceURL,
+		MemoryClient:     memoryClient,
 	}
 	if err := agentRunReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentRun")
@@ -154,18 +166,20 @@ func main() {
 	}
 
 	if err := (&controller.SympoziumScheduleReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		Log:    ctrl.Log.WithName("controllers").WithName("SympoziumSchedule"),
+		Client:       mgr.GetClient(),
+		Scheme:       mgr.GetScheme(),
+		Log:          ctrl.Log.WithName("controllers").WithName("SympoziumSchedule"),
+		MemoryClient: memoryClient,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "SympoziumSchedule")
 		os.Exit(1)
 	}
 
 	ensembleReconciler := &controller.EnsembleReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		Log:    ctrl.Log.WithName("controllers").WithName("Ensemble"),
+		Client:       mgr.GetClient(),
+		Scheme:       mgr.GetScheme(),
+		Log:          ctrl.Log.WithName("controllers").WithName("Ensemble"),
+		MemoryClient: memoryClient,
 	}
 	if err := ensembleReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Ensemble")

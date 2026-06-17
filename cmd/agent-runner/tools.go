@@ -320,13 +320,9 @@ func executeToolCall(ctx context.Context, name string, argsJSON string) string {
 	case ToolSkills:
 		return skillsTool(args)
 	default:
-		// Check if this is a memory tool from the memory-server sidecar.
+		// Memory tools call the central memory-server via pkg/memoryclient.
 		if isMemoryTool(name) {
 			return executeMemoryTool(ctx, name, argsJSON)
-		}
-		// Check if this is a shared workflow memory tool.
-		if isWorkflowMemoryTool(name) {
-			return executeWorkflowMemoryTool(ctx, name, argsJSON)
 		}
 		// Check if this is an MCP tool from the manifest
 		if mcpTool, ok := lookupMCPTool(name); ok {

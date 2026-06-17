@@ -52,7 +52,7 @@ internal/
   session/              # Session store
   webhook/              # Policy enforcer
   webproxy/             # Web proxy handlers (OpenAI, MCP, rate limiting)
-migrations/             # PostgreSQL schema migrations
+cmd/memory-server/migrations/  # PostgreSQL schema migration templates (rendered by `memory-server migrate`)
 test/integration/       # Integration test scripts (shell)
 docs/                   # Design & contributor documentation
 ```
@@ -231,7 +231,9 @@ Key topics in `internal/eventbus/types.go`:
 
 ### Memory
 
-Each Agent has a ConfigMap (`<name>-memory`) mounted at `/memory/MEMORY.md`. The controller extracts memory markers (`__SYMPOZIUM_MEMORY__...__SYMPOZIUM_MEMORY_END__`) from agent output and patches the ConfigMap.
+Persistent memory lives in a **central `memory-server` Deployment** (`cmd/memory-server/`) in `sympozium-system`, backed by PostgreSQL + `pgvector` for hybrid (vector + full-text) search. Agent pods reach it over HTTP at `MEMORY_SERVER_URL` using their pod's ServiceAccount bearer token; the server verifies tokens via `TokenReview` and resolves the caller's `(namespace, agentName, ensembleName)` membership.
+
+The agent-runner exposes three tools — `memory_search`, `memory_store`, `memory_list` — each accepting an optional `scope` argument (`"agent"` for the agent's private slice; `"ensemble"` for the shared pool). There is no longer a `<name>-memory` ConfigMap, no `/memory/MEMORY.md` file, no `__SYMPOZIUM_MEMORY__` markers, and no per-instance memory sidecar. Cross-ensemble visibility is governed by the `Ensemble.spec.sharedMemory.membrane` Import/Export rules, resolved server-side.
 
 ### Skills
 

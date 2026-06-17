@@ -45,7 +45,7 @@ jobs:
           set -euo pipefail
           for img in controller apiserver ipc-bridge webhook agent-runner \
                      channel-telegram channel-slack channel-discord channel-whatsapp \
-                     skill-k8s-ops skill-sre-observability skill-github-gitops skill-memory; do
+                     skill-k8s-ops skill-sre-observability skill-github-gitops memory-server; do
             kind load docker-image ${REGISTRY}/${img}:${TAG} --name sympozium-ci
           done
 

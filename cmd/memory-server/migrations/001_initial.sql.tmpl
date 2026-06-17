@@ -1,0 +1,158 @@
+-- Sympozium initial schema.
+-- Rendered by `memory-server migrate` from this Go text/template; the
+-- only substitution is {{`{{.Dimension}}`}} (the pgvector column width),
+-- sourced from MEMORY_EMBEDDING_DIM. Idempotent: every CREATE uses
+-- IF NOT EXISTS so it is safe to re-run.
+
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS "vector";
+
+-- Sessions table: tracks conversation sessions
+CREATE TABLE IF NOT EXISTS sessions (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    instance_name VARCHAR(253) NOT NULL,
+    namespace VARCHAR(253) NOT NULL DEFAULT 'default',
+    session_key VARCHAR(512) NOT NULL,
+    channel_type VARCHAR(50),
+    sender_id VARCHAR(255),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    metadata JSONB DEFAULT '{}',
+    UNIQUE (instance_name, namespace, session_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_instance ON sessions (instance_name, namespace);
+CREATE INDEX IF NOT EXISTS idx_sessions_key ON sessions (session_key);
+
+-- Transcript events: stores the full conversation history
+CREATE TABLE IF NOT EXISTS transcript_events (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    session_id UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    sequence_num BIGINT NOT NULL,
+    event_type VARCHAR(50) NOT NULL,
+    role VARCHAR(20) NOT NULL,
+    content TEXT,
+    tool_name VARCHAR(255),
+    tool_input JSONB,
+    tool_output JSONB,
+    agent_run_name VARCHAR(253),
+    agent_id VARCHAR(255),
+    tokens_used INTEGER,
+    model VARCHAR(255),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    metadata JSONB DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_transcript_session ON transcript_events (session_id, sequence_num);
+CREATE INDEX IF NOT EXISTS idx_transcript_type ON transcript_events (event_type);
+CREATE INDEX IF NOT EXISTS idx_transcript_agent_run ON transcript_events (agent_run_name);
+
+-- Memories: central memory store for all agents and ensemble pools.
+-- Replaces the per-Agent MEMORY.md ConfigMap, the per-Agent SQLite memory-
+-- server, and the per-Ensemble shared memory-server. Every row belongs to
+-- exactly one scope (an Agent's private scope, or an Ensemble's shared pool).
+--
+-- `embedding_model` and `embedding_dim` are stored explicitly so memory-
+-- server can reject writes whose embedding geometry disagrees with the
+-- pool's pinned model. Mixing models in the same pool silently breaks
+-- vector search; we fail fast instead.
+CREATE TABLE IF NOT EXISTS memories (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    namespace       VARCHAR(253) NOT NULL,
+    scope           VARCHAR(16)  NOT NULL,
+    agent_name      VARCHAR(253) NOT NULL,
+    ensemble_name   VARCHAR(253),
+    content         TEXT         NOT NULL,
+    embedding       vector({{.Dimension}}) NOT NULL,
+    embedding_model VARCHAR(128) NOT NULL,
+    embedding_dim   SMALLINT     NOT NULL,
+    tags            TEXT[]       NOT NULL DEFAULT '{}',
+    visibility      VARCHAR(16)  NOT NULL DEFAULT 'public',
+    source_agent    VARCHAR(253) NOT NULL,
+    parent_id       UUID REFERENCES memories(id) ON DELETE SET NULL,
+    seq             BIGSERIAL    NOT NULL,
+    created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    expires_at      TIMESTAMPTZ,
+    content_tsv     tsvector GENERATED ALWAYS AS (to_tsvector('simple', content)) STORED,
+    CONSTRAINT memories_scope_valid CHECK (scope IN ('agent', 'ensemble')),
+    CONSTRAINT memories_visibility_valid CHECK (visibility IN ('public', 'trusted', 'private')),
+    CONSTRAINT memories_scope_ensemble_consistent CHECK (
+        (scope = 'ensemble' AND ensemble_name IS NOT NULL) OR
+        (scope = 'agent'    AND ensemble_name IS NULL)
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_memories_scope_agent
+    ON memories (namespace, scope, agent_name)
+    WHERE scope = 'agent';
+
+CREATE INDEX IF NOT EXISTS idx_memories_scope_ensemble
+    ON memories (namespace, scope, ensemble_name)
+    WHERE scope = 'ensemble';
+
+CREATE INDEX IF NOT EXISTS idx_memories_tags ON memories USING gin (tags);
+CREATE INDEX IF NOT EXISTS idx_memories_tsv  ON memories USING gin (content_tsv);
+
+-- Approximate nearest neighbour over the embedding. lists=100 is a good
+-- default for hundreds of thousands of rows; rebuild with a higher value
+-- if the pool grows past a few million.
+CREATE INDEX IF NOT EXISTS idx_memories_embedding
+    ON memories USING ivfflat (embedding vector_cosine_ops)
+    WITH (lists = 100);
+
+-- Only index rows with a TTL so the pruner sweep stays cheap.
+CREATE INDEX IF NOT EXISTS idx_memories_expires
+    ON memories (expires_at)
+    WHERE expires_at IS NOT NULL;
+
+-- Agent run audit log: tracks all agent executions for compliance
+CREATE TABLE IF NOT EXISTS agent_run_audit (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    agent_run_name VARCHAR(253) NOT NULL,
+    instance_name VARCHAR(253) NOT NULL,
+    namespace VARCHAR(253) NOT NULL DEFAULT 'default',
+    agent_id VARCHAR(255) NOT NULL,
+    session_key VARCHAR(512),
+    parent_run_name VARCHAR(253),
+    task TEXT,
+    model VARCHAR(255),
+    phase VARCHAR(50) NOT NULL,
+    pod_name VARCHAR(253),
+    started_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    result TEXT,
+    error TEXT,
+    exit_code INTEGER,
+    tokens_input INTEGER,
+    tokens_output INTEGER,
+    tool_calls_count INTEGER,
+    metadata JSONB DEFAULT '{}',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_instance ON agent_run_audit (instance_name, namespace);
+CREATE INDEX IF NOT EXISTS idx_audit_run ON agent_run_audit (agent_run_name);
+CREATE INDEX IF NOT EXISTS idx_audit_phase ON agent_run_audit (phase);
+CREATE INDEX IF NOT EXISTS idx_audit_time ON agent_run_audit (created_at);
+
+-- Tool execution log: records every tool call for security audit
+CREATE TABLE IF NOT EXISTS tool_executions (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    agent_run_name VARCHAR(253) NOT NULL,
+    instance_name VARCHAR(253) NOT NULL,
+    namespace VARCHAR(253) NOT NULL DEFAULT 'default',
+    tool_name VARCHAR(255) NOT NULL,
+    action VARCHAR(50) NOT NULL,
+    input JSONB,
+    output JSONB,
+    duration_ms INTEGER,
+    approved_by VARCHAR(255),
+    policy_name VARCHAR(253),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_tool_exec_run ON tool_executions (agent_run_name);
+CREATE INDEX IF NOT EXISTS idx_tool_exec_tool ON tool_executions (tool_name);
+CREATE INDEX IF NOT EXISTS idx_tool_exec_action ON tool_executions (action);
+CREATE INDEX IF NOT EXISTS idx_tool_exec_time ON tool_executions (created_at);

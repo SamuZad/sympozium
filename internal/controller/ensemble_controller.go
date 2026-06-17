@@ -2,28 +2,29 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"reflect"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	sympoziumv1alpha1 "github.com/sympozium-ai/sympozium/api/v1alpha1"
 	"github.com/sympozium-ai/sympozium/internal/eventbus"
+	"github.com/sympozium-ai/sympozium/pkg/memoryclient"
 )
 
 const ensembleFinalizer = "sympozium.ai/ensemble-finalizer"
@@ -47,6 +48,11 @@ type EnsembleReconciler struct {
 	Log          logr.Logger
 	EventBus     eventbus.EventBus
 	DensityCache *DensityCache // optional: set when llmfit DaemonSet is enabled
+
+	// MemoryClient writes ensemble seed memories to the central memory-server.
+	// Nil when the memory subsystem is disabled (no MEMORY_SERVER_URL); in
+	// that case reconcileMemorySeeds is a no-op so personas still come up.
+	MemoryClient *memoryclient.Client
 }
 
 // defaultObservabilitySpec builds an ObservabilitySpec from env vars injected
@@ -191,11 +197,6 @@ func (r *EnsembleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			if deleted > 0 {
 				log.Info("Deleted managed Ensemble auth secrets", "count", deleted)
 			}
-		}
-
-		// Clean up shared memory infrastructure when pack is disabled.
-		if err := r.cleanupSharedMemory(ctx, log, pack); err != nil {
-			log.Error(err, "Failed to clean up shared memory for disabled pack")
 		}
 
 		pack.Status.Phase = "Inactive"
@@ -359,7 +360,9 @@ func (r *EnsembleReconciler) reconcileAgentConfig(
 	// Instance is now up to date — users own other fields after creation.
 
 	// --- Memory seeds ---
-	if persona.Memory != nil && len(persona.Memory.Seeds) > 0 {
+	// Always invoked when persona.Memory is set so the reconciler can also
+	// garbage-collect seeds that have been edited or removed from the spec.
+	if persona.Memory != nil {
 		if err := r.reconcileMemorySeeds(ctx, log, pack, persona, instanceName); err != nil {
 			log.Error(err, "Failed to seed memory", "instance", instanceName)
 			// Non-fatal: continue
@@ -503,7 +506,6 @@ func (r *EnsembleReconciler) buildAgent(
 			AuthRefs: authRefs,
 			Memory: &sympoziumv1alpha1.MemorySpec{
 				Enabled:      true,
-				MaxSizeKB:    256,
 				SystemPrompt: persona.SystemPrompt,
 			},
 			Observability: defaultObservabilitySpec(),
@@ -621,7 +623,18 @@ func (r *EnsembleReconciler) buildScheduleTask(
 	return base
 }
 
-// reconcileMemorySeeds creates or patches the memory ConfigMap with seed data.
+// reconcileMemorySeeds writes the persona's declared seed memories into the
+// central memory-server. Idempotency is tracked via an annotation on the
+// generated Agent listing the SHA-256 prefixes of seeds already posted,
+// so re-reconciles never duplicate seeds and newly added seeds are picked up
+// on the next pass without rewriting old ones.
+//
+// Every posted seed is tagged with "seed-hash:<hash>" so that when a seed is
+// edited or removed from the persona spec, this reconciler can locate and
+// delete the orphan via the memory-server's admin delete-by-tags endpoint.
+//
+// When the memory subsystem is disabled (no MemoryClient configured) this is
+// a no-op so personas still come up cleanly in memory-less deployments.
 func (r *EnsembleReconciler) reconcileMemorySeeds(
 	ctx context.Context,
 	log logr.Logger,
@@ -629,39 +642,150 @@ func (r *EnsembleReconciler) reconcileMemorySeeds(
 	persona *sympoziumv1alpha1.AgentConfigSpec,
 	instanceName string,
 ) error {
-	cmName := instanceName + "-memory"
-
-	var cm corev1.ConfigMap
-	err := r.Get(ctx, client.ObjectKey{Name: cmName, Namespace: pack.Namespace}, &cm)
-	if errors.IsNotFound(err) {
-		// Create with seeds
-		var sb strings.Builder
-		sb.WriteString("# Memory\n\n")
-		for _, seed := range persona.Memory.Seeds {
-			sb.WriteString("- " + seed + "\n")
-		}
-		cm = corev1.ConfigMap{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      cmName,
-				Namespace: pack.Namespace,
-				Labels: map[string]string{
-					"sympozium.ai/ensemble":     pack.Name,
-					"sympozium.ai/agent-config": persona.Name,
-					"sympozium.ai/memory":       "true",
-				},
-			},
-			Data: map[string]string{
-				"MEMORY.md": sb.String(),
-			},
-		}
-		log.Info("Creating memory ConfigMap with seeds", "configmap", cmName)
-		return r.Create(ctx, &cm)
-	} else if err != nil {
-		return err
+	if r.MemoryClient == nil {
+		log.V(1).Info("Memory subsystem disabled; skipping seed reconcile", "instance", instanceName)
+		return nil
+	}
+	if persona == nil || persona.Memory == nil {
+		return nil
 	}
 
-	// ConfigMap already exists — don't overwrite user memory
-	return nil
+	// Read the generated Agent so we can dedupe via its annotation. The
+	// Agent is created by reconcileAgentConfig earlier in this reconcile
+	// pass, so it should always exist by the time we get here.
+	inst := &sympoziumv1alpha1.Agent{}
+	if err := r.Get(ctx, client.ObjectKey{Name: instanceName, Namespace: pack.Namespace}, inst); err != nil {
+		return fmt.Errorf("get instance %s: %w", instanceName, err)
+	}
+
+	const seededAnno = "sympozium.ai/memory-seeds-applied"
+	applied := parseSeedHashSet(inst.GetAnnotations()[seededAnno])
+
+	// Build the desired hash set so we can both skip already-posted seeds
+	// and identify orphans to garbage-collect.
+	desired := make(map[string]string, len(persona.Memory.Seeds)) // hash -> content
+	for _, seed := range persona.Memory.Seeds {
+		seed = strings.TrimSpace(seed)
+		if seed == "" {
+			continue
+		}
+		desired[seedHash(seed)] = seed
+	}
+
+	ttlDays := 0
+	if persona.Memory.SeedTTLDays != nil && *persona.Memory.SeedTTLDays > 0 {
+		ttlDays = *persona.Memory.SeedTTLDays
+	}
+
+	added := 0
+	for hash, seed := range desired {
+		if _, ok := applied[hash]; ok {
+			continue
+		}
+		_, err := r.MemoryClient.Store(ctx, memoryclient.StoreRequest{
+			Scope:     "agent",
+			AgentName: instanceName,
+			Content:   seed,
+			TTLDays:   ttlDays,
+			Tags: []string{
+				"seed",
+				"ensemble:" + pack.Name,
+				"persona:" + persona.Name,
+				"seed-hash:" + hash,
+			},
+		})
+		if err != nil {
+			if added > 0 {
+				if patchErr := patchSeedAnnotation(ctx, r.Client, inst, seededAnno, applied); patchErr != nil {
+					log.Error(patchErr, "Failed to persist seed annotation after partial write", "instance", instanceName)
+				}
+			}
+			return fmt.Errorf("post seed to memory-server: %w", err)
+		}
+		applied[hash] = struct{}{}
+		added++
+	}
+
+	// Garbage-collect seeds that were previously applied but are no longer
+	// in the spec (edited or removed). We only consider hashes recorded in
+	// our annotation so we never touch user-authored memories.
+	removed := 0
+	for hash := range applied {
+		if _, stillWanted := desired[hash]; stillWanted {
+			continue
+		}
+		_, err := r.MemoryClient.DeleteByTags(ctx, memoryclient.DeleteByTagsRequest{
+			Namespace: pack.Namespace,
+			Scope:     "agent",
+			AgentName: instanceName,
+			RequireTags: []string{
+				"seed",
+				"ensemble:" + pack.Name,
+				"persona:" + persona.Name,
+				"seed-hash:" + hash,
+			},
+		})
+		if err != nil {
+			// Best-effort GC: log and continue so a transient delete
+			// failure doesn't block the rest of the reconcile.
+			log.Error(err, "Failed to GC orphaned seed", "instance", instanceName, "hash", hash)
+			continue
+		}
+		delete(applied, hash)
+		removed++
+	}
+
+	if added == 0 && removed == 0 {
+		return nil
+	}
+	log.Info("Reconciled persona memory seeds",
+		"instance", instanceName,
+		"added", added,
+		"removed", removed,
+		"totalApplied", len(applied),
+	)
+	return patchSeedAnnotation(ctx, r.Client, inst, seededAnno, applied)
+}
+
+// seedHash returns a stable 16-char prefix of the SHA-256 hex digest of a
+// seed string. 16 hex chars = 64 bits of entropy, comfortably collision-free
+// for the small per-persona seed sets we expect.
+func seedHash(seed string) string {
+	sum := sha256.Sum256([]byte(seed))
+	return hex.EncodeToString(sum[:])[:16]
+}
+
+// parseSeedHashSet parses the comma-separated hash list stored in the
+// idempotency annotation.
+func parseSeedHashSet(raw string) map[string]struct{} {
+	out := make(map[string]struct{})
+	if raw == "" {
+		return out
+	}
+	for _, p := range strings.Split(raw, ",") {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out[p] = struct{}{}
+		}
+	}
+	return out
+}
+
+// patchSeedAnnotation merges the supplied hash set into the Agent's
+// annotation map using a server-side strategic merge patch.
+func patchSeedAnnotation(ctx context.Context, c client.Client, inst *sympoziumv1alpha1.Agent, key string, applied map[string]struct{}) error {
+	hashes := make([]string, 0, len(applied))
+	for h := range applied {
+		hashes = append(hashes, h)
+	}
+	sort.Strings(hashes)
+
+	patch := client.MergeFrom(inst.DeepCopy())
+	if inst.Annotations == nil {
+		inst.Annotations = map[string]string{}
+	}
+	inst.Annotations[key] = strings.Join(hashes, ",")
+	return c.Patch(ctx, inst, patch)
 }
 
 // intervalToCron converts a human-readable interval to a cron expression.
@@ -713,8 +837,9 @@ func isExcluded(name string, excludes []string) bool {
 	return false
 }
 
-// cleanupPersona deletes the Instance, Schedule, and memory ConfigMap
-// for a persona that has been excluded from the pack.
+// cleanupPersona deletes the Instance and Schedule for a persona that has
+// been excluded from the pack. Memory rows in the central memory-server
+// are left intact.
 func (r *EnsembleReconciler) cleanupPersona(
 	ctx context.Context,
 	log logr.Logger,
@@ -773,16 +898,6 @@ func (r *EnsembleReconciler) cleanupPersona(
 		}
 	}
 
-	// Delete memory ConfigMap
-	cmName := instanceName + "-memory"
-	var cm corev1.ConfigMap
-	if err := r.Get(ctx, client.ObjectKey{Name: cmName, Namespace: pack.Namespace}, &cm); err == nil {
-		log.Info("Deleting excluded persona memory", "configmap", cmName)
-		if err := r.Delete(ctx, &cm); err != nil && !errors.IsNotFound(err) {
-			return fmt.Errorf("delete configmap %s: %w", cmName, err)
-		}
-	}
-
 	return nil
 }
 
@@ -794,24 +909,10 @@ func (r *EnsembleReconciler) reconcileDelete(
 ) (ctrl.Result, error) {
 	log.Info("Reconciling Ensemble deletion")
 
-	// Clean up shared memory infrastructure.
-	if err := r.cleanupSharedMemory(ctx, log, pack); err != nil {
-		log.Error(err, "Failed to clean up shared memory during deletion")
-	}
-
-	// Owner references handle cascade deletion of instances and schedules,
-	// but we clean up memory ConfigMaps explicitly since they may not
-	// have owner references.
-	for _, persona := range pack.Spec.AgentConfigs {
-		cmName := pack.Name + "-" + persona.Name + "-memory"
-		var cm corev1.ConfigMap
-		if err := r.Get(ctx, client.ObjectKey{Name: cmName, Namespace: pack.Namespace}, &cm); err == nil {
-			log.Info("Deleting memory ConfigMap", "configmap", cmName)
-			if err := r.Delete(ctx, &cm); err != nil && !errors.IsNotFound(err) {
-				return ctrl.Result{}, err
-			}
-		}
-	}
+	// Owner references handle cascade deletion of instances and schedules.
+	// Memory rows in the central memory-server are intentionally not purged
+	// on ensemble deletion; operators must call the admin delete endpoint to
+	// avoid accidental data loss.
 
 	controllerutil.RemoveFinalizer(pack, ensembleFinalizer)
 	if err := r.Update(ctx, pack); err != nil {
@@ -953,243 +1054,12 @@ func skillRefsEqual(a, b []sympoziumv1alpha1.SkillRef) bool {
 	return true
 }
 
-// reconcileSharedMemory ensures PVC, Deployment, and Service exist for the
-// pack-level shared memory server when SharedMemory is enabled.
-func (r *EnsembleReconciler) reconcileSharedMemory(ctx context.Context, log logr.Logger, pack *sympoziumv1alpha1.Ensemble) error {
-	if pack.Spec.SharedMemory == nil || !pack.Spec.SharedMemory.Enabled {
-		// Shared memory not requested — clean up any existing resources.
-		if pack.Status.SharedMemoryReady {
-			return r.cleanupSharedMemory(ctx, log, pack)
-		}
-		return nil
-	}
-
-	ensembleName := pack.Name
-	ns := pack.Namespace
-
-	pvcName := ensembleName + "-shared-memory-db"
-	deployName := ensembleName + "-shared-memory"
-
-	storageSize := pack.Spec.SharedMemory.StorageSize
-	if storageSize == "" {
-		storageSize = "1Gi"
-	}
-
-	tag := os.Getenv("SYMPOZIUM_IMAGE_TAG")
-	if tag == "" {
-		tag = "latest"
-	}
-	registry := os.Getenv("SYMPOZIUM_IMAGE_REGISTRY")
-	if registry == "" {
-		registry = "ghcr.io/sympozium-ai/sympozium"
-	}
-	image := fmt.Sprintf("%s/skill-memory:%s", registry, tag)
-
-	sharedLabels := map[string]string{
-		"sympozium.ai/component": "shared-memory",
-		"sympozium.ai/ensemble":  ensembleName,
-	}
-
-	// --- PVC ---
-	var existingPVC corev1.PersistentVolumeClaim
-	if err := r.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: ns}, &existingPVC); err != nil {
-		if !errors.IsNotFound(err) {
-			return err
-		}
-		pvc := corev1.PersistentVolumeClaim{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      pvcName,
-				Namespace: ns,
-				Labels:    sharedLabels,
-			},
-			Spec: corev1.PersistentVolumeClaimSpec{
-				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-				Resources: corev1.VolumeResourceRequirements{
-					Requests: corev1.ResourceList{
-						corev1.ResourceStorage: resource.MustParse(storageSize),
-					},
-				},
-			},
-		}
-		if err := controllerutil.SetControllerReference(pack, &pvc, r.Scheme); err != nil {
-			return err
-		}
-		log.Info("Creating shared memory PVC", "name", pvcName)
-		if err := r.Create(ctx, &pvc); err != nil {
-			return err
-		}
-	}
-
-	// --- Deployment ---
-	var existingDeploy appsv1.Deployment
-	if err := r.Get(ctx, types.NamespacedName{Name: deployName, Namespace: ns}, &existingDeploy); err != nil {
-		if !errors.IsNotFound(err) {
-			return err
-		}
-
-		replicas := int32(1)
-		fsGroup := int64(1000)
-		deploy := &appsv1.Deployment{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      deployName,
-				Namespace: ns,
-				Labels:    sharedLabels,
-			},
-			Spec: appsv1.DeploymentSpec{
-				Replicas: &replicas,
-				Strategy: appsv1.DeploymentStrategy{
-					Type: appsv1.RecreateDeploymentStrategyType,
-				},
-				Selector: &metav1.LabelSelector{
-					MatchLabels: sharedLabels,
-				},
-				Template: corev1.PodTemplateSpec{
-					ObjectMeta: metav1.ObjectMeta{
-						Labels: sharedLabels,
-					},
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{
-								Name:            "memory-server",
-								Image:           image,
-								ImagePullPolicy: corev1.PullIfNotPresent,
-								Ports: []corev1.ContainerPort{
-									{Name: "http", ContainerPort: 8080, Protocol: corev1.ProtocolTCP},
-								},
-								Env: []corev1.EnvVar{
-									{Name: "MEMORY_DB_PATH", Value: "/data/memory.db"},
-									{Name: "MEMORY_PORT", Value: "8080"},
-								},
-								VolumeMounts: []corev1.VolumeMount{
-									{Name: "memory-db", MountPath: "/data"},
-								},
-								StartupProbe: &corev1.Probe{
-									ProbeHandler: corev1.ProbeHandler{
-										HTTPGet: &corev1.HTTPGetAction{
-											Path: "/health",
-											Port: intstr.FromInt32(8080),
-										},
-									},
-									PeriodSeconds:    2,
-									FailureThreshold: 30,
-								},
-								ReadinessProbe: &corev1.Probe{
-									ProbeHandler: corev1.ProbeHandler{
-										HTTPGet: &corev1.HTTPGetAction{
-											Path: "/health",
-											Port: intstr.FromInt32(8080),
-										},
-									},
-									PeriodSeconds: 10,
-								},
-								LivenessProbe: &corev1.Probe{
-									ProbeHandler: corev1.ProbeHandler{
-										HTTPGet: &corev1.HTTPGetAction{
-											Path: "/health",
-											Port: intstr.FromInt32(8080),
-										},
-									},
-									InitialDelaySeconds: 5,
-									PeriodSeconds:       30,
-								},
-								Resources: corev1.ResourceRequirements{
-									Requests: corev1.ResourceList{
-										corev1.ResourceCPU:    resource.MustParse("50m"),
-										corev1.ResourceMemory: resource.MustParse("64Mi"),
-									},
-									Limits: corev1.ResourceList{
-										corev1.ResourceCPU:    resource.MustParse("200m"),
-										corev1.ResourceMemory: resource.MustParse("128Mi"),
-									},
-								},
-							},
-						},
-						Volumes: []corev1.Volume{
-							{
-								Name: "memory-db",
-								VolumeSource: corev1.VolumeSource{
-									PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-										ClaimName: pvcName,
-									},
-								},
-							},
-						},
-						SecurityContext: &corev1.PodSecurityContext{
-							FSGroup: &fsGroup,
-						},
-					},
-				},
-			},
-		}
-
-		if err := controllerutil.SetControllerReference(pack, deploy, r.Scheme); err != nil {
-			return err
-		}
-		log.Info("Creating shared memory Deployment", "name", deployName)
-		if err := r.Create(ctx, deploy); err != nil {
-			return err
-		}
-	}
-
-	// --- Service ---
-	var existingSvc corev1.Service
-	if err := r.Get(ctx, types.NamespacedName{Name: deployName, Namespace: ns}, &existingSvc); err != nil {
-		if !errors.IsNotFound(err) {
-			return err
-		}
-		svc := &corev1.Service{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      deployName,
-				Namespace: ns,
-				Labels:    sharedLabels,
-			},
-			Spec: corev1.ServiceSpec{
-				Selector: sharedLabels,
-				Ports: []corev1.ServicePort{
-					{Name: "http", Port: 8080, TargetPort: intstr.FromInt32(8080), Protocol: corev1.ProtocolTCP},
-				},
-			},
-		}
-		if err := controllerutil.SetControllerReference(pack, svc, r.Scheme); err != nil {
-			return err
-		}
-		log.Info("Creating shared memory Service", "name", deployName)
-		if err := r.Create(ctx, svc); err != nil {
-			return err
-		}
-	}
-
-	pack.Status.SharedMemoryReady = true
-	return nil
-}
-
-// cleanupSharedMemory deletes the PVC, Deployment, and Service for shared memory.
-func (r *EnsembleReconciler) cleanupSharedMemory(ctx context.Context, log logr.Logger, pack *sympoziumv1alpha1.Ensemble) error {
-	ensembleName := pack.Name
-	ns := pack.Namespace
-	deployName := ensembleName + "-shared-memory"
-	pvcName := ensembleName + "-shared-memory-db"
-
-	// Delete Service
-	svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: deployName, Namespace: ns}}
-	if err := r.Delete(ctx, svc); err != nil && !errors.IsNotFound(err) {
-		return fmt.Errorf("delete shared memory service: %w", err)
-	}
-
-	// Delete Deployment
-	deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: deployName, Namespace: ns}}
-	if err := r.Delete(ctx, deploy); err != nil && !errors.IsNotFound(err) {
-		return fmt.Errorf("delete shared memory deployment: %w", err)
-	}
-
-	// Delete PVC
-	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: pvcName, Namespace: ns}}
-	if err := r.Delete(ctx, pvc); err != nil && !errors.IsNotFound(err) {
-		return fmt.Errorf("delete shared memory pvc: %w", err)
-	}
-
-	log.Info("Cleaned up shared memory resources", "pack", ensembleName)
-	pack.Status.SharedMemoryReady = false
+// reconcileSharedMemory mirrors spec.sharedMemory.enabled into
+// status.sharedMemoryReady. With the central memory-server there is no
+// per-Ensemble infrastructure to provision; the ensemble scope is a
+// logical pool inside the cluster-wide service.
+func (r *EnsembleReconciler) reconcileSharedMemory(_ context.Context, _ logr.Logger, pack *sympoziumv1alpha1.Ensemble) error {
+	pack.Status.SharedMemoryReady = pack.Spec.SharedMemory != nil && pack.Spec.SharedMemory.Enabled
 	return nil
 }
 

@@ -393,3 +393,138 @@ serviceMonitor:
   enabled: false
   interval: 30s
   labels: {}
+
+# -- Central memory server (PostgreSQL + pgvector backed).
+# Replaces per-Agent SQLite. Agents auth with their SA token (TokenReview).
+# Cross-namespace sharing is gated by Ensemble.membrane export/import rules.
+memory:
+  # -- Master switch. Disables Deployment, Service, migration Job and Postgres.
+  enabled: true
+
+  # -- memory-server Deployment (HTTP API, scales horizontally).
+  server:
+    replicaCount: 1
+    image:
+      repository: ""  # defaults to {{ .Values.image.registry }}/memory-server
+      tag: ""
+    # -- ServiceAccount annotations (e.g. IRSA role ARN for AWS RDS IAM auth,
+    # Workload Identity binding on GKE). The SA is created as a pre-install
+    # hook so these annotations are present before the migrate Job pod is
+    # admitted — required for the kubelet to project the right cloud token.
+    serviceAccount:
+      annotations: {}
+      # eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/sympozium-memory-server
+    # Example:
+    #   limits:
+    #     cpu: "1"
+    #     memory: 512Mi
+    #   requests:
+    #     cpu: 100m
+    #     memory: 128Mi
+    resources: {}
+    service:
+      type: ClusterIP
+      port: 8080
+    listen: ":8080"
+    # -- TokenReview cache. Short TTL bounds revoked-token blast radius.
+    tokenCache:
+      ttl: "60s"
+      size: 4096
+    # -- Membership cache (Agent + Ensemble graph). Changes at human pace.
+    membershipCache:
+      ttl: "10m"
+      size: 4096
+    # -- Cluster-wide default memory TTL in days. 0 = no expiry.
+    defaultTTLDays: 0
+    # -- SAs that bypass scope filters and may call admin endpoints.
+    # Format: "namespace/sa". Controller + apiserver SAs are added automatically.
+    adminServiceAccounts: []
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+  # -- One-shot schema migration Job (pre-install + pre-upgrade hook, idempotent).
+  migrate:
+    enabled: true
+    # Example:
+    #   limits:
+    #     cpu: 500m
+    #     memory: 256Mi
+    #   requests:
+    #     cpu: 100m
+    #     memory: 64Mi
+    resources: {}
+    backoffLimit: 3
+    activeDeadlineSeconds: 600
+
+  # -- Database connection.
+  database:
+    # -- Connection string. Templated, so {{ .Release.Name }} etc. work.
+    # Leave empty to use `urlSecret` or the bundled Postgres.
+    url: ""
+    # -- Existing Secret with key `DATABASE_URL`. Takes precedence over `url`.
+    urlSecret: ""
+
+    # -- Auth mode.
+    #   "password" / "" — DATABASE_URL used verbatim (password, mTLS, peer, Cloud SQL Proxy, …)
+    #   "rds-iam"       — re-mint AWS RDS IAM token per connection. Needs IRSA + AWS_REGION.
+    auth:
+      mode: "password"
+      # Override AWS region for the rds-iam hook; defaults to env AWS_REGION.
+      awsRegion: ""
+
+  # -- Embedding provider (vectorises every write/search). Dimension MUST match
+  # the SQL schema column type (vector(1536)). Changing it is a breaking op.
+  #
+  # Any OpenAI-compatible endpoint works via `baseURL` (Azure, Voyage AI,
+  # Ollama, vLLM, …). Anthropic does not ship an embeddings API; pair Claude
+  # with Voyage AI: baseURL=https://api.voyageai.com/v1, model=voyage-3.
+  embedding:
+    provider: "openai"
+    model: "text-embedding-3-small"
+    dimension: 1536
+    baseURL: ""
+    # -- Inline API key (chart creates a Secret) OR `apiKeySecretRef` pointing
+    # at an existing Secret with key EMBEDDING_API_KEY.
+    apiKey: ""
+    apiKeySecretRef: ""
+
+  # -- Bundled PostgreSQL + pgvector (single-node StatefulSet).
+  # OFF by default: single pod, no HA/PITR/managed backups. Fine for
+  # kind/dev/CI, NOT production. For prod, point `database.url` /
+  # `database.urlSecret` at managed Postgres (RDS, Cloud SQL, CloudNativePG, …).
+  postgres:
+    enabled: false
+    image:
+      repository: "pgvector/pgvector"
+      tag: "pg16"
+    auth:
+      database: "sympozium"
+      username: "sympozium"
+      # Plaintext password for the bundled Postgres. REQUIRED when
+      # existingSecret is empty. The chart does NOT auto-generate one
+      # because ArgoCD's `helm template` mode would re-render a different
+      # random value on every sync, locking the running DB out.
+      # For real environments, prefer existingSecret + SOPS / SealedSecrets /
+      # external-secrets-operator.
+      password: ""
+      # Existing Secret with key `password`. Takes precedence over `password`.
+      existingSecret: ""
+    service:
+      port: 5432
+    persistence:
+      enabled: true
+      size: 20Gi
+      storageClass: ""
+    # Example:
+    #   limits:
+    #     cpu: "2"
+    #     memory: 2Gi
+    #   requests:
+    #     cpu: 200m
+    #     memory: 512Mi
+    resources: {}
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+

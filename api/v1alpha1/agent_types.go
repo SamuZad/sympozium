@@ -28,8 +28,9 @@ type AgentSpec struct {
 	// +optional
 	AuthRefs []SecretRef `json:"authRefs,omitempty"`
 
-	// Memory configures persistent memory for this instance.
-	// When enabled, a MEMORY.md ConfigMap is managed and mounted into agent pods.
+	// Memory configures persistent memory for this instance. When enabled,
+	// the agent gains memory_search/store/list tools that talk to the
+	// cluster's central memory-server.
 	// +optional
 	Memory *MemorySpec `json:"memory,omitempty"`
 
@@ -115,16 +116,28 @@ type MCPServerRef struct {
 	ToolsDeny []string `json:"toolsDeny,omitempty"`
 }
 
-// MemorySpec configures persistent memory for a Agent.
+// MemorySpec enables long-term memory for an Agent. Memory is stored centrally
+// in the cluster's memory-server (PostgreSQL + pgvector), not in per-agent
+// ConfigMaps or PVCs.
 type MemorySpec struct {
-	// Enabled indicates whether persistent memory is active.
+	// Enabled toggles memory tools (memory_search/store/list) for this agent.
 	// +kubebuilder:default=true
 	Enabled bool `json:"enabled"`
 
-	// MaxSizeKB caps the memory ConfigMap size in kilobytes.
-	// +kubebuilder:default=256
+	// Embedding optionally overrides the cluster-default embedding model
+	// for this agent's PRIVATE memory scope. Writes to an ensemble's
+	// shared pool always use the ensemble's embedding model (or the
+	// cluster default if the ensemble has none); ensemble-scope writes
+	// from this agent will be rejected by memory-server if the agent's
+	// override disagrees with the pool.
 	// +optional
-	MaxSizeKB int `json:"maxSizeKB,omitempty"`
+	Embedding *EmbeddingConfig `json:"embedding,omitempty"`
+
+	// TTLDays controls how many days a memory entry remains valid before
+	// it is eligible for pruning. 0 means use the cluster default.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	TTLDays int `json:"ttlDays,omitempty"`
 
 	// SystemPrompt is injected into every agent run for this instance
 	// to instruct the agent on how to use memory.

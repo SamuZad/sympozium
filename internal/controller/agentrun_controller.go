@@ -42,6 +42,7 @@ import (
 	sympoziumv1alpha1 "github.com/sympozium-ai/sympozium/api/v1alpha1"
 	"github.com/sympozium-ai/sympozium/internal/eventbus"
 	"github.com/sympozium-ai/sympozium/internal/orchestrator"
+	"github.com/sympozium-ai/sympozium/pkg/memoryclient"
 	"gopkg.in/yaml.v3"
 )
 
@@ -119,6 +120,20 @@ type AgentRunReconciler struct {
 	// that components like the web proxy can react without polling the CRD.
 	// Optional — nil when NATS is not configured.
 	EventBus eventbus.EventBus
+
+	// MemoryServerURL is the base URL of the central memory-server
+	// (e.g. "http://release-memory-server.sympozium-system.svc:8080").
+	// When set, the controller stamps it onto agent pods whose parent
+	// Agent has memory enabled. Empty disables the memory subsystem
+	// regardless of per-Agent settings — the chart sets this only when
+	// memory.enabled=true.
+	MemoryServerURL string
+
+	// MemoryClient is used by the controller itself to write to the
+	// central memory-server (currently for failure breadcrumbs from
+	// terminal AgentRun state handlers). Nil when MemoryServerURL is
+	// empty; all memory-writing code paths must tolerate that.
+	MemoryClient *memoryclient.Client
 }
 
 const imageRegistry = "ghcr.io/sympozium-ai/sympozium"
@@ -334,8 +349,8 @@ func (r *AgentRunReconciler) reconcilePending(ctx context.Context, log logr.Logg
 		return r.reconcilePendingAgentSandbox(ctx, log, agentRun)
 	}
 
-	// Ensure the sympozium-agent ServiceAccount exists in the target namespace.
-	if err := r.ensureAgentServiceAccount(ctx, agentRun.Namespace); err != nil {
+	// Ensure the per-Agent ServiceAccount exists in the target namespace.
+	if err := r.ensureAgentServiceAccount(ctx, agentRun); err != nil {
 		return ctrl.Result{}, fmt.Errorf("ensuring agent service account: %w", err)
 	}
 
@@ -439,38 +454,6 @@ func (r *AgentRunReconciler) reconcilePending(ctx context.Context, log logr.Logg
 	}
 	sidecars = taskSidecars
 
-	// If the memory skill is attached, verify the memory server Deployment
-	// exists AND has at least one ready replica before creating the Job.
-	// The instance controller creates it asynchronously — if it hasn't
-	// reconciled yet or the pod isn't ready, requeue rather than creating
-	// a pod that hangs on the wait-for-memory init container.
-	// Give up after 120s to avoid infinite requeue loops.
-	if agentRunHasMemorySkill(agentRun) {
-		memoryDeployName := fmt.Sprintf("%s-memory", agentRun.Spec.AgentRef)
-		var memoryDeploy appsv1.Deployment
-		if err := r.Get(ctx, client.ObjectKey{
-			Namespace: agentRun.Namespace,
-			Name:      memoryDeployName,
-		}, &memoryDeploy); err != nil {
-			age := time.Since(agentRun.CreationTimestamp.Time)
-			if age > 120*time.Second {
-				return ctrl.Result{}, r.failRun(ctx, agentRun,
-					fmt.Sprintf("memory server deployment %q not found after %s — ensure the instance has been reconciled", memoryDeployName, age.Truncate(time.Second)))
-			}
-			log.Info("Memory server deployment not found, requeueing", "deployment", memoryDeployName, "age", age.Truncate(time.Second))
-			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
-		}
-		if memoryDeploy.Status.ReadyReplicas < 1 {
-			age := time.Since(agentRun.CreationTimestamp.Time)
-			if age > 120*time.Second {
-				return ctrl.Result{}, r.failRun(ctx, agentRun,
-					fmt.Sprintf("memory server deployment %q has no ready replicas after %s", memoryDeployName, age.Truncate(time.Second)))
-			}
-			log.Info("Memory server not ready, requeueing", "deployment", memoryDeployName, "readyReplicas", memoryDeploy.Status.ReadyReplicas, "age", age.Truncate(time.Second))
-			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
-		}
-	}
-
 	// Mirror skill ConfigMaps from sympozium-system into the agent namespace
 	// so projected volumes can reference them (ConfigMaps are namespace-local).
 	if err := r.mirrorSkillConfigMaps(ctx, log, agentRun); err != nil {
@@ -531,9 +514,6 @@ func (r *AgentRunReconciler) reconcilePending(ctx context.Context, log logr.Logg
 
 	// Build and create the Job
 	job := r.buildJob(agentRun, memoryEnabled, observability, sidecars, mcpServers)
-
-	// Inject shared workflow memory env vars and init container if the pack has shared memory.
-	r.injectSharedMemory(ctx, agentRun, job)
 
 	// Inject ensemble relationship context so the agent-runner can auto-generate
 	// delegation/supervision instructions in the system prompt.
@@ -653,8 +633,6 @@ func (r *AgentRunReconciler) reconcileRunning(ctx context.Context, log logr.Logg
 	if job.Status.Succeeded > 0 {
 		// Extract the LLM response from pod logs before the pod is gone.
 		result, _, usage := r.extractResultFromPod(ctx, log, agentRun)
-		// Extract and persist memory updates if applicable.
-		r.extractAndPersistMemory(ctx, log, agentRun)
 		if hasPostRunHooks {
 			return r.startPostRun(ctx, log, agentRun, 0, result, usage)
 		}
@@ -667,7 +645,6 @@ func (r *AgentRunReconciler) reconcileRunning(ctx context.Context, log logr.Logg
 		result, podErr, usage := r.extractResultFromPod(ctx, log, agentRun)
 		if result != "" && podErr == "" {
 			log.Info("Job failed but agent produced a success result; treating as success")
-			r.extractAndPersistMemory(ctx, log, agentRun)
 			if hasPostRunHooks {
 				return r.startPostRun(ctx, log, agentRun, 0, result, usage)
 			}
@@ -677,7 +654,6 @@ func (r *AgentRunReconciler) reconcileRunning(ctx context.Context, log logr.Logg
 		if podErr != "" {
 			errMsg = podErr
 		}
-		r.extractAndPersistMemory(ctx, log, agentRun)
 		r.persistFailureMemory(ctx, log, agentRun, errMsg)
 		if hasPostRunHooks {
 			return r.startPostRun(ctx, log, agentRun, 1, errMsg, nil)
@@ -697,7 +673,6 @@ func (r *AgentRunReconciler) reconcileRunning(ctx context.Context, log logr.Logg
 			if exitCode == 0 {
 				log.Info("Agent container terminated successfully; cleaning up lingering sidecars")
 				result, _, usage := r.extractResultFromPod(ctx, log, agentRun)
-				r.extractAndPersistMemory(ctx, log, agentRun)
 				// Delete the Job so Kubernetes kills remaining sidecar containers.
 				_ = r.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground))
 				if hasPostRunHooks {
@@ -714,7 +689,6 @@ func (r *AgentRunReconciler) reconcileRunning(ctx context.Context, log logr.Logg
 			if _, logErr, _ := r.extractResultFromPod(ctx, log, agentRun); logErr != "" {
 				errMsg = logErr
 			}
-			r.extractAndPersistMemory(ctx, log, agentRun)
 			r.persistFailureMemory(ctx, log, agentRun, errMsg)
 			_ = r.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground))
 			if hasPostRunHooks {
@@ -733,7 +707,6 @@ func (r *AgentRunReconciler) reconcileRunning(ctx context.Context, log logr.Logg
 				"reason", sf.reason,
 				"exitCode", sf.exitCode,
 			)
-			r.extractAndPersistMemory(ctx, log, agentRun)
 			r.persistFailureMemory(ctx, log, agentRun, sf.message)
 			_ = r.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground))
 			if hasPostRunHooks {
@@ -752,7 +725,6 @@ func (r *AgentRunReconciler) reconcileRunning(ctx context.Context, log logr.Logg
 		}
 		if elapsed > timeout {
 			log.Info("AgentRun timed out", "elapsed", elapsed, "timeout", timeout)
-			r.extractAndPersistMemory(ctx, log, agentRun)
 			r.persistFailureMemory(ctx, log, agentRun, "timeout")
 			// Delete the Job to kill the pod
 			_ = r.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationForeground))
@@ -1295,7 +1267,7 @@ func (r *AgentRunReconciler) reconcilePendingServer(ctx context.Context, log log
 	log.Info("Reconciling pending server-mode AgentRun")
 
 	// Ensure ServiceAccount exists.
-	if err := r.ensureAgentServiceAccount(ctx, agentRun.Namespace); err != nil {
+	if err := r.ensureAgentServiceAccount(ctx, agentRun); err != nil {
 		return ctrl.Result{}, fmt.Errorf("ensuring agent service account: %w", err)
 	}
 
@@ -1412,7 +1384,7 @@ func (r *AgentRunReconciler) reconcilePendingServer(ctx context.Context, log log
 				},
 				Spec: corev1.PodSpec{
 					RestartPolicy:      corev1.RestartPolicyAlways,
-					ServiceAccountName: "sympozium-agent",
+					ServiceAccountName: agentServiceAccountName(agentRun),
 					ImagePullSecrets:   agentRun.Spec.ImagePullSecrets,
 					NodeSelector:       agentRun.Spec.Model.NodeSelector,
 					Tolerations:        agentRun.Spec.Tolerations,
@@ -1782,26 +1754,46 @@ func (r *AgentRunReconciler) validatePolicy(ctx context.Context, agentRun *sympo
 	return nil
 }
 
-// ensureAgentServiceAccount creates the sympozium-agent ServiceAccount in the
-// given namespace if it does not already exist. This is needed because agent
-// Jobs reference this SA and run in the user's namespace, not sympozium-system.
-func (r *AgentRunReconciler) ensureAgentServiceAccount(ctx context.Context, namespace string) error {
+// agentServiceAccountName returns the per-Agent ServiceAccount name an
+// AgentRun pod should run under. Mirrors AgentServiceAccountName in
+// agent_controller.go (which is the source of truth on the Agent side).
+// Falls back to the legacy shared "sympozium-agent" for ad-hoc runs that
+// have no parent Agent (AgentRef unset) so freestanding test/admin runs
+// keep working.
+func agentServiceAccountName(agentRun *sympoziumv1alpha1.AgentRun) string {
+	if agentRun != nil && agentRun.Spec.AgentRef != "" {
+		return agentRun.Spec.AgentRef + "-agent"
+	}
+	return "sympozium-agent"
+}
+
+// ensureAgentServiceAccount creates the ServiceAccount the AgentRun pod
+// will use, if it does not already exist. The Agent controller normally
+// owns this SA (so it gets owner-ref-based GC), but the AgentRun may
+// reconcile before the Agent controller has caught up, or the run may be
+// freestanding with no parent Agent — this is the defensive backstop.
+func (r *AgentRunReconciler) ensureAgentServiceAccount(ctx context.Context, agentRun *sympoziumv1alpha1.AgentRun) error {
+	saName := agentServiceAccountName(agentRun)
 	sa := &corev1.ServiceAccount{}
-	err := r.Get(ctx, client.ObjectKey{Name: "sympozium-agent", Namespace: namespace}, sa)
+	err := r.Get(ctx, client.ObjectKey{Name: saName, Namespace: agentRun.Namespace}, sa)
 	if err == nil {
-		return nil // already exists
+		return nil
 	}
 	if !errors.IsNotFound(err) {
 		return fmt.Errorf("checking for agent service account: %w", err)
 	}
 	sa = &corev1.ServiceAccount{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "sympozium-agent",
-			Namespace: namespace,
+			Name:      saName,
+			Namespace: agentRun.Namespace,
 			Labels: map[string]string{
 				"app.kubernetes.io/managed-by": "sympozium",
+				"sympozium.ai/component":       "agent-identity",
 			},
 		},
+	}
+	if agentRun.Spec.AgentRef != "" {
+		sa.Labels["sympozium.ai/instance"] = agentRun.Spec.AgentRef
 	}
 	if err := r.Create(ctx, sa); err != nil {
 		if errors.IsAlreadyExists(err) {
@@ -1880,7 +1872,7 @@ func (r *AgentRunReconciler) buildJob(
 				},
 				Spec: corev1.PodSpec{
 					RestartPolicy:      corev1.RestartPolicyNever,
-					ServiceAccountName: "sympozium-agent",
+					ServiceAccountName: agentServiceAccountName(agentRun),
 					ImagePullSecrets:   agentRun.Spec.ImagePullSecrets,
 					HostNetwork:        hostNetwork,
 					HostPID:            hostPID,
@@ -2082,53 +2074,13 @@ func (r *AgentRunReconciler) buildContainers(
 		)
 	}
 
-	// Add memory volume mount if legacy memory is enabled.
-	if memoryEnabled {
-		containers[0].VolumeMounts = append(containers[0].VolumeMounts,
-			corev1.VolumeMount{Name: "memory", MountPath: "/memory", ReadOnly: true},
-		)
+	// Wire the central memory-server when the parent Agent has memory
+	// enabled AND the controller knows the service URL. The agent-runner
+	// authenticates with its projected SA token; nothing else to inject.
+	if memoryEnabled && r.MemoryServerURL != "" {
 		containers[0].Env = append(containers[0].Env,
-			corev1.EnvVar{Name: "MEMORY_ENABLED", Value: "true"},
+			corev1.EnvVar{Name: "MEMORY_SERVER_URL", Value: r.MemoryServerURL},
 		)
-	}
-
-	// Inject MEMORY_SERVER_URL for the standalone memory server.
-	if agentRunHasMemorySkill(agentRun) {
-		memoryURL := fmt.Sprintf("http://%s-memory.%s.svc:8080", agentRun.Spec.AgentRef, agentRun.Namespace)
-		containers[0].Env = append(containers[0].Env,
-			corev1.EnvVar{Name: "MEMORY_SERVER_URL", Value: memoryURL},
-		)
-
-		// Init container to wait for memory server readiness before agent starts.
-		// The controller already checks for ready replicas before creating the pod,
-		// so this is a safety net for cases where the memory server becomes briefly
-		// unavailable between the controller check and pod scheduling.
-		// Timeout after 120s to accommodate resource-constrained environments.
-		initContainers = append(initContainers, corev1.Container{
-			Name:            "wait-for-memory",
-			Image:           "busybox:1.36",
-			ImagePullPolicy: corev1.PullIfNotPresent,
-			SecurityContext: &corev1.SecurityContext{
-				ReadOnlyRootFilesystem:   &readOnly,
-				AllowPrivilegeEscalation: &noPrivEsc,
-				Capabilities: &corev1.Capabilities{
-					Drop: []corev1.Capability{"ALL"},
-				},
-			},
-			Command: []string{"sh", "-c",
-				fmt.Sprintf("elapsed=0; until wget -q --spider --timeout=2 %s/health; do echo 'waiting for memory server...'; sleep 2; elapsed=$((elapsed+2)); if [ $elapsed -ge 120 ]; then echo 'ERROR: memory server not ready after 120s'; exit 1; fi; done", memoryURL),
-			},
-			Resources: corev1.ResourceRequirements{
-				Requests: corev1.ResourceList{
-					corev1.ResourceCPU:    resource.MustParse("50m"),
-					corev1.ResourceMemory: resource.MustParse("32Mi"),
-				},
-				Limits: corev1.ResourceList{
-					corev1.ResourceCPU:    resource.MustParse("100m"),
-					corev1.ResourceMemory: resource.MustParse("64Mi"),
-				},
-			},
-		})
 	}
 
 	// Inject custom environment variables from AgentRun spec.
@@ -2594,100 +2546,6 @@ func buildObservabilityEnv(agentRun *sympoziumv1alpha1.AgentRun, obs *sympoziumv
 	return env
 }
 
-// injectSharedMemory adds WORKFLOW_MEMORY_SERVER_URL, WORKFLOW_MEMORY_ACCESS env vars
-// and a wait-for-shared-memory init container to the Job's pod template if the
-// AgentRun belongs to a Ensemble with shared memory enabled.
-func (r *AgentRunReconciler) injectSharedMemory(ctx context.Context, agentRun *sympoziumv1alpha1.AgentRun, job *batchv1.Job) {
-	packName := agentRun.Labels["sympozium.ai/ensemble"]
-	if packName == "" {
-		return
-	}
-
-	var pack sympoziumv1alpha1.Ensemble
-	if err := r.Get(ctx, types.NamespacedName{Name: packName, Namespace: agentRun.Namespace}, &pack); err != nil {
-		return
-	}
-	if pack.Spec.SharedMemory == nil || !pack.Spec.SharedMemory.Enabled {
-		return
-	}
-
-	sharedMemoryURL := fmt.Sprintf("http://%s-shared-memory.%s.svc:8080", packName, agentRun.Namespace)
-
-	// Resolve access mode for this persona from the instance's label.
-	accessMode := "read-write"
-	if agentRun.Spec.AgentRef != "" {
-		var inst sympoziumv1alpha1.Agent
-		if err := r.Get(ctx, types.NamespacedName{Name: agentRun.Spec.AgentRef, Namespace: agentRun.Namespace}, &inst); err == nil {
-			personaName := inst.Labels["sympozium.ai/agent-config"]
-			for _, rule := range pack.Spec.SharedMemory.AccessRules {
-				if rule.AgentConfig == personaName {
-					accessMode = rule.Access
-					break
-				}
-			}
-		}
-	}
-
-	// Inject env vars into the agent container (first container).
-	podSpec := &job.Spec.Template.Spec
-	if len(podSpec.Containers) > 0 {
-		podSpec.Containers[0].Env = append(podSpec.Containers[0].Env,
-			corev1.EnvVar{Name: "WORKFLOW_MEMORY_SERVER_URL", Value: sharedMemoryURL},
-			corev1.EnvVar{Name: "WORKFLOW_MEMORY_ACCESS", Value: accessMode},
-		)
-
-		// Inject membrane env vars if configured.
-		if pack.Spec.SharedMemory.Membrane != nil {
-			personaName := ""
-			if agentRun.Spec.AgentRef != "" {
-				var inst sympoziumv1alpha1.Agent
-				if err := r.Get(ctx, types.NamespacedName{Name: agentRun.Spec.AgentRef, Namespace: agentRun.Namespace}, &inst); err == nil {
-					personaName = inst.Labels["sympozium.ai/agent-config"]
-				}
-			}
-
-			// Auto-derive permeability from relationships if not explicitly set.
-			membrane := pack.Spec.SharedMemory.Membrane
-			if len(membrane.Permeability) == 0 && len(pack.Spec.Relationships) > 0 {
-				membrane = membrane.DeepCopy()
-				membrane.Permeability = derivePermeability(pack.Spec.AgentConfigs, pack.Spec.Relationships, membrane.DefaultVisibility)
-			}
-
-			membraneEnvs := resolveMembraneEnvVars(personaName, membrane, pack.Spec.Relationships)
-			podSpec.Containers[0].Env = append(podSpec.Containers[0].Env, membraneEnvs...)
-		}
-	}
-
-	// Add wait-for-shared-memory init container.
-	readOnly := true
-	noPrivEsc := false
-	podSpec.InitContainers = append(podSpec.InitContainers, corev1.Container{
-		Name:            "wait-for-shared-memory",
-		Image:           "busybox:1.36",
-		ImagePullPolicy: corev1.PullIfNotPresent,
-		SecurityContext: &corev1.SecurityContext{
-			ReadOnlyRootFilesystem:   &readOnly,
-			AllowPrivilegeEscalation: &noPrivEsc,
-			Capabilities: &corev1.Capabilities{
-				Drop: []corev1.Capability{"ALL"},
-			},
-		},
-		Command: []string{"sh", "-c",
-			fmt.Sprintf("elapsed=0; until wget -q --spider --timeout=2 %s/health; do echo 'waiting for shared memory server...'; sleep 2; elapsed=$((elapsed+2)); if [ $elapsed -ge 120 ]; then echo 'ERROR: shared memory server not ready after 120s'; exit 1; fi; done", sharedMemoryURL),
-		},
-		Resources: corev1.ResourceRequirements{
-			Requests: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse("50m"),
-				corev1.ResourceMemory: resource.MustParse("32Mi"),
-			},
-			Limits: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse("100m"),
-				corev1.ResourceMemory: resource.MustParse("64Mi"),
-			},
-		},
-	})
-}
-
 // injectRelationshipContext serialises the ensemble's relationships and persona
 // display names into env vars on the agent container so the agent-runner can
 // auto-generate delegation/supervision instructions in the system prompt.
@@ -2811,114 +2669,6 @@ func (r *AgentRunReconciler) injectSubagentsConfig(ctx context.Context, agentRun
 	}
 }
 
-// derivePermeability auto-generates permeability rules from the ensemble's
-// relationship graph when the membrane is enabled but no explicit permeability
-// rules are configured. This gives users sensible defaults without manual config.
-//
-// Heuristics:
-//   - Delegation sources → "trusted" (they produce findings for trusted peers)
-//   - Supervision targets → "public" (supervisors need full visibility)
-//   - Terminal sequential targets (not source of any edge) → "private"
-//   - Everyone else → ensemble default visibility
-func derivePermeability(agentConfigs []sympoziumv1alpha1.AgentConfigSpec, relationships []sympoziumv1alpha1.AgentConfigRelationship, defaultVis string) []sympoziumv1alpha1.PermeabilityRule {
-	if defaultVis == "" {
-		defaultVis = "public"
-	}
-
-	// Build role sets from relationships.
-	delegationSources := map[string]bool{}
-	supervisionTargets := map[string]bool{}
-	isSource := map[string]bool{}
-	for _, rel := range relationships {
-		isSource[rel.Source] = true
-		if rel.Type == "delegation" {
-			delegationSources[rel.Source] = true
-		}
-		if rel.Type == "supervision" {
-			supervisionTargets[rel.Target] = true
-		}
-	}
-
-	var rules []sympoziumv1alpha1.PermeabilityRule
-	for _, ac := range agentConfigs {
-		vis := defaultVis
-		if delegationSources[ac.Name] {
-			vis = "trusted"
-		} else if supervisionTargets[ac.Name] {
-			vis = "public"
-		} else if !isSource[ac.Name] && len(relationships) > 0 {
-			// Terminal node (only a target, never a source) → private
-			vis = "private"
-		}
-		rules = append(rules, sympoziumv1alpha1.PermeabilityRule{
-			AgentConfig:       ac.Name,
-			DefaultVisibility: vis,
-		})
-	}
-	return rules
-}
-
-// resolveMembraneEnvVars computes the membrane environment variables for
-// a given agent config within an ensemble.
-func resolveMembraneEnvVars(personaName string, membrane *sympoziumv1alpha1.MembraneSpec, relationships []sympoziumv1alpha1.AgentConfigRelationship) []corev1.EnvVar {
-	if membrane == nil {
-		return nil
-	}
-
-	// Resolve default visibility for this persona.
-	visibility := membrane.DefaultVisibility
-	if visibility == "" {
-		visibility = "public"
-	}
-	var acceptTags []string
-	var exposeTags []string
-	for _, rule := range membrane.Permeability {
-		if rule.AgentConfig == personaName {
-			if rule.DefaultVisibility != "" {
-				visibility = rule.DefaultVisibility
-			}
-			acceptTags = rule.AcceptTags
-			exposeTags = rule.ExposeTags
-			break
-		}
-	}
-
-	// Resolve trust peers.
-	trustPeers := resolveTrustPeers(personaName, membrane.TrustGroups, relationships)
-
-	// Time decay TTL.
-	maxAge := ""
-	if membrane.TimeDecay != nil && membrane.TimeDecay.TTL != "" {
-		maxAge = membrane.TimeDecay.TTL
-	}
-
-	envs := []corev1.EnvVar{
-		{Name: "WORKFLOW_MEMBRANE_VISIBILITY", Value: visibility},
-		{Name: "WORKFLOW_MEMBRANE_TRUST_PEERS", Value: strings.Join(trustPeers, ",")},
-		{Name: "WORKFLOW_MEMBRANE_ACCEPT_TAGS", Value: strings.Join(acceptTags, ",")},
-		{Name: "WORKFLOW_MEMBRANE_EXPOSE_TAGS", Value: strings.Join(exposeTags, ",")},
-		{Name: "WORKFLOW_MEMBRANE_MAX_AGE", Value: maxAge},
-	}
-
-	// Propagate per-run token budget if configured.
-	if membrane.TokenBudget != nil {
-		if membrane.TokenBudget.MaxTokensPerRun > 0 {
-			envs = append(envs, corev1.EnvVar{
-				Name:  "WORKFLOW_MEMBRANE_MAX_TOKENS_PER_RUN",
-				Value: fmt.Sprintf("%d", membrane.TokenBudget.MaxTokensPerRun),
-			})
-		}
-		if membrane.TokenBudget.Action != "" {
-			envs = append(envs, corev1.EnvVar{
-				Name:  "WORKFLOW_MEMBRANE_TOKEN_BUDGET_ACTION",
-				Value: membrane.TokenBudget.Action,
-			})
-		}
-	}
-
-	return envs
-}
-
 // checkTokenBudget verifies that the ensemble's token budget has not been
 // exceeded before allowing a new AgentRun to start. Returns an error if the
 // budget is exceeded and action is "halt".
@@ -2983,51 +2733,6 @@ func (r *AgentRunReconciler) updateTokenBudget(ctx context.Context, log logr.Log
 		"total_used", pack.Status.TokenBudgetUsed,
 		"max", pack.Spec.SharedMemory.Membrane.TokenBudget.MaxTokens)
 	return r.Status().Patch(ctx, &pack, patch)
-}
-
-// resolveTrustPeers computes the list of agent configs that a given persona
-// should trust, based on explicit TrustGroups and implicit trust from
-// delegation/supervision relationships.
-func resolveTrustPeers(agentConfig string, trustGroups []sympoziumv1alpha1.TrustGroup, relationships []sympoziumv1alpha1.AgentConfigRelationship) []string {
-	peers := map[string]bool{}
-
-	// From explicit trust groups.
-	for _, group := range trustGroups {
-		inGroup := false
-		for _, ac := range group.AgentConfigs {
-			if ac == agentConfig {
-				inGroup = true
-				break
-			}
-		}
-		if inGroup {
-			for _, ac := range group.AgentConfigs {
-				if ac != agentConfig {
-					peers[ac] = true
-				}
-			}
-		}
-	}
-
-	// From relationships: delegation and supervision edges imply mutual trust.
-	for _, rel := range relationships {
-		if rel.Type != "delegation" && rel.Type != "supervision" {
-			continue
-		}
-		if rel.Source == agentConfig {
-			peers[rel.Target] = true
-		}
-		if rel.Target == agentConfig {
-			peers[rel.Source] = true
-		}
-	}
-
-	result := make([]string, 0, len(peers))
-	for p := range peers {
-		result = append(result, p)
-	}
-	sort.Strings(result)
-	return result
 }
 
 // buildVolumes constructs the volume list for an agent pod.
@@ -3100,24 +2805,6 @@ func (r *AgentRunReconciler) buildVolumes(agentRun *sympoziumv1alpha1.AgentRun, 
 			},
 		})
 	}
-
-	// Add memory ConfigMap volume if legacy memory is enabled.
-	if memoryEnabled {
-		cmName := fmt.Sprintf("%s-memory", agentRun.Spec.AgentRef)
-		volumes = append(volumes, corev1.Volume{
-			Name: "memory",
-			VolumeSource: corev1.VolumeSource{
-				ConfigMap: &corev1.ConfigMapVolumeSource{
-					LocalObjectReference: corev1.LocalObjectReference{
-						Name: cmName,
-					},
-					Optional: boolPtr(true),
-				},
-			},
-		})
-	}
-
-	// Note: memory PVC is mounted on the standalone memory Deployment, not agent pods.
 
 	// Add MCP config volume if MCP servers are configured.
 	if len(mcpServers) > 0 {
@@ -3249,7 +2936,6 @@ var reservedVolumeNames = map[string]struct{}{
 	"ipc":        {},
 	"skills":     {},
 	"tmp":        {},
-	"memory":     {},
 	"mcp-config": {},
 }
 
@@ -3356,16 +3042,6 @@ func agentSkillVolumeMounts(skills []sympoziumv1alpha1.SkillRef) []corev1.Volume
 		corev1.VolumeMount{Name: "tmp", MountPath: "/tmp"},
 	)
 	return mounts
-}
-
-// agentRunHasMemorySkill returns true if the AgentRun references the "memory" SkillPack.
-func agentRunHasMemorySkill(agentRun *sympoziumv1alpha1.AgentRun) bool {
-	for _, skill := range agentRun.Spec.Skills {
-		if skill.SkillPackRef == "memory" {
-			return true
-		}
-	}
-	return false
 }
 
 // createInputConfigMap creates a ConfigMap with the agent's task input.
@@ -3575,69 +3251,6 @@ func truncateForStatus(s string, max int) string {
 		return s[:max]
 	}
 	return s[:max-3] + "..."
-}
-
-const (
-	memoryMarkerStart = "__SYMPOZIUM_MEMORY__"
-	memoryMarkerEnd   = "__SYMPOZIUM_MEMORY_END__"
-)
-
-// extractAndPersistMemory reads the agent container logs for a memory update
-// marker and patches the instance's memory ConfigMap with the new content.
-func (r *AgentRunReconciler) extractAndPersistMemory(ctx context.Context, log logr.Logger, agentRun *sympoziumv1alpha1.AgentRun) {
-	if r.Clientset == nil || agentRun.Status.PodName == "" {
-		return
-	}
-
-	tailLines := int64(100)
-	opts := &corev1.PodLogOptions{
-		Container: "agent",
-		TailLines: &tailLines,
-	}
-	req := r.Clientset.CoreV1().Pods(agentRun.Namespace).GetLogs(agentRun.Status.PodName, opts)
-	stream, err := req.Stream(ctx)
-	if err != nil {
-		return
-	}
-	defer stream.Close()
-
-	raw, err := io.ReadAll(stream)
-	if err != nil {
-		return
-	}
-
-	logs := string(raw)
-	startIdx := strings.LastIndex(logs, memoryMarkerStart)
-	if startIdx < 0 {
-		return
-	}
-	payload := logs[startIdx+len(memoryMarkerStart):]
-	endIdx := strings.Index(payload, memoryMarkerEnd)
-	if endIdx < 0 {
-		return
-	}
-	memoryContent := strings.TrimSpace(payload[:endIdx])
-	if memoryContent == "" {
-		return
-	}
-
-	// Patch the memory ConfigMap.
-	cmName := fmt.Sprintf("%s-memory", agentRun.Spec.AgentRef)
-	var cm corev1.ConfigMap
-	if err := r.Get(ctx, client.ObjectKey{
-		Namespace: agentRun.Namespace,
-		Name:      cmName,
-	}, &cm); err != nil {
-		log.V(1).Info("memory ConfigMap not found, skipping memory update", "err", err)
-		return
-	}
-
-	cm.Data["MEMORY.md"] = memoryContent
-	if err := r.Update(ctx, &cm); err != nil {
-		log.V(1).Info("failed to update memory ConfigMap", "err", err)
-		return
-	}
-	log.Info("Updated memory ConfigMap", "configmap", cmName, "bytes", len(memoryContent))
 }
 
 // failRun marks an AgentRun as failed
@@ -3867,7 +3480,7 @@ func (r *AgentRunReconciler) ensureSkillRBAC(ctx context.Context, log logr.Logge
 				Subjects: []rbacv1.Subject{
 					{
 						Kind:      "ServiceAccount",
-						Name:      "sympozium-agent",
+						Name:      agentServiceAccountName(agentRun),
 						Namespace: agentRun.Namespace,
 					},
 				},
@@ -3925,7 +3538,7 @@ func (r *AgentRunReconciler) ensureSkillRBAC(ctx context.Context, log logr.Logge
 				Subjects: []rbacv1.Subject{
 					{
 						Kind:      "ServiceAccount",
-						Name:      "sympozium-agent",
+						Name:      agentServiceAccountName(agentRun),
 						Namespace: agentRun.Namespace,
 					},
 				},
@@ -3940,7 +3553,7 @@ func (r *AgentRunReconciler) ensureSkillRBAC(ctx context.Context, log logr.Logge
 }
 
 // ensureLifecycleRBAC creates namespace-scoped Role and RoleBinding for lifecycle
-// hook containers. This grants the "sympozium-agent" ServiceAccount the permissions
+// hook containers. This grants the per-Agent ServiceAccount the permissions
 // specified in lifecycle.rbac, so hook containers can interact with Kubernetes
 // resources (e.g., create/delete ConfigMaps).
 func (r *AgentRunReconciler) ensureLifecycleRBAC(ctx context.Context, log logr.Logger, agentRun *sympoziumv1alpha1.AgentRun) error {
@@ -3995,7 +3608,7 @@ func (r *AgentRunReconciler) ensureLifecycleRBAC(ctx context.Context, log logr.L
 		Subjects: []rbacv1.Subject{
 			{
 				Kind:      "ServiceAccount",
-				Name:      "sympozium-agent",
+				Name:      agentServiceAccountName(agentRun),
 				Namespace: agentRun.Namespace,
 			},
 		},
@@ -4415,7 +4028,7 @@ func (r *AgentRunReconciler) buildPostRunJob(
 				},
 				Spec: corev1.PodSpec{
 					RestartPolicy:      corev1.RestartPolicyNever,
-					ServiceAccountName: "sympozium-agent",
+					ServiceAccountName: agentServiceAccountName(agentRun),
 					ImagePullSecrets:   agentRun.Spec.ImagePullSecrets,
 					SecurityContext: &corev1.PodSecurityContext{
 						RunAsNonRoot: &runAsNonRoot,

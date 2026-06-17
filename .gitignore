@@ -4,6 +4,10 @@ bin/
 /apiserver
 /controller
 /ipc-bridge
+/mcp-bridge
+/memory-server
+/node-probe
+/web-proxy
 /webhook
 /sympozium
 *.exe

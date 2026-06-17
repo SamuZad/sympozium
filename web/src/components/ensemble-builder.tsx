@@ -506,7 +506,6 @@ export function EnsembleBuilder({
     workflowType: initialSettings?.workflowType || "autonomous",
     sharedMemory: initialSettings?.sharedMemory || {
       enabled: true,
-      storageSize: "1Gi",
     },
   });
 
@@ -1078,7 +1077,7 @@ function BuilderCanvas({
                 ...s,
                 sharedMemory: s.sharedMemory?.enabled
                   ? null
-                  : { enabled: true, storageSize: "1Gi" },
+                  : { enabled: true },
               }))
             }
             className={`flex items-center gap-1 rounded-md border px-2 py-1 text-[10px] transition-colors

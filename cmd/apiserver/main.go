@@ -23,6 +23,7 @@ import (
 	"github.com/sympozium-ai/sympozium/internal/apiserver"
 	"github.com/sympozium-ai/sympozium/internal/controller"
 	"github.com/sympozium-ai/sympozium/internal/eventbus"
+	"github.com/sympozium-ai/sympozium/pkg/memoryclient"
 	"github.com/sympozium-ai/sympozium/pkg/telemetry"
 	webui "github.com/sympozium-ai/sympozium/web"
 )
@@ -109,6 +110,13 @@ func main() {
 	}
 
 	server := apiserver.NewServer(k8sClient.GetClient(), bus, kubeClient, log.WithName("apiserver"))
+
+	// Wire central memory-server client when configured. When MEMORY_SERVER_URL
+	// is unset, memory-viewing endpoints respond with 503.
+	if memURL := os.Getenv("MEMORY_SERVER_URL"); memURL != "" {
+		server.SetMemoryClient(memoryclient.New(memURL))
+		log.Info("memory-server client wired", "url", memURL)
+	}
 
 	// Start llmfit density poller for fitness API endpoints.
 	{

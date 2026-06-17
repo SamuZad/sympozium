@@ -3,9 +3,8 @@
 # Validates:
 #   1) Create ad-hoc instance with provider/model/skills → verify fields
 #   2) Create AgentRun against instance → verify run inherits instance config
-#   3) Memory ConfigMap created for instance
-#   4) Instance status reflects active/total runs
-#   5) Delete instance → verify cleanup
+#   3) Instance status reflects active/total runs
+#   4) Delete instance → verify cleanup
 
 set -euo pipefail
 
@@ -54,7 +53,6 @@ cleanup() {
   kubectl delete agentrun -n "$NAMESPACE" -l "sympozium.ai/instance=${INSTANCE_NAME}" --ignore-not-found >/dev/null 2>&1 || true
   kubectl delete sympoziuminstance "$INSTANCE_NAME" -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1 || true
   kubectl delete secret "$SECRET_NAME" -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1 || true
-  kubectl delete configmap -n "$NAMESPACE" -l "sympozium.ai/instance=${INSTANCE_NAME}" --ignore-not-found >/dev/null 2>&1 || true
   stop_port_forward
 }
 trap cleanup EXIT
@@ -248,24 +246,7 @@ main() {
   fi
   pass "AgentRun has correct sympozium.ai/instance label"
 
-  # ── 3) Verify memory ConfigMap exists for instance ──
-  elapsed=0
-  memory_found=false
-  while [[ "$elapsed" -lt 15 ]]; do
-    if kubectl get configmap -n "$NAMESPACE" -l "sympozium.ai/instance=${INSTANCE_NAME}" -o name 2>/dev/null | grep -q configmap; then
-      memory_found=true
-      break
-    fi
-    sleep 3
-    elapsed=$((elapsed + 3))
-  done
-  if [[ "$memory_found" == "true" ]]; then
-    pass "Memory ConfigMap exists for instance"
-  else
-    info "Memory ConfigMap not found (may be created on first run completion)"
-  fi
-
-  # ── 4) Verify instance status reflects the run ──
+  # ── 3) Verify instance status reflects the run ──
   # Give controller a moment to reconcile
   sleep 2
   inst_status_json="$(api_request GET "/api/v1/agents/${INSTANCE_NAME}")"
@@ -276,7 +257,7 @@ main() {
     info "Instance status.totalAgentRuns = ${total_runs} (may update asynchronously)"
   fi
 
-  # ── 5) Delete instance ──
+  # ── 4) Delete instance ──
   api_request DELETE "/api/v1/agents/${INSTANCE_NAME}" >/dev/null
 
   # K8s deletion is async (controller finalizers), poll until gone

@@ -1,0 +1,59 @@
+{{- if and .Values.memory.enabled .Values.memory.migrate.enabled }}
+{{- $fullname := include "sympozium.fullname" . }}
+{{- $ns := include "sympozium.namespace" . }}
+# One-shot schema migration. Runs as a Helm pre-install/pre-upgrade hook so
+# the schema is always current before the serve replicas come up. The Job is
+# idempotent (CREATE … IF NOT EXISTS), so re-running on upgrade is safe.
+#
+# hook-weight ordering: bundled-postgres StatefulSet is NOT a hook, so it
+# already exists by the time the next upgrade fires this hook. On first
+# install the chart is applied in a single pass; the migration Job retries
+# (backoffLimit) until Postgres is reachable.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $fullname }}-memory-migrate
+  namespace: {{ $ns }}
+  labels:
+    {{- include "sympozium.labels" . | nindent 4 }}
+    app.kubernetes.io/component: memory-migrate
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.memory.migrate.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.memory.migrate.activeDeadlineSeconds }}
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        {{- include "sympozium.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: memory-migrate
+    spec:
+      # The SA may carry IRSA / Workload Identity annotations (see
+      # memory.server.serviceAccount.annotations) needed for cloud-native
+      # DB auth like AWS RDS IAM. Promoted to a pre-install hook in
+      # memory-server-rbac.yaml, so it exists before this Job pod is admitted.
+      restartPolicy: OnFailure
+      {{- if .Values.rbac.create }}
+      serviceAccountName: {{ $fullname }}-memory-server
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.securityContext | nindent 8 }}
+      containers:
+        - name: migrate
+          image: {{ include "sympozium.memoryServerImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["migrate"]
+          env:
+            {{- include "sympozium.memoryServerEnv" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.memory.migrate.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

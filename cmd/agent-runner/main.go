@@ -175,7 +175,6 @@ func main() {
 	provider := strings.ToLower(getEnv("MODEL_PROVIDER", "openai"))
 	modelName := getEnv("MODEL_NAME", "gpt-4o-mini")
 	baseURL := strings.TrimRight(getEnv("MODEL_BASE_URL", ""), "/")
-	memoryEnabled := getEnv("MEMORY_ENABLED", "") == "true"
 	toolsEnabled := getEnv("TOOLS_ENABLED", "") == "true"
 
 	var providerHeaders map[string]string
@@ -271,12 +270,15 @@ func main() {
 		log.Printf("tools enabled: %d tool(s) registered", len(tools))
 	}
 
-	// Load memory tools if the memory server is available (standalone deployment).
+	// Wire memory tools when MEMORY_SERVER_URL points at the central
+	// memory-server. The agent-runner authenticates with its projected
+	// SA token; the server resolves agent/ensemble membership and
+	// visibility from that identity.
 	if memoryTools := initMemoryTools(); len(memoryTools) > 0 {
 		tools = append(tools, memoryTools...)
 
 		// Auto-inject relevant memory context so the agent has immediate
-		// awareness of past findings without relying on it to call memory_search.
+		// awareness of past findings without having to call memory_search first.
 		var memoryContextBlock string
 		if memCtx := queryMemoryContext(task, 3); memCtx != "" {
 			memoryContextBlock = "\n\n## Relevant Past Context (auto-retrieved)\n\n" +
@@ -286,7 +288,9 @@ func main() {
 		}
 
 		systemPrompt += "\n\n## Persistent Memory\n\n" +
-			"You have access to persistent memory tools that survive across runs.\n"
+			"You have access to persistent memory tools that survive across runs.\n" +
+			"Pass `scope: \"ensemble\"` to read or write knowledge shared across all personas in your ensemble; " +
+			"omit `scope` for your private (agent-scope) memory.\n"
 
 		if memoryContextBlock != "" {
 			systemPrompt += memoryContextBlock + "\n\n" +
@@ -301,51 +305,6 @@ func main() {
 			"Be specific in stored content — include service names, namespaces, error messages, and timestamps."
 
 		log.Printf("memory tools loaded: %d tool(s)", len(memoryTools))
-	} else if memoryEnabled {
-		// Fallback: legacy ConfigMap memory for backward compatibility.
-		var memoryContent string
-		if b, err := os.ReadFile("/memory/MEMORY.md"); err == nil {
-			memoryContent = strings.TrimSpace(string(b))
-			log.Printf("loaded legacy memory (%d bytes)", len(memoryContent))
-		}
-		if memoryContent != "" && memoryContent != "# Agent Memory\n\nNo memories recorded yet." {
-			task = fmt.Sprintf("## Your Memory\nThe following is your persistent memory from prior interactions:\n\n%s\n\n## Current Task\n%s", memoryContent, task)
-		}
-		if memoryEnabled {
-			memoryInstruction := "\n\nYou have persistent memory. After completing your task, " +
-				"output a memory update block wrapped in markers like this:\n" +
-				"__SYMPOZIUM_MEMORY__\n<your updated MEMORY.md content>\n__SYMPOZIUM_MEMORY_END__\n" +
-				"Include key facts, preferences, and context from this and past interactions. " +
-				"Keep it concise (under 256KB). Use markdown format."
-			systemPrompt += memoryInstruction
-		}
-	}
-
-	// Load shared workflow memory tools if configured (pack-level shared memory).
-	if wfMemTools := initWorkflowMemoryTools(); len(wfMemTools) > 0 {
-		tools = append(tools, wfMemTools...)
-
-		// Auto-inject shared team memory context alongside private memory.
-		if wfMemCtx := queryWorkflowMemoryContext(task, 3); wfMemCtx != "" {
-			systemPrompt += "\n\n## Team Knowledge (Shared Workflow Memory)\n\n" +
-				"The following shared memories were contributed by other personas in your team:\n\n" +
-				wfMemCtx + "\n\n" +
-				"Use `workflow_memory_search` for additional team knowledge lookups.\n"
-			log.Printf("auto-injected %d bytes of shared workflow memory context", len(wfMemCtx))
-		}
-
-		systemPrompt += "\n\n## Shared Workflow Memory\n\n" +
-			"You have access to shared team memory tools (`workflow_memory_search`, `workflow_memory_list`"
-		if workflowMemoryAccess != "read-only" {
-			systemPrompt += ", `workflow_memory_store`"
-		}
-		systemPrompt += ") that are shared across all personas in your team.\n"
-		if workflowMemoryAccess != "read-only" {
-			systemPrompt += "**After completing your task**, use `workflow_memory_store` to share key findings " +
-				"with other team members. Your persona name is automatically attached for attribution.\n"
-		}
-
-		log.Printf("workflow memory tools loaded: %d tool(s) (access: %s)", len(wfMemTools), workflowMemoryAccess)
 	}
 
 	apiKey := firstNonEmpty(
@@ -439,8 +398,6 @@ func main() {
 	res.Metrics.DurationMs = elapsed.Milliseconds()
 	res.Metrics.ToolCalls = toolCalls
 
-	debugMode := getEnv("DEBUG", "") == "true"
-
 	if err != nil {
 		log.Printf("LLM call failed: %v", err)
 		res.Status = "error"
@@ -466,20 +423,6 @@ func main() {
 	// so a goroutine would be killed before the HTTP POST completes.
 	if res.Status == "success" && res.Response != "" {
 		autoStoreMemory(task, res.Response)
-	}
-
-	// Extract and emit memory update before stripping markers from the response.
-	if memoryEnabled && res.Response != "" {
-		if memUpdate := extractMemoryUpdate(res.Response); memUpdate != "" {
-			fmt.Fprintf(os.Stdout, "\n__SYMPOZIUM_MEMORY__%s__SYMPOZIUM_MEMORY_END__\n", memUpdate)
-			log.Printf("emitted memory update (%d bytes)", len(memUpdate))
-		}
-	}
-
-	// Strip memory markers from the response so they don't appear in the
-	// TUI feed or channel messages. Keep them only if DEBUG is enabled.
-	if !debugMode && res.Response != "" {
-		res.Response = stripMemoryMarkers(res.Response)
 	}
 
 	if res.Response != "" {
@@ -629,51 +572,6 @@ func fatal(msg string) {
 		Error:  msg,
 	})
 	os.Exit(1)
-}
-
-// extractMemoryUpdate looks for a memory update block in the LLM response.
-// The agent is instructed to wrap its memory updates in:
-//
-//	__SYMPOZIUM_MEMORY__
-//	<content>
-//	__SYMPOZIUM_MEMORY_END__
-func extractMemoryUpdate(response string) string {
-	const startMarker = "__SYMPOZIUM_MEMORY__"
-	const endMarker = "__SYMPOZIUM_MEMORY_END__"
-
-	startIdx := strings.LastIndex(response, startMarker)
-	if startIdx < 0 {
-		return ""
-	}
-	payload := response[startIdx+len(startMarker):]
-	endIdx := strings.Index(payload, endMarker)
-	if endIdx < 0 {
-		return ""
-	}
-	return strings.TrimSpace(payload[:endIdx])
-}
-
-// stripMemoryMarkers removes all __SYMPOZIUM_MEMORY__...END__ blocks from the
-// response text so they don't appear in the TUI feed or channel messages.
-func stripMemoryMarkers(response string) string {
-	const startMarker = "__SYMPOZIUM_MEMORY__"
-	const endMarker = "__SYMPOZIUM_MEMORY_END__"
-
-	for {
-		startIdx := strings.Index(response, startMarker)
-		if startIdx < 0 {
-			break
-		}
-		endIdx := strings.Index(response[startIdx:], endMarker)
-		if endIdx < 0 {
-			// Unclosed marker — strip from startMarker to end of string.
-			response = strings.TrimSpace(response[:startIdx])
-			break
-		}
-		// Remove the entire marker block.
-		response = response[:startIdx] + response[startIdx+endIdx+len(endMarker):]
-	}
-	return strings.TrimSpace(response)
 }
 
 // buildRelationshipContext parses the ENSEMBLE_RELATIONSHIPS JSON and produces

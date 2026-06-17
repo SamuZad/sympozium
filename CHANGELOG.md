@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### ⚠ BREAKING CHANGES
+
+* **Central memory server.** All persistent memory is now served by a single `sympozium-memory-server` Deployment in `sympozium-system`, backed by PostgreSQL + `pgvector`. The per-instance memory sidecar, `<name>-memory` ConfigMap, `MEMORY.md` file, and `__SYMPOZIUM_MEMORY__...__SYMPOZIUM_MEMORY_END__` log markers have been **removed**. The `memory` SkillPack has been deleted.
+* **Agent tools.** `memory_search` / `memory_store` / `memory_list` now take an optional `scope` argument (`"agent"` default, `"ensemble"` for shared writes). The separate `workflow_memory_search` / `workflow_memory_store` / `workflow_memory_list` tools are removed — pass `scope: "ensemble"` to the base tools instead.
+* **Shared workflow memory infra.** The per-pack PVC, Deployment, and Service (`<pack>-shared-memory*`) are no longer provisioned. Cross-persona sharing uses `scope: "ensemble"` against the central service; cross-ensemble sharing is governed by `Ensemble.spec.sharedMemory.membrane` Import/Export rules, evaluated server-side by the memory-server's reachable-peers walker.
+* **Environment variables.** `MEMORY_ENABLED`, `MEMORY_SERVER_URL`, and all `WORKFLOW_MEMORY_*` env vars (except `WORKFLOW_MEMBRANE_VISIBILITY`, kept as a default-visibility hint) are removed. New required env vars: `MEMORY_SERVER_URL` (agent-runner / controller / apiserver) and `MEMORY_ADMIN_SAS` / `MEMORY_POSTGRES_URL` / `MEMORY_EMBEDDING_*` (memory-server). See [docs/reference/configuration.md](docs/reference/configuration.md).
+* **CRD fields.** `Ensemble.spec.sharedMemory.storageSize` is removed (no per-pack PVC any more). `AgentConfigMemory{Enabled, Seeds, SeedTTLDays}` is retained — seeds are now POSTed to the central service tagged `[seed, ensemble:<pack>, persona:<name>, seed-hash:<hash>]`.
+* **API endpoints (apiserver).** `GET|DELETE /api/v1/agents/{name}/memory` and `DELETE /api/v1/ensembles/{name}/shared-memory` proxy to the central memory-server. The legacy ConfigMap fallback is gone.
+
+### Migration
+
+1. Install or point Sympozium at a PostgreSQL with `pgvector`; configure `MEMORY_POSTGRES_URL` and `MEMORY_EMBEDDING_*` on the memory-server.
+2. Set `MEMORY_SERVER_URL` on all components (handled by the Helm chart by default).
+3. Drop `- skillPackRef: memory` from any Agent or Ensemble spec.
+4. Replace any `workflow_memory_*` tool references in system prompts with `memory_*` and `scope: "ensemble"`.
+5. Existing memory ConfigMaps and PVCs can be deleted once you have migrated their contents — there is no automatic import path.
+
 ## [0.10.35](https://github.com/sympozium-ai/sympozium/compare/v0.10.34...v0.10.35) (2026-06-03)
 
 

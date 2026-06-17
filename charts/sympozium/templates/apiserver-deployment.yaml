@@ -78,6 +78,10 @@ spec:
               value: {{ include "sympozium.otelResourceAttrs" . | quote }}
             {{- end }}
           {{- end }}
+          {{- if .Values.memory.enabled }}
+            - name: MEMORY_SERVER_URL
+              value: {{ include "sympozium.memoryServerURL" . | quote }}
+          {{- end }}
           ports:
             - containerPort: 8080
               name: http

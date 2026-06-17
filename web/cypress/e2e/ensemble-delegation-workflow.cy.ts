@@ -167,7 +167,6 @@ RULES:
 				],
 				sharedMemory: {
 					enabled: true,
-					storageSize: "512Mi",
 					accessRules: [
 						{ agentConfig: LEAD, access: "read-write" },
 						{ agentConfig: RESEARCHER, access: "read-write" },

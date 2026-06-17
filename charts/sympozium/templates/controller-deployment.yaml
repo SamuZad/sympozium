@@ -94,6 +94,13 @@ spec:
             - name: AGENT_SANDBOX_DEFAULT_RUNTIME_CLASS
               value: {{ .Values.agentSandbox.defaultRuntimeClass | quote }}
             {{- end }}
+            {{- if .Values.memory.enabled }}
+            # In-cluster URL of the central memory-server. The controller
+            # injects this onto agent pods that have memory enabled so the
+            # agent-runner can authenticate with its ServiceAccount token.
+            - name: MEMORY_SERVER_URL
+              value: {{ include "sympozium.memoryServerURL" . | quote }}
+            {{- end }}
           ports:
             - containerPort: 8081
               name: health

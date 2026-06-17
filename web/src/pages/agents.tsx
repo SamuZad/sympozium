@@ -265,7 +265,7 @@ export function AgentsPage() {
         defaults={{
           provider: "openai",
           model: "gpt-4o",
-          skills: ["k8s-ops", "llmfit", "memory"],
+          skills: ["k8s-ops", "llmfit"],
         }}
         onComplete={handleComplete}
         isPending={createAgent.isPending}

@@ -78,11 +78,11 @@ describe("City Distance Research — sequential workflow with shared memory", ()
 
 The approximate straight-line distance between London, UK and Cairo, Egypt is 3,516 km (2,185 miles).
 
-When asked about this distance, state the fact clearly and use workflow_memory_store to save your finding so the fact-checker can review it.
+When asked about this distance, state the fact clearly and call memory_store with scope "ensemble" to save your finding so the fact-checker can review it.
 
-Do NOT write code or use any tools other than workflow_memory_store. Simply state the distance as a fact.`,
+Do NOT write code or use any tools other than memory_store. Simply state the distance as a fact.`,
 						model: Cypress.env("TEST_MODEL"),
-						skills: ["memory"],
+						skills: [],
 					},
 					{
 						name: CHECKER,
@@ -90,14 +90,14 @@ Do NOT write code or use any tools other than workflow_memory_store. Simply stat
 						systemPrompt: `You are a fact-checking agent. Your job is to verify research findings from shared team memory.
 
 When asked to verify a distance claim:
-1. Call workflow_memory_search with query "london cairo distance" to find the lead's findings
+1. Call memory_search with scope "ensemble" and query "london cairo distance" to find the lead's findings
 2. Check if the stated distance is approximately correct (London-Cairo is ~3,516 km / ~2,185 miles)
-3. Call workflow_memory_store to save your verification with tags "verified", "distance"
+3. Call memory_store with scope "ensemble" to save your verification with tags "verified", "distance"
 4. State whether the finding was accurate
 
 Do NOT write code. Just search memory, verify the fact, store your result, and respond.`,
 						model: Cypress.env("TEST_MODEL"),
-						skills: ["memory"],
+						skills: [],
 					},
 				],
 				relationships: [
@@ -111,7 +111,6 @@ Do NOT write code. Just search memory, verify the fact, store your result, and r
 				],
 				sharedMemory: {
 					enabled: true,
-					storageSize: "512Mi",
 					accessRules: [
 						{ agentConfig: LEAD, access: "read-write" },
 						{ agentConfig: CHECKER, access: "read-write" },
@@ -213,7 +212,7 @@ Do NOT write code. Just search memory, verify the fact, store your result, and r
 	it("dispatches a run to the lead investigator and gets a response about London-Cairo distance", () => {
 		cy.dispatchRun(
 			LEAD_INSTANCE,
-			"State the approximate distance between London and Cairo in kilometers. Then call workflow_memory_store to save this fact with tags distance, london, cairo. Do not use any other tools.",
+			"State the approximate distance between London and Cairo in kilometers. Then call memory_store with scope \"ensemble\" to save this fact with tags distance, london, cairo. Do not use any other tools.",
 		).then((runName) => {
 			// Wait for the lead's run to complete
 			cy.waitForRunTerminal(runName, 5 * 60 * 1000).then((phase) => {
@@ -241,7 +240,7 @@ Do NOT write code. Just search memory, verify the fact, store your result, and r
 	it("dispatches a run to the fact checker who reads shared memory and validates", () => {
 		cy.dispatchRun(
 			CHECKER_INSTANCE,
-			"Call workflow_memory_search with query 'london cairo distance' to find the lead's findings. Verify the distance is approximately correct (~3500 km). Then call workflow_memory_store to save your verification with tags verified, distance. Do not use any other tools.",
+			"Call memory_search with scope \"ensemble\" and query 'london cairo distance' to find the lead's findings. Verify the distance is approximately correct (~3500 km). Then call memory_store with scope \"ensemble\" to save your verification with tags verified, distance. Do not use any other tools.",
 		).then((runName) => {
 			// Wait for the fact checker's run to complete
 			cy.waitForRunTerminal(runName, 5 * 60 * 1000).then((phase) => {

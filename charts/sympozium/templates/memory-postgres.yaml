@@ -1,0 +1,174 @@
+{{- if and .Values.memory.enabled .Values.memory.postgres.enabled }}
+{{- $fullname := include "sympozium.fullname" . }}
+{{- $ns := include "sympozium.namespace" . }}
+{{- $secretName := include "sympozium.bundledPostgresSecret" . }}
+{{- $useExisting := .Values.memory.postgres.auth.existingSecret }}
+{{- if not $useExisting }}
+{{- $pwd := .Values.memory.postgres.auth.password | required "memory.postgres.auth.password must be set when postgres.enabled is true and auth.existingSecret is unset (the chart cannot auto-generate one because ArgoCD does not support `lookup`, which would cause a new random password on every sync). For non-dev environments, prefer auth.existingSecret pointing at a pre-created Secret." }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $secretName }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "sympozium.labels" . | nindent 4 }}
+    app.kubernetes.io/component: memory-postgres
+  annotations:
+    # Rendered deterministically from values, so it's safe to apply on every
+    # install AND upgrade. The chart no longer uses `lookup` + random fallback
+    # (that pattern silently regenerates the password under ArgoCD, which only
+    # does `helm template`). Provide a stable password via
+    # memory.postgres.auth.password, or point auth.existingSecret at a
+    # pre-created Secret.
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-15"
+    "helm.sh/hook-delete-policy": before-hook-creation
+type: Opaque
+data:
+  password: {{ $pwd | b64enc | quote }}
+---
+{{- end }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-postgres
+  namespace: {{ $ns }}
+  labels:
+    {{- include "sympozium.labels" . | nindent 4 }}
+    app.kubernetes.io/component: memory-postgres
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - name: postgres
+      port: {{ .Values.memory.postgres.service.port }}
+      targetPort: postgres
+      protocol: TCP
+  selector:
+    {{- include "sympozium.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: memory-postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $fullname }}-postgres
+  namespace: {{ $ns }}
+  labels:
+    {{- include "sympozium.labels" . | nindent 4 }}
+    app.kubernetes.io/component: memory-postgres
+  annotations:
+    # On upgrade the StatefulSet is recreated (~30s downtime) but its
+    # PVCs are retained because volumeClaimRetentionPolicy defaults to
+    # whenDeleted=Retain. For zero-downtime prod, point at an external
+    # Postgres via memory.database.url and the bundled chart is skipped.
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  serviceName: {{ $fullname }}-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "sympozium.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: memory-postgres
+  template:
+    metadata:
+      labels:
+        {{- include "sympozium.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: memory-postgres
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: postgres
+          image: "{{ .Values.memory.postgres.image.repository }}:{{ .Values.memory.postgres.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: postgres
+              containerPort: 5432
+              protocol: TCP
+          env:
+            - name: POSTGRES_DB
+              value: {{ .Values.memory.postgres.auth.database | quote }}
+            - name: POSTGRES_USER
+              value: {{ .Values.memory.postgres.auth.username | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $useExisting | default $secretName }}
+                  key: password
+            # Keep PGDATA inside the mounted volume's subdirectory.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - >-
+                  pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" -h 127.0.0.1
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - >-
+                  pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" -h 127.0.0.1
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.memory.postgres.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+      {{- with .Values.memory.postgres.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.memory.postgres.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.memory.postgres.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if not .Values.memory.postgres.persistence.enabled }}
+      volumes:
+        - name: data
+          emptyDir: {}
+      {{- end }}
+  {{- if .Values.memory.postgres.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.memory.postgres.persistence.storageClass }}
+        storageClassName: {{ .Values.memory.postgres.persistence.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.memory.postgres.persistence.size }}
+  {{- end }}
+{{- end }}

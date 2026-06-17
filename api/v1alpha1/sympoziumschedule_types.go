@@ -30,7 +30,8 @@ type SympoziumScheduleSpec struct {
 	// +kubebuilder:default="Forbid"
 	ConcurrencyPolicy string `json:"concurrencyPolicy,omitempty"`
 
-	// IncludeMemory injects the instance's MEMORY.md as context for each run.
+	// IncludeMemory fetches the instance's persistent memory from the
+	// central memory server and injects it as context for each run.
 	// +kubebuilder:default=true
 	IncludeMemory bool `json:"includeMemory,omitempty"`
 }

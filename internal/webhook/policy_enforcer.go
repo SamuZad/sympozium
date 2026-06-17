@@ -30,7 +30,6 @@ var reservedVolumeNames = map[string]struct{}{
 	"ipc":        {},
 	"skills":     {},
 	"tmp":        {},
-	"memory":     {},
 	"mcp-config": {},
 }
 
@@ -169,7 +168,7 @@ func (pe *PolicyEnforcer) validateVolumes(ctx context.Context, run *sympoziumv1a
 
 	for _, v := range run.Spec.Volumes {
 		if _, reserved := reservedVolumeNames[v.Name]; reserved {
-			return fmt.Errorf("AgentRun.spec.volumes[%q]: name is reserved by Sympozium (reserved: workspace, ipc, skills, tmp, memory, mcp-config)", v.Name)
+			return fmt.Errorf("AgentRun.spec.volumes[%q]: name is reserved by Sympozium (reserved: workspace, ipc, skills, tmp, mcp-config)", v.Name)
 		}
 		declarations[v.Name] = append(declarations[v.Name], volumeOrigin{
 			source: "AgentRun.spec.volumes",
@@ -196,7 +195,7 @@ func (pe *PolicyEnforcer) validateVolumes(ctx context.Context, run *sympoziumv1a
 		}
 		for _, v := range sp.Spec.Sidecar.Volumes {
 			if _, reserved := reservedVolumeNames[v.Name]; reserved {
-				return fmt.Errorf("SkillPack %q sidecar volume %q: name is reserved by Sympozium (reserved: workspace, ipc, skills, tmp, memory, mcp-config)", spName, v.Name)
+				return fmt.Errorf("SkillPack %q sidecar volume %q: name is reserved by Sympozium (reserved: workspace, ipc, skills, tmp, mcp-config)", spName, v.Name)
 			}
 			declarations[v.Name] = append(declarations[v.Name], volumeOrigin{
 				source: fmt.Sprintf("SkillPack/%s.spec.sidecar.volumes", spName),

@@ -40,6 +40,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	sympoziumv1alpha1 "github.com/sympozium-ai/sympozium/api/v1alpha1"
@@ -56,6 +57,9 @@ var (
 )
 
 func main() {
+	klog.LogToStderr(false)
+	klog.SetOutput(io.Discard)
+
 	rootCmd := &cobra.Command{
 		Use:   "sympozium",
 		Short: "Sympozium - Kubernetes-native AI agent management",
@@ -1175,10 +1179,8 @@ spec:
 %s%s%s  skills:
     - skillPackRef: k8s-ops
     - skillPackRef: llmfit
-    - skillPackRef: memory
 %s  memory:
     enabled: true
-    maxSizeKB: 256
 `, name, ns, channelsBlock, model, baseURLLine, authRefsBlock, policyBlock, githubSkillBlock)
 }
 
@@ -2454,7 +2456,6 @@ type tuiModel struct {
 // editMemoryForm holds the editable memory fields for a Agent.
 type editMemoryForm struct {
 	enabled      bool
-	maxSizeKB    string // edited as text, parsed to int on apply
 	systemPrompt string
 }
 
@@ -2539,7 +2540,7 @@ func (f *editLifecycleForm) fieldCount() int {
 
 var editScheduleTypes = []string{"heartbeat", "scheduled", "sweep"}
 var editConcurrencyPolicies = []string{"Forbid", "Allow", "Replace"}
-var editMemoryFieldCount = 3    // enabled, maxSizeKB, systemPrompt
+var editMemoryFieldCount = 2    // enabled, systemPrompt
 var editHeartbeatFieldCount = 6 // schedule, task, type, concurrencyPolicy, includeMemory, suspend
 var editTabNames = []string{"Memory", "Heartbeat", "Skills", "Channels", "Web Endpoint", "Lifecycle"}
 var availableChannelTypes = []string{"telegram", "slack", "discord", "whatsapp"}
@@ -3291,23 +3292,19 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else if m.editTab == 2 {
 					if m.editField >= 0 && m.editField < len(m.editSkills) {
 						sk := &m.editSkills[m.editField]
-						if sk.name == "memory" {
-							// memory is mandatory — cannot be toggled off
-						} else {
-							sk.enabled = !sk.enabled
-							if sk.enabled && sk.name == "github-gitops" {
-								m.editSkillGithubInput = true
-								m.editSkillGithubIdx = m.editField
-								ti := textinput.New()
-								ti.Placeholder = "owner/repo (e.g. myorg/platform)"
-								ti.CharLimit = 128
-								ti.Width = 50
-								if repo, ok := sk.params["repo"]; ok {
-									ti.SetValue(repo)
-								}
-								ti.Focus()
-								m.editSkillGithubTI = ti
+						sk.enabled = !sk.enabled
+						if sk.enabled && sk.name == "github-gitops" {
+							m.editSkillGithubInput = true
+							m.editSkillGithubIdx = m.editField
+							ti := textinput.New()
+							ti.Placeholder = "owner/repo (e.g. myorg/platform)"
+							ti.CharLimit = 128
+							ti.Width = 50
+							if repo, ok := sk.params["repo"]; ok {
+								ti.SetValue(repo)
 							}
+							ti.Focus()
+							m.editSkillGithubTI = ti
 						}
 					}
 				} else if m.editTab == 3 {
@@ -3372,12 +3369,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "backspace":
 				// Delete last char from text fields
 				if m.editTab == 0 {
-					switch m.editField {
-					case 1:
-						if len(m.editMemory.maxSizeKB) > 0 {
-							m.editMemory.maxSizeKB = m.editMemory.maxSizeKB[:len(m.editMemory.maxSizeKB)-1]
-						}
-					case 2:
+					if m.editField == 1 {
 						if len(m.editMemory.systemPrompt) > 0 {
 							m.editMemory.systemPrompt = m.editMemory.systemPrompt[:len(m.editMemory.systemPrompt)-1]
 						}
@@ -3437,23 +3429,19 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else if m.editTab == 2 {
 					if m.editField >= 0 && m.editField < len(m.editSkills) {
 						sk := &m.editSkills[m.editField]
-						if sk.name == "memory" {
-							// memory is mandatory — cannot be toggled off
-						} else {
-							sk.enabled = !sk.enabled
-							if sk.enabled && sk.name == "github-gitops" {
-								m.editSkillGithubInput = true
-								m.editSkillGithubIdx = m.editField
-								ti := textinput.New()
-								ti.Placeholder = "owner/repo (e.g. myorg/platform)"
-								ti.CharLimit = 128
-								ti.Width = 50
-								if repo, ok := sk.params["repo"]; ok {
-									ti.SetValue(repo)
-								}
-								ti.Focus()
-								m.editSkillGithubTI = ti
+						sk.enabled = !sk.enabled
+						if sk.enabled && sk.name == "github-gitops" {
+							m.editSkillGithubInput = true
+							m.editSkillGithubIdx = m.editField
+							ti := textinput.New()
+							ti.Placeholder = "owner/repo (e.g. myorg/platform)"
+							ti.CharLimit = 128
+							ti.Width = 50
+							if repo, ok := sk.params["repo"]; ok {
+								ti.SetValue(repo)
 							}
+							ti.Focus()
+							m.editSkillGithubTI = ti
 						}
 					}
 				} else if m.editTab == 3 {
@@ -3511,13 +3499,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				ch := msg.String()
 				if len(ch) == 1 {
 					if m.editTab == 0 {
-						switch m.editField {
-						case 1:
-							// Only allow digits for maxSizeKB
-							if ch >= "0" && ch <= "9" {
-								m.editMemory.maxSizeKB += ch
-							}
-						case 2:
+						if m.editField == 1 {
 							m.editMemory.systemPrompt += ch
 						}
 					} else if m.editTab == 4 {
@@ -4836,13 +4818,11 @@ func (m tuiModel) handleRowEdit() (tea.Model, tea.Cmd) {
 		if inst.Spec.Memory != nil {
 			m.editMemory = editMemoryForm{
 				enabled:      inst.Spec.Memory.Enabled,
-				maxSizeKB:    fmt.Sprintf("%d", inst.Spec.Memory.MaxSizeKB),
 				systemPrompt: inst.Spec.Memory.SystemPrompt,
 			}
 		} else {
 			m.editMemory = editMemoryForm{
-				enabled:   true,
-				maxSizeKB: "256",
+				enabled: true,
 			}
 		}
 		// Find first schedule for this instance to pre-populate heartbeat tab.
@@ -4901,7 +4881,7 @@ func (m tuiModel) handleRowEdit() (tea.Model, tea.Cmd) {
 			}
 			m.editSkills = append(m.editSkills, editSkillItem{
 				name:     sp.Name,
-				enabled:  enabledSkills[sp.Name] || sp.Name == "memory",
+				enabled:  enabledSkills[sp.Name],
 				category: sp.Spec.Category,
 				params:   skillParams[sp.Name],
 				hostReq:  hostReq,
@@ -4987,7 +4967,7 @@ func (m tuiModel) handleRowEdit() (tea.Model, tea.Cmd) {
 			}
 		}
 		// Also populate memory, skills, and channels from instance if found.
-		m.editMemory = editMemoryForm{maxSizeKB: "256"}
+		m.editMemory = editMemoryForm{enabled: true}
 		m.editSkills = nil
 		m.editChannels = nil
 		for _, inst := range m.instances {
@@ -4995,7 +4975,6 @@ func (m tuiModel) handleRowEdit() (tea.Model, tea.Cmd) {
 				if inst.Spec.Memory != nil {
 					m.editMemory = editMemoryForm{
 						enabled:      inst.Spec.Memory.Enabled,
-						maxSizeKB:    fmt.Sprintf("%d", inst.Spec.Memory.MaxSizeKB),
 						systemPrompt: inst.Spec.Memory.SystemPrompt,
 					}
 				}
@@ -5018,7 +4997,7 @@ func (m tuiModel) handleRowEdit() (tea.Model, tea.Cmd) {
 					}
 					m.editSkills = append(m.editSkills, editSkillItem{
 						name:     sp.Name,
-						enabled:  enabledSkills[sp.Name] || sp.Name == "memory",
+						enabled:  enabledSkills[sp.Name],
 						category: sp.Spec.Category,
 						params:   skillParams[sp.Name],
 						hostReq:  hostReq,
@@ -5168,13 +5147,8 @@ func (m tuiModel) applyEditModal() tea.Cmd {
 			if err := k8sClient.Get(ctx, types.NamespacedName{Name: instName, Namespace: ns}, &inst); err != nil {
 				return cmdResultMsg{err: fmt.Errorf("get instance %q: %w", instName, err)}
 			}
-			maxKB := 256
-			if v, err := strconv.Atoi(mem.maxSizeKB); err == nil && v > 0 {
-				maxKB = v
-			}
 			inst.Spec.Memory = &sympoziumv1alpha1.MemorySpec{
 				Enabled:      mem.enabled,
-				MaxSizeKB:    maxKB,
 				SystemPrompt: mem.systemPrompt,
 			}
 
@@ -5261,7 +5235,7 @@ func (m tuiModel) applyEditModal() tea.Cmd {
 			if err := k8sClient.Update(ctx, &inst); err != nil {
 				return cmdResultMsg{err: fmt.Errorf("update instance %q: %w", instName, err)}
 			}
-			updateParts := []string{"memory"}
+			var updateParts []string
 			if len(skills) > 0 {
 				enabled := 0
 				for _, sk := range skills {
@@ -8179,8 +8153,7 @@ func (m tuiModel) renderEditModal(base string) string {
 	} else if m.editTab == 0 {
 		// Memory tab
 		renderBool(0, "Enabled", m.editMemory.enabled)
-		renderField(1, "MaxSizeKB", m.editMemory.maxSizeKB)
-		renderField(2, "SystemPrompt", m.editMemory.systemPrompt)
+		renderField(1, "SystemPrompt", m.editMemory.systemPrompt)
 	} else if m.editTab == 1 {
 		// Heartbeat tab
 		renderField(0, "Schedule", m.editHeartbeat.schedule)
@@ -8217,9 +8190,7 @@ func (m tuiModel) renderEditModal(base string) string {
 				}
 				// Show configured params inline (e.g. repo for github-gitops).
 				extra := ""
-				if sk.name == "memory" {
-					extra = tuiDimStyle.Render(" (required)")
-				} else if sk.enabled && sk.name == "github-gitops" {
+				if sk.enabled && sk.name == "github-gitops" {
 					if repo, ok := sk.params["repo"]; ok && repo != "" {
 						extra = tuiDimStyle.Render(" → " + repo)
 					} else {
@@ -8916,26 +8887,131 @@ func tuiDisableAllEnsembleAgents(ns, packName string, personaNames []string) (st
 }
 
 func tuiShowMemory(ns, instanceName string) (string, error) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
 
-	cmName := fmt.Sprintf("%s-memory", instanceName)
-	var cm corev1.ConfigMap
-	if err := k8sClient.Get(ctx, types.NamespacedName{Name: cmName, Namespace: ns}, &cm); err != nil {
-		return "", fmt.Errorf("memory ConfigMap %q not found (is memory enabled?): %w", cmName, err)
+	path := fmt.Sprintf("/api/v1/agents/%s/memory?namespace=%s&limit=50", instanceName, ns)
+	body, err := tuiAPIRequest(ctx, "GET", path)
+	if err != nil {
+		return "", fmt.Errorf("fetch agent memory: %w", err)
 	}
 
-	content := cm.Data["MEMORY.md"]
-	if content == "" {
+	var resp struct {
+		Results []struct {
+			Content    string   `json:"content"`
+			Tags       []string `json:"tags,omitempty"`
+			Visibility string   `json:"visibility,omitempty"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return "", fmt.Errorf("decode memory response: %w", err)
+	}
+	if len(resp.Results) == 0 {
 		return tuiDimStyle.Render(fmt.Sprintf("Memory for %s: (empty)", instanceName)), nil
 	}
 
-	// Show a preview in the log pane.
-	lines := strings.Split(content, "\n")
-	preview := content
-	if len(lines) > 20 {
-		preview = strings.Join(lines[:20], "\n") + "\n... (truncated)"
+	const maxEntries = 20
+	shown := resp.Results
+	truncatedNote := ""
+	if len(shown) > maxEntries {
+		shown = shown[:maxEntries]
+		truncatedNote = fmt.Sprintf("\n... (%d more, truncated)", len(resp.Results)-maxEntries)
 	}
-	return fmt.Sprintf("Memory for %s:\n%s", instanceName, preview), nil
+	var b strings.Builder
+	fmt.Fprintf(&b, "Memory for %s (%d entries):\n", instanceName, len(resp.Results))
+	for i, e := range shown {
+		fmt.Fprintf(&b, "%d. ", i+1)
+		if e.Visibility != "" {
+			fmt.Fprintf(&b, "[%s] ", e.Visibility)
+		}
+		b.WriteString(e.Content)
+		if len(e.Tags) > 0 {
+			fmt.Fprintf(&b, "  (tags: %s)", strings.Join(e.Tags, ", "))
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString(truncatedNote)
+	return b.String(), nil
+}
+
+// tuiAPIRequest does a one-shot HTTP request against the in-cluster
+// sympozium-apiserver via a short-lived `kubectl port-forward`. It fetches
+// the UI bearer token from the `sympozium-ui-token` Secret (best-effort)
+// and attaches it. Returns the response body for 2xx, or an error including
+// the body for non-2xx.
+func tuiAPIRequest(ctx context.Context, method, path string) ([]byte, error) {
+	// Pick a free local port and immediately release it; kubectl will rebind.
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		return nil, fmt.Errorf("find free port: %w", err)
+	}
+	localPort := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+
+	pfCtx, cancelPF := context.WithCancel(ctx)
+	defer cancelPF()
+	pf := exec.CommandContext(pfCtx, "kubectl", "port-forward",
+		"-n", helmNamespace,
+		"--address", "127.0.0.1",
+		"svc/sympozium-apiserver",
+		fmt.Sprintf("%d:8080", localPort),
+	)
+	// Silence kubectl output; we only care about whether the port binds.
+	pf.Stdout = io.Discard
+	pf.Stderr = io.Discard
+	if err := pf.Start(); err != nil {
+		return nil, fmt.Errorf("start port-forward: %w", err)
+	}
+	defer func() {
+		cancelPF()
+		_ = pf.Wait()
+	}()
+
+	// Wait for the local port to accept connections (up to ~10s).
+	addr := fmt.Sprintf("127.0.0.1:%d", localPort)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		conn, derr := net.DialTimeout("tcp4", addr, 200*time.Millisecond)
+		if derr == nil {
+			_ = conn.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("port-forward did not bind within 10s: %w", derr)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// Best-effort: pull the UI bearer token from the Secret. If it's missing
+	// the apiserver may be running without auth, in which case the request
+	// will still work.
+	var bearer string
+	var sec corev1.Secret
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: "sympozium-ui-token", Namespace: helmNamespace}, &sec); err == nil {
+		if tok, ok := sec.Data["token"]; ok {
+			bearer = strings.TrimSpace(string(tok))
+		}
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, "http://"+addr+path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("apiserver request: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("apiserver %s %s: %d %s", method, path, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return body, nil
 }
 
 func tuiSetBaseURL(ns, instanceName, baseURL string) (string, error) {
@@ -11122,11 +11198,10 @@ func tuiOnboardApply(ns string, w *wizardState) (string, error) {
 		inst.Spec.Agents.Default.RunTimeout = w.runTimeout
 	}
 
-	// Default skills: k8s-ops + llmfit + memory.
+	// Default skills: k8s-ops + llmfit.
 	inst.Spec.Skills = []sympoziumv1alpha1.SkillRef{
 		{SkillPackRef: "k8s-ops"},
 		{SkillPackRef: "llmfit"},
-		{SkillPackRef: "memory"},
 	}
 
 	// Add github-gitops skill if a repo was specified.
@@ -11139,8 +11214,7 @@ func tuiOnboardApply(ns string, w *wizardState) (string, error) {
 
 	// Memory is on by default.
 	inst.Spec.Memory = &sympoziumv1alpha1.MemorySpec{
-		Enabled:   true,
-		MaxSizeKB: 256,
+		Enabled: true,
 	}
 
 	// Try create; if it exists, update.

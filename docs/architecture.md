@@ -67,20 +67,13 @@ graph LR
         A1 -. "optional" .- SB
     end
 
-    subgraph MEM["Persistent Memory"]
-        MSCAR["Memory Sidecar<br/><small>SQLite + FTS5</small>"]
-        PVC[("PersistentVolume<br/><small>per-instance</small>")]
+    subgraph MEM["Central Memory Server"]
+        MSRV["memory-server<br/><small>PostgreSQL + pgvector</small>"]
+        PG[("Postgres + pgvector<br/><small>cluster-wide</small>")]
     end
 
-    subgraph SMEM["Shared Workflow Memory"]
-        SMSRV["Shared Memory Server<br/><small>SQLite + FTS5</small>"]
-        SPVC[("PersistentVolume<br/><small>per-pack</small>")]
-    end
-
-    A1 -. "memory_search<br/>memory_store" .- MSCAR
-    MSCAR -- "reads / writes" --> PVC
-    A1 -. "workflow_memory_search<br/>workflow_memory_store" .- SMSRV
-    SMSRV -- "reads / writes" --> SPVC
+    A1 -. "memory_search / memory_store<br/>scope: agent | ensemble" .- MSRV
+    MSRV -- "reads / writes" --> PG
 
     subgraph SEC["Skill & Lifecycle RBAC"]
         SR["Role + RoleBinding<br/><small>namespace-scoped</small>"]
@@ -227,8 +220,8 @@ Agents in a Ensemble can delegate tasks to other personas using the `delegate_to
 
 1. **A message arrives** via a channel pod (Telegram, Slack, etc.) and is published to the NATS event bus.
 2. **The controller creates an AgentRun CR**, which reconciles into an ephemeral K8s Job — optional preRun lifecycle init containers, then an agent container + IPC bridge sidecar + optional sandbox + skill sidecars (with auto-provisioned RBAC). PostRun lifecycle hooks execute in a follow-up Job after the agent completes.
-3. **The agent container** calls the configured LLM provider (OpenAI, Anthropic, Azure, Ollama, LM Studio, Unsloth, or any OpenAI-compatible endpoint), with skills mounted as files, persistent memory provided by the memory sidecar (SQLite + FTS5 on a PersistentVolume), and tool sidecars providing runtime capabilities like `kubectl`. A legacy ConfigMap-based memory path is preserved as a fallback.
-4. **Results flow back** through the IPC bridge → NATS → channel pod → user. The controller extracts structured results and memory updates from pod logs.
+3. **The agent container** calls the configured LLM provider (OpenAI, Anthropic, Azure, Ollama, LM Studio, Unsloth, or any OpenAI-compatible endpoint), with skills mounted as files, persistent memory accessed over HTTP at `MEMORY_SERVER_URL` (the central `memory-server`, backed by PostgreSQL + pgvector), and tool sidecars providing runtime capabilities like `kubectl`.
+4. **Results flow back** through the IPC bridge → NATS → channel pod → user. The controller extracts structured results from pod logs and writes a copy of the task/response to memory via the `memory-server` HTTP API.
 5. **Web endpoints** expose agents as HTTP APIs. When an instance has the `web-endpoint` skill, the controller creates a long-lived Deployment (serving mode) with a web-proxy sidecar. The proxy accepts OpenAI-compatible (`/v1/chat/completions`) and MCP (`/sse`, `/message`) requests, creating per-request AgentRun Jobs. An Envoy Gateway with per-instance HTTPRoutes provides external access with TLS.
 6. **MCP server integration** — `MCPServer` CRDs define external tool providers using the Model Context Protocol. The controller deploys managed servers (from container images) or connects to external ones, probes them for available tools, and records discovered tools in the resource status. Agent pods access MCP tools through the `mcp-bridge` skill sidecar, which translates between the agent's tool interface and MCP's SSE/stdio transport. Tool names are prefixed to avoid collisions when multiple MCP servers are active. The web UI and CLI provide full CRUD management.
 7. **Node-based inference discovery** — for local inference providers (Ollama, vLLM, llama-cpp) installed directly on host nodes, an optional node-probe DaemonSet probes localhost ports and annotates each node with discovered providers and models (`sympozium.ai/inference-*`). The API server reads these annotations, and the web wizard lets users select a node to pin their agent pods to via `nodeSelector`.
@@ -246,7 +239,7 @@ Agents in a Ensemble can delegate tasks to other personas using the `delegate_to
 | **Sandbox isolation** | Long-lived Docker sidecar | Pod **SecurityContext** + PodSecurity admission |
 | **IPC** | In-process EventEmitter | Filesystem sidecar + **NATS JetStream** |
 | **Tool/feature gating** | In-process pipeline | **Admission webhooks** + `SympoziumPolicy` CRD |
-| **Persistent memory** | Files on disk | **SQLite + FTS5** on PersistentVolume via memory sidecar (ConfigMap legacy fallback) |
+| **Persistent memory** | Files on disk | **PostgreSQL + pgvector** in a central `memory-server` Deployment; agents authenticate with their ServiceAccount token |
 | **Scheduled tasks** | Cron jobs / external scripts | **SympoziumSchedule CRD** with cron controller |
 | **State** | SQLite + flat files | **etcd** (CRDs) + PostgreSQL + object storage |
 | **Multi-tenancy** | Single-instance file lock | **Namespaced CRDs**, RBAC, NetworkPolicy |
@@ -266,12 +259,12 @@ Agents in a Ensemble can delegate tasks to other personas using the `delegate_to
 | **NATS JetStream** | StatefulSet | Durable pub/sub with replay — channels and control plane communicate without direct coupling |
 | **NetworkPolicy isolation** | NetworkPolicy | Agent pods get deny-all egress; only the IPC bridge connects to the event bus — agents cannot reach the internet or other pods |
 | **Policy-as-CRD** | Admission Webhook | `SympoziumPolicy` resources gate tools, sandboxes, and features — enforced at admission time, not at runtime |
-| **Memory-as-SQLite** | PersistentVolume + sidecar | Persistent agent memory uses SQLite with FTS5 full-text search on a PVC — supports semantic search via `memory_search`, tagging via `memory_store`, and is upgradeable to vector search. Legacy ConfigMap fallback preserved for migration |
-| **Shared Workflow Memory** | PVC + Deployment + Service per Ensemble | Pack-level shared memory pool enables cross-persona knowledge sharing. Same `skill-memory` binary, separate PVC. Per-persona access control (read-write / read-only) enforced client-side. Auto-tagged with source persona for attribution |
+| **Memory-as-Service** | Deployment + PostgreSQL+pgvector | A single central `memory-server` in `sympozium-system` stores all agent and ensemble memory rows. Hybrid retrieval (vector + full-text) via pgvector and `tsvector`. Agents authenticate with their ServiceAccount token; the server resolves `(namespace, agentName, ensembleName)` membership and enforces visibility/membrane rules server-side. One database for every agent and ensemble — no per-instance PVC, sidecar, or ConfigMap |
+| **Shared Ensemble Memory** | Same `memory-server` | Personas inside a Ensemble share a pool by calling `memory_store` / `memory_search` with `scope: "ensemble"`. Cross-ensemble visibility is granted by matching Import/Export rules in `Ensemble.spec.sharedMemory.membrane`, resolved by the server's reachable-peers walker — no extra Deployment, Service, or PVC per pack |
 | **Schedule-as-CRD** | CronJob analogy | `SympoziumSchedule` resources define recurring tasks with cron expressions — the controller creates AgentRuns, not the user |
 | **Skills-as-ConfigMap** | ConfigMap volume | SkillPacks generate ConfigMaps mounted into agent pods — portable, versionable, namespace-scoped |
 | **Skill sidecars with auto-RBAC** | Role / ClusterRole | SkillPacks can declare sidecar containers with RBAC rules — the controller injects the container and provisions ephemeral, least-privilege RBAC per run |
-| **Ensembles** | Operator Bundle | Pre-configured agent bundles — the controller stamps out Agents, Schedules, and memory ConfigMaps. Activating a pack is a single TUI action |
+| **Ensembles** | Operator Bundle | Pre-configured agent bundles — the controller stamps out Agents, Schedules, and seeds the central memory server with starter rows. Activating a pack is a single TUI action |
 | **MCP servers as CRD** | Deployment + Service | `MCPServer` resources declare external tool providers — the controller manages deployment lifecycle, probes for tools, and the bridge sidecar translates MCP protocol to agent tool calls. Prefixed tool names prevent collisions across providers |
 | **Node probe DaemonSet** | DaemonSet | Discovers host-installed inference providers (Ollama, vLLM) by probing localhost ports — annotates nodes so the control plane can offer model selection and node pinning without manual configuration |
 | **llmfit DaemonSet** | DaemonSet | Runs on every node, continuously reporting hardware specs (RAM, CPU, GPU VRAM) and model density scores. The controller and API server poll each pod to build a FitnessCache that powers instant model placement, the Model Density UI, Prometheus metrics, GPU-aware scheduling, and density API endpoints |
@@ -321,7 +314,7 @@ sympozium/
 │   ├── skills/             # Built-in SkillPack definitions
 │   ├── policies/           # Default SympoziumPolicy presets
 │   └── samples/            # Example CRs
-├── migrations/             # PostgreSQL schema migrations
+├── cmd/memory-server/migrations/  # PostgreSQL schema migration templates
 ├── docs/                   # Documentation (this site)
 ├── Makefile
 └── README.md

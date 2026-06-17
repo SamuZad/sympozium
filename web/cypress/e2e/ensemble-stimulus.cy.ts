@@ -34,11 +34,9 @@ spec:
     - name: lead
       displayName: Lead Researcher
       systemPrompt: "You are a lead researcher."
-      skills: [memory]
     - name: analyst
       displayName: Analyst
       systemPrompt: "You are an analyst."
-      skills: [memory]
   relationships:
     - source: kickoff
       target: lead

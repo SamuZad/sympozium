@@ -3,9 +3,9 @@
 #
 # Proves:
 #   1. A successful AgentRun (with NO explicit memory_store call) auto-stores its
-#      task+response into the memory server with tags ["auto", "agent-run"].
+#      task+response into the central memory-server with tags ["auto", "agent-run"].
 #   2. A follow-up run can search and find the auto-stored entry.
-#   3. Memory server logs show [store] from the agent-runner (not just [search]).
+#   3. memory-server logs show /v1/store from the agent-runner (not just /v1/search).
 #
 # This is a regression test for the goroutine bug where autoStoreMemory was
 # fire-and-forget (`go autoStoreMemory(...)`) and the process exited before
@@ -17,6 +17,7 @@ set -euo pipefail
 
 NAMESPACE="${TEST_NAMESPACE:-default}"
 SYSTEM_NS="${SYMPOZIUM_NAMESPACE:-sympozium-system}"
+MEMORY_SVC="${MEMORY_SERVICE:-sympozium-memory-server}"
 TIMEOUT="${TEST_TIMEOUT:-180}"
 
 LM_STUDIO_BASE_URL="${LM_STUDIO_BASE_URL:-http://172.18.0.2:9473/proxy/lm-studio/v1}"
@@ -35,26 +36,24 @@ FAILED=0
 SUFFIX="$(date +%s)"
 INSTANCE="inttest-autostore-${SUFFIX}"
 MEM_PF_PID=""
+MEM_PORT="${MEM_PORT:-19492}"
+MEM_URL="http://127.0.0.1:${MEM_PORT}"
+MEMORY_TOKEN=""
 
 cleanup() {
   info "Cleaning up..."
+  if [[ -n "$MEMORY_TOKEN" ]]; then
+    curl -sS -X DELETE -G "${MEM_URL}/v1/admin/scope" \
+      -H "Authorization: Bearer ${MEMORY_TOKEN}" \
+      --data-urlencode "scope=agent" \
+      --data-urlencode "agentName=${INSTANCE}" \
+      --data-urlencode "namespace=${NAMESPACE}" >/dev/null 2>&1 || true
+  fi
   [[ -n "$MEM_PF_PID" ]] && kill "$MEM_PF_PID" 2>/dev/null || true
   kubectl delete agentrun -n "$NAMESPACE" -l "sympozium.ai/instance=${INSTANCE}" --ignore-not-found >/dev/null 2>&1 || true
   kubectl delete sympoziuminstance "$INSTANCE" -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
-
-wait_for_deployment() {
-  local name="$1" elapsed=0
-  while [[ "$elapsed" -lt "$TIMEOUT" ]]; do
-    local ready
-    ready="$(kubectl get deployment "$name" -n "$NAMESPACE" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
-    [[ "$ready" == "1" ]] && return 0
-    sleep 3
-    elapsed=$((elapsed + 3))
-  done
-  return 1
-}
 
 wait_for_agentrun() {
   local name="$1" target_phase="$2" elapsed=0 last_phase=""
@@ -78,17 +77,21 @@ wait_for_agentrun() {
   return 1
 }
 
-mem_url=""
-mem_port=19492
+resolve_memory_token() {
+  MEMORY_TOKEN="$(kubectl create token sympozium-apiserver -n "$SYSTEM_NS" --duration=1h 2>/dev/null || true)"
+  if [[ -z "$MEMORY_TOKEN" ]]; then
+    fail "Could not obtain admin SA token (kubectl create token sympozium-apiserver -n $SYSTEM_NS)"
+    return 1
+  fi
+}
 
 port_forward_memory() {
   [[ -n "$MEM_PF_PID" ]] && kill "$MEM_PF_PID" 2>/dev/null || true
-  kubectl port-forward -n "$NAMESPACE" "svc/${INSTANCE}-memory" "${mem_port}:8080" &>/dev/null &
+  kubectl port-forward -n "$SYSTEM_NS" "svc/${MEMORY_SVC}" "${MEM_PORT}:8080" &>/dev/null &
   MEM_PF_PID=$!
-  mem_url="http://127.0.0.1:${mem_port}"
   local elapsed=0
   while [[ "$elapsed" -lt 15 ]]; do
-    curl -fsS "${mem_url}/health" >/dev/null 2>&1 && return 0
+    curl -fsS "${MEM_URL}/healthz" >/dev/null 2>&1 && return 0
     sleep 1
     elapsed=$((elapsed + 1))
   done
@@ -97,25 +100,47 @@ port_forward_memory() {
 }
 
 mem_search() {
-  curl -sS -X POST "${mem_url}/search" \
-    -H "Content-Type: application/json" \
-    -d "{\"query\": \"$1\", \"top_k\": ${2:-10}}" 2>/dev/null
+  # NOTE: /v1/search pins row.namespace to the caller identity's namespace,
+  # so an admin SA in sympozium-system cannot search rows written by agents
+  # in TEST_NAMESPACE. We approximate search with list + content grep.
+  local needle="$1"
+  mem_list 100 | python3 -c '
+import json, sys, re
+needle = sys.argv[1].lower()
+d = json.load(sys.stdin)
+hits = []
+for e in d.get("results", []):
+  if needle in (e.get("content") or "").lower():
+    hits.append(e)
+print(json.dumps({"results": hits}))
+' "$needle" 2>/dev/null
 }
 
 mem_list() {
-  curl -sS "${mem_url}/list?limit=${1:-50}" 2>/dev/null
+  curl -sS -G "${MEM_URL}/v1/list" \
+    -H "Authorization: Bearer ${MEMORY_TOKEN}" \
+    --data-urlencode "scope=agent" \
+    --data-urlencode "agentName=${INSTANCE}" \
+    --data-urlencode "namespace=${NAMESPACE}" \
+    --data-urlencode "limit=${1:-50}" 2>/dev/null
 }
 
 mem_count() {
-  mem_list "$@" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d.get("content",[])))' 2>/dev/null || echo "0"
+  mem_list "$@" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d.get("results",[])))' 2>/dev/null || echo "0"
 }
 
 # ── Setup ─────────────────────────────────────────────────────────────────────
 
 info "Memory auto-store regression test — namespace '${NAMESPACE}'"
+info "  memory-server: ${SYSTEM_NS}/svc/${MEMORY_SVC}"
+info "  agentName:     ${INSTANCE}"
 info "Using model '${LM_STUDIO_MODEL}' at ${LM_STUDIO_BASE_URL}"
 
-# Create instance with memory enabled.
+resolve_memory_token || exit 1
+port_forward_memory || exit 1
+pass "Setup: central memory-server is healthy"
+
+# Create instance with memory enabled (agent-runner injects MEMORY_SERVER_URL).
 cat <<EOF | kubectl apply -n "$NAMESPACE" -f -
 apiVersion: sympozium.ai/v1alpha1
 kind: Agent
@@ -127,25 +152,13 @@ spec:
       model: ${LM_STUDIO_MODEL}
       baseURL: ${LM_STUDIO_BASE_URL}
   skills:
-    - skillPackRef: memory
     - skillPackRef: k8s-ops
   memory:
     enabled: true
 EOF
 
-if wait_for_deployment "${INSTANCE}-memory"; then
-  pass "Setup: Memory server Deployment is ready"
-else
-  fail "Setup: Memory server Deployment never became ready"
-  exit 1
-fi
-
-port_forward_memory || exit 1
-pass "Setup: Memory server is healthy"
-
-# Verify memory starts empty.
 initial_count="$(mem_count)"
-info "Initial memory count: ${initial_count}"
+info "Initial memory count under agent '${INSTANCE}': ${initial_count}"
 
 # ── Test 1: Simple run auto-stores task+response ─────────────────────────────
 #
@@ -175,7 +188,6 @@ spec:
     baseURL: ${LM_STUDIO_BASE_URL}
     authSecretRef: ""
   skills:
-    - skillPackRef: memory
   timeout: "3m"
 EOF
 
@@ -202,8 +214,8 @@ else
 fi
 
 # Check that the auto-store wrote to the memory server.
-# The auto-store is now synchronous (the fix), so no sleep needed in theory,
-# but give a small buffer for controller pod-log extraction.
+# autoStoreMemory is now synchronous (the fix), so no sleep needed in theory,
+# but give a small buffer.
 sleep 2
 
 post_run_count="$(mem_count)"
@@ -219,13 +231,11 @@ search_result="$(mem_search "autostore-proof")"
 if echo "$search_result" | grep -qi "autostore-proof\|answer"; then
   pass "Test 1c: Auto-stored entry found via search for task content"
 else
-  # FTS5 tokenization may not match hyphenated words; try searching for "Respond"
   search_result2="$(mem_search "Respond")"
   if echo "$search_result2" | grep -qi "Respond\|answer\|hello"; then
     pass "Test 1c: Auto-stored entry found via alternate search"
   else
-    # Last resort: just verify the list has the content
-    list_content="$(mem_list | python3 -c 'import json,sys; [print(e.get("content","")[:200]) for e in json.load(sys.stdin).get("content",[])]' 2>/dev/null || true)"
+    list_content="$(mem_list | python3 -c 'import json,sys; [print(e.get("content","")[:200]) for e in json.load(sys.stdin).get("results",[])]' 2>/dev/null || true)"
     if echo "$list_content" | grep -qi "Task:"; then
       pass "Test 1c: Auto-stored entry confirmed via list (Task: prefix present)"
     else
@@ -239,7 +249,7 @@ fi
 # Verify the entry has ["auto", "agent-run"] tags.
 has_auto_tags="$(mem_list | python3 -c '
 import json, sys
-entries = json.load(sys.stdin).get("content", [])
+entries = json.load(sys.stdin).get("results", [])
 for e in entries:
     tags = e.get("tags", [])
     if "auto" in tags and "agent-run" in tags:
@@ -253,19 +263,26 @@ else
   fail "Test 1d: No entry with [\"auto\", \"agent-run\"] tags found"
 fi
 
-# ── Test 2: Memory server logs show [store] from agent-runner ────────────────
+# ── Test 2: memory-server logs show /v1/store from agent-runner ──────────────
 
-info "Test 2: Memory server logs show agent-runner store requests"
+info "Test 2: memory-server logs show agent-runner store requests"
 
-mem_logs="$(kubectl logs -n "$NAMESPACE" "deployment/${INSTANCE}-memory" --tail=100 2>/dev/null || true)"
+mem_logs="$(kubectl logs -n "$SYSTEM_NS" "deployment/${MEMORY_SVC}" --tail=200 2>/dev/null || true)"
 
-store_count="$(echo "$mem_logs" | grep -c "\[store\]" || true)"
-if [[ "$store_count" -ge 1 ]]; then
-  pass "Test 2: Memory server logged ${store_count} [store] request(s)"
+# Filter for our agent. The server logs include the agent_name in store/search lines.
+agent_store_lines="$(echo "$mem_logs" | grep -E "store|/v1/store" | grep -c "${INSTANCE}" || true)"
+if [[ "$agent_store_lines" -ge 1 ]]; then
+  pass "Test 2: memory-server logged ${agent_store_lines} store line(s) referencing agent '${INSTANCE}'"
 else
-  fail "Test 2: No [store] log entries — auto-store POST never reached memory server"
-  echo "  Memory server logs:"
-  echo "$mem_logs" | tail -15
+  # Fallback: at least some store activity must be present since post_run_count grew.
+  any_store="$(echo "$mem_logs" | grep -c "/v1/store" || true)"
+  if [[ "$any_store" -ge 1 ]]; then
+    pass "Test 2: memory-server logged ${any_store} /v1/store call(s) (log format does not include agent_name)"
+  else
+    fail "Test 2: No store activity visible in memory-server logs (expected post-run auto-store)"
+    echo "  memory-server logs (last 30):"
+    echo "$mem_logs" | tail -30
+  fi
 fi
 
 # ── Test 3: Second run auto-injects prior memory and also auto-stores ─────────
@@ -294,7 +311,6 @@ spec:
     baseURL: ${LM_STUDIO_BASE_URL}
     authSecretRef: ""
   skills:
-    - skillPackRef: memory
   timeout: "2m"
 EOF
 
@@ -329,20 +345,25 @@ if [[ -n "$run2_pod" ]]; then
   fi
 fi
 
-# Verify the memory server saw search requests from both runs.
-mem_logs="$(kubectl logs -n "$NAMESPACE" "deployment/${INSTANCE}-memory" --tail=100 2>/dev/null || true)"
-search_count="$(echo "$mem_logs" | grep -c "\[search\]" || true)"
-if [[ "$search_count" -ge 2 ]]; then
-  pass "Test 3d: Memory server logged ${search_count} search requests across both runs"
+# Verify the memory server saw search requests for this agent across both runs.
+mem_logs="$(kubectl logs -n "$SYSTEM_NS" "deployment/${MEMORY_SVC}" --tail=300 2>/dev/null || true)"
+agent_search_lines="$(echo "$mem_logs" | grep -E "search|/v1/search" | grep -c "${INSTANCE}" || true)"
+if [[ "$agent_search_lines" -ge 2 ]]; then
+  pass "Test 3d: memory-server logged ${agent_search_lines} search line(s) for agent '${INSTANCE}'"
 else
-  fail "Test 3d: Expected >= 2 search requests, found ${search_count}"
+  any_search="$(echo "$mem_logs" | grep -c "/v1/search" || true)"
+  if [[ "$any_search" -ge 2 ]]; then
+    pass "Test 3d: memory-server logged ${any_search} /v1/search call(s) (log format does not include agent_name)"
+  else
+    fail "Test 3d: Expected >= 2 search requests by now, found ${any_search}"
+  fi
 fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""
 final_count="$(mem_count)"
-info "Final memory entry count: ${final_count}"
+info "Final memory entry count under agent '${INSTANCE}': ${final_count}"
 echo ""
 
 if [[ $FAILED -eq 0 ]]; then

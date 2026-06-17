@@ -76,8 +76,9 @@ spec:
                 type: string
               includeMemory:
                 default: true
-                description: IncludeMemory injects the instance's MEMORY.md as context
-                  for each run.
+                description: |-
+                  IncludeMemory fetches the instance's persistent memory from the
+                  central memory server and injects it as context for each run.
                 type: boolean
               schedule:
                 description: Schedule is a cron expression (e.g. "0 * * * *").

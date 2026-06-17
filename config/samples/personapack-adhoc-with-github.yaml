@@ -36,7 +36,6 @@ spec:
         repo: "myorg/myapp"            # owner/repo format
   memory:
     enabled: true
-    maxSizeKB: 256
   policyRef: default-policy
 ---
 # Heartbeat schedule that references the instance above.

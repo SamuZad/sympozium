@@ -104,7 +104,7 @@ type AgentRunSpec struct {
 	// but may also be set directly on an AgentRun. Useful for mounting
 	// secrets via CSI drivers (Vault CSI, Secrets Store CSI), PVCs,
 	// or arbitrary projected volumes. Names must not collide with
-	// reserved volumes: workspace, ipc, skills, tmp, memory, mcp-config.
+	// reserved volumes: workspace, ipc, skills, tmp, mcp-config.
 	// +optional
 	Volumes []corev1.Volume `json:"volumes,omitempty"`
 

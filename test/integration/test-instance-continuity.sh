@@ -180,14 +180,14 @@ main() {
 
   # ── Create instance ──
   local create_body
-  create_body="{\"name\":\"${INSTANCE_NAME}\",\"provider\":\"${provider}\",\"model\":\"${model}\",\"apiKey\":\"${api_key}\",\"skills\":[{\"skillPackRef\":\"k8s-ops\"},{\"skillPackRef\":\"memory\"}]"
+  create_body="{\"name\":\"${INSTANCE_NAME}\",\"provider\":\"${provider}\",\"model\":\"${model}\",\"apiKey\":\"${api_key}\",\"skills\":[{\"skillPackRef\":\"k8s-ops\"}]"
   if [[ -n "$base_url" ]]; then
     create_body="${create_body},\"baseURL\":\"${base_url}\""
   fi
   create_body="${create_body}}"
 
   api_request POST "/api/v1/agents" "$create_body" >/dev/null
-  pass "Created instance '${INSTANCE_NAME}' with memory skill"
+  pass "Created instance '${INSTANCE_NAME}'"
 
   # Wait for memory server to be ready before dispatching runs.
   info "Waiting for memory server deployment..."

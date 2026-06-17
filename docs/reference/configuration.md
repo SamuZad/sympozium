@@ -7,7 +7,12 @@
 | `EVENT_BUS_URL` | All | NATS server URL |
 | `DATABASE_URL` | API Server | PostgreSQL connection string |
 | `INSTANCE_NAME` | Channels | Owning Agent name |
-| `MEMORY_ENABLED` | Agent Runner | Whether persistent memory is active |
+| `MEMORY_SERVER_URL` | Agent Runner / API Server / Controller | Base URL of the central memory-server (e.g. `http://sympozium-memory-server.sympozium-system.svc:8080`). When unset, memory tools are disabled. |
+| `MEMORY_ADMIN_SAS` | Memory Server | Comma-separated list of `namespace/serviceaccount` allowed to use admin-only endpoints. The Helm chart auto-includes `sympozium-system/sympozium-controller-manager` and `sympozium-system/sympozium-apiserver`. |
+| `MEMORY_MEMBERSHIP_CACHE_TTL` | Memory Server | TTL for caller membership cache entries (default `10m`). |
+| `MEMORY_MEMBERSHIP_CACHE_SIZE` | Memory Server | Max entries in the membership cache (default `4096`). |
+| `MEMORY_POSTGRES_URL` | Memory Server | PostgreSQL+pgvector connection string for memory rows. |
+| `MEMORY_EMBEDDING_URL` / `MEMORY_EMBEDDING_MODEL` / `MEMORY_EMBEDDING_API_KEY` | Memory Server | OpenAI-compatible embedding endpoint, model name, and key. |
 | `MAX_TOOL_ITERATIONS` | Agent Runner | Maximum tool-call iterations (default: 50). Can also be set per-run via `spec.env` in AgentRun CR. |
 | `TELEGRAM_BOT_TOKEN` | Telegram | Bot API token |
 | `SLACK_BOT_TOKEN` | Slack | Bot OAuth token |

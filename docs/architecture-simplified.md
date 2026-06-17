@@ -47,7 +47,7 @@ flowchart TB
             runner["Agent Runner<br/><i>LLM provider ↔ tool loop</i>"]
             sidecars["Skill Sidecars<br/><i>kubectl, gh, custom</i>"]
             mcp["MCP Bridge<br/><i>JSON-RPC 2.0</i>"]
-            memory["Persistent Memory<br/><i>SQLite + FTS5</i>"]
+            memory["Persistent Memory<br/><i>PostgreSQL + pgvector</i>"]
         end
 
         subgraph security["K8s-Native Security"]

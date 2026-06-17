@@ -527,7 +527,7 @@ export function OnboardingWizard({
     secretName: defaults?.secretName || "",
     model: defaults?.model || "",
     baseURL: defaults?.baseURL || "",
-    skills: Array.from(new Set([...(defaults?.skills || []), "memory"])),
+    skills: Array.from(new Set(defaults?.skills || [])),
     channels: defaults?.channels || Object.keys(defaults?.channelConfigs || {}),
     channelConfigs: defaults?.channelConfigs || {},
     heartbeatInterval: defaults?.heartbeatInterval || "",
@@ -1224,14 +1224,11 @@ export function OnboardingWizard({
                       .sort((a, b) => a.localeCompare(b))
                       .map((skill) => {
                         const selected = form.skills.includes(skill);
-                        const locked = skill === "memory";
                         return (
                           <button
                             key={skill}
                             type="button"
-                            disabled={locked}
                             onClick={() => {
-                              if (locked) return;
                               const next = selected
                                 ? form.skills.filter((s) => s !== skill)
                                 : [...form.skills, skill];

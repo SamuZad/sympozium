@@ -136,11 +136,11 @@ describe("Sequential Workflow — automatic trigger on completion", () => {
 
 RULES:
 1. Answer the question with the specific number first.
-2. Then call workflow_memory_store to save your finding.
+2. Then call memory_store with scope "ensemble" to save your finding.
 3. Your final response MUST include the actual number (e.g. "2.1 million" or "10,500 km").
-4. Do NOT use any tools except workflow_memory_store.`,
+4. Do NOT use any tools except memory_store.`,
 						model: Cypress.env("TEST_MODEL"),
-						skills: ["memory"],
+						skills: [],
 					},
 					{
 						name: R1,
@@ -148,12 +148,12 @@ RULES:
 						systemPrompt: `You are a verification researcher.
 
 RULES:
-1. Call workflow_memory_search to find the primary researcher's findings.
+1. Call memory_search with scope "ensemble" to find the primary researcher's findings.
 2. Verify the findings and state whether they are correct.
-3. Call workflow_memory_store to save your verification.
-4. Do NOT use any tools except workflow_memory_search and workflow_memory_store.`,
+3. Call memory_store with scope "ensemble" to save your verification.
+4. Do NOT use any tools except memory_search and memory_store.`,
 						model: Cypress.env("TEST_MODEL"),
-						skills: ["memory"],
+						skills: [],
 					},
 				],
 				relationships: [
@@ -166,7 +166,6 @@ RULES:
 				],
 				sharedMemory: {
 					enabled: true,
-					storageSize: "512Mi",
 					accessRules: [
 						{ agentConfig: R0, access: "read-write" },
 						{ agentConfig: R1, access: "read-write" },
@@ -201,7 +200,7 @@ RULES:
 		// Dispatch run to researcher-0 only — researcher-1 should be triggered automatically.
 		cy.dispatchRun(
 			R0_INSTANCE,
-			"What is the approximate population of Paris, France? State the number, then call workflow_memory_store to save it with tags population, paris. Do not use any other tools.",
+			"What is the approximate population of Paris, France? State the number, then call memory_store with scope \"ensemble\" to save it with tags population, paris. Do not use any other tools.",
 		).then((r0RunName) => {
 			// Wait for researcher-0 to complete
 			cy.waitForRunTerminal(r0RunName, 5 * 60 * 1000).then((phase) => {

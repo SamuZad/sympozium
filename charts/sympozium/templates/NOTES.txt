@@ -16,6 +16,14 @@ Components:
 {{- else }}
   ℹ️  Using external NATS: {{ .Values.nats.externalUrl }}
 {{- end }}
+{{- if .Values.memory.enabled }}
+  ✅ Memory Server ({{ .Values.memory.server.replicaCount }} replica(s)) — {{ include "sympozium.memoryServerURL" . }}
+{{- if .Values.memory.postgres.enabled }}
+  ✅ Bundled Postgres (pgvector) — single-node, {{ .Values.memory.postgres.persistence.size }}{{ if not .Values.memory.postgres.persistence.enabled }} (emptyDir, NOT durable){{ end }}
+{{- else }}
+  ℹ️  Using external Postgres for memory
+{{- end }}
+{{- end }}
 
 {{- if .Values.gateway.enabled }}
 ⚠️  Gateway is enabled. Make sure Gateway API CRDs are installed:

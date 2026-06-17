@@ -545,7 +545,6 @@ export interface MembraneSpec {
 
 export interface SharedMemorySpec {
   enabled: boolean;
-  storageSize?: string;
   accessRules?: SharedMemoryAccessRule[];
   membrane?: MembraneSpec;
 }

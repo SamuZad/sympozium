@@ -1,0 +1,80 @@
+{{- if and .Values.memory.enabled .Values.rbac.create }}
+{{- $fullname := include "sympozium.fullname" . }}
+{{- $ns := include "sympozium.namespace" . }}
+# Memory-server ServiceAccount + RBAC.
+#
+# Promoted to a pre-install/pre-upgrade hook so the SA exists before the
+# migration Job pod is admitted. This matters with IRSA / Workload Identity:
+# the kubelet projects the SA's IAM role annotation into the pod token at
+# admission time, so the SA (with its annotations) MUST already exist when
+# the migrate pod is created.
+#
+# hook-delete-policy is `before-hook-creation` only (NOT `hook-succeeded`),
+# so the SA persists between releases — the regular serve Deployment
+# references it. Recreating on upgrade gives the SA a new UID, but
+# projected SA tokens are bound by name, so running serve pods are
+# unaffected.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $fullname }}-memory-server
+  namespace: {{ $ns }}
+  labels:
+    {{- include "sympozium.labels" . | nindent 4 }}
+    app.kubernetes.io/component: memory-server
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-20"
+    "helm.sh/hook-delete-policy": before-hook-creation
+    {{- with .Values.memory.server.serviceAccount.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+---
+# ClusterRole needed by memory-server:
+#   - tokenreviews: validate caller SA bearer tokens
+#   - agents/ensembles (cluster-wide get/list/watch): resolve caller identity
+#     -> agent -> ensemble -> trust peers + cross-namespace membrane rules
+#   - namespaces (get/list/watch): evaluate namespaceSelector in membrane
+#     export/import rules
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $fullname }}-memory-server
+  labels:
+    {{- include "sympozium.labels" . | nindent 4 }}
+    app.kubernetes.io/component: memory-server
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-20"
+    "helm.sh/hook-delete-policy": before-hook-creation
+rules:
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+  - apiGroups: ["sympozium.ai"]
+    resources: ["agents", "ensembles"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $fullname }}-memory-server
+  labels:
+    {{- include "sympozium.labels" . | nindent 4 }}
+    app.kubernetes.io/component: memory-server
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-20"
+    "helm.sh/hook-delete-policy": before-hook-creation
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $fullname }}-memory-server
+subjects:
+  - kind: ServiceAccount
+    name: {{ $fullname }}-memory-server
+    namespace: {{ $ns }}
+{{- end }}

@@ -4,7 +4,7 @@ Ensembles are the **recommended way to get started** with Sympozium. A Ensemble 
 
 ## Why Ensembles?
 
-Without Ensembles, setting up even one agent requires creating a Secret, Agent, SympoziumSchedule, and memory ConfigMap by hand. Ensembles collapse that into: pick a pack → enter your API key → done.
+Without Ensembles, setting up even one agent requires creating a Secret, Agent, and SympoziumSchedule by hand. Ensembles collapse that into: pick a pack → enter your API key → done.
 
 ## How It Works
 
@@ -16,19 +16,15 @@ Ensemble "platform-team" (3 personas)
   └── Controller stamps out:
       ├── Secret: platform-team-openai-key
       ├── Agent: platform-team-security-guardian
-      │   ├── SympoziumSchedule: ...security-guardian-schedule (every 30m)
-      │   └── ConfigMap: ...security-guardian-memory (seeded)
+      │   └── SympoziumSchedule: ...security-guardian-schedule (every 30m)
       ├── Agent: platform-team-sre-watchdog
-      │   ├── SympoziumSchedule: ...sre-watchdog-schedule (every 5m)
-      │   └── ConfigMap: ...sre-watchdog-memory (seeded)
+      │   └── SympoziumSchedule: ...sre-watchdog-schedule (every 5m)
       ├── Agent: platform-team-platform-engineer
-      │   ├── SympoziumSchedule: ...platform-engineer-schedule (weekdays 9am)
-      │   └── ConfigMap: ...platform-engineer-memory (seeded)
+      │   └── SympoziumSchedule: ...platform-engineer-schedule (weekdays 9am)
       │
-      └── (if sharedMemory.enabled):
-          ├── PVC: platform-team-shared-memory-db
-          ├── Deployment: platform-team-shared-memory
-          └── Service: platform-team-shared-memory
+      └── Memory seeds (persona.memory.seeds) are POSTed to the central
+          memory-server as rows tagged [seed, ensemble:<pack>, persona:<name>].
+          Shared-memory rows live in the same service under scope="ensemble".
 ```
 
 All generated resources have `ownerReferences` pointing back to the Ensemble — delete the pack and everything gets garbage-collected.
@@ -136,9 +132,9 @@ Or via the "Re-trigger Stimulus" button on the workflow canvas in the UI.
 
 When a stimulus is delivered (automatically or manually), a system message appears in the feed: **"Stimulus prompt sent (readiness)"** or **"Stimulus prompt sent (manual)"**.
 
-## Shared Workflow Memory
+## Shared Ensemble Memory
 
-By default, each persona in a Ensemble has its own **private memory** — an isolated SQLite database that only that persona can access. Shared Workflow Memory adds a second, **pack-level memory pool** that all personas can read from (and optionally write to), enabling cross-persona knowledge sharing.
+By default, each persona in a Ensemble has its own **private memory slice** in the central memory server (`scope: "agent"`). Shared Ensemble Memory adds a **pack-level pool** (`scope: "ensemble"`) that every persona can read from — and that personas with write access can store into — enabling cross-persona knowledge sharing.
 
 ### Enabling Shared Memory
 
@@ -150,7 +146,6 @@ metadata:
 spec:
   sharedMemory:
     enabled: true
-    storageSize: "1Gi"
     accessRules:
       - persona: lead
         access: read-write
@@ -164,36 +159,32 @@ spec:
 
 ### How It Works
 
-When shared memory is enabled, the Ensemble controller provisions:
-
-- **PVC**: `<pack>-shared-memory-db` — persistent storage for the shared SQLite database
-- **Deployment**: `<pack>-shared-memory` — the same `skill-memory` server image used for private memory
-- **Service**: `<pack>-shared-memory` — ClusterIP service on port 8080
-
-All resources have `ownerReferences` to the Ensemble and are cleaned up on deletion.
+No extra Kubernetes resources are provisioned per pack — every Ensemble shares the cluster-wide [`sympozium-memory-server`](persistent-memory.md). The Ensemble controller simply records the access rules in the Ensemble status; the agent-runner reads them at startup and either registers the `memory_store` tool for the `"ensemble"` scope (read-write personas) or omits it (read-only personas).
 
 ### Agent Tools
 
-Agents in the pack receive three additional tools alongside their private memory tools:
+Personas use the same three memory tools as for private memory, but pass `scope: "ensemble"`:
 
 | Tool | Description | Access |
 |------|-------------|--------|
-| `workflow_memory_search` | Search shared team knowledge contributed by any persona | All |
-| `workflow_memory_store` | Store findings for other personas (auto-tagged with source persona) | read-write only |
-| `workflow_memory_list` | List shared entries, filterable by persona or tag | All |
+| `memory_search(scope="ensemble", ...)` | Search shared team knowledge contributed by any persona | All |
+| `memory_store(scope="ensemble", ...)` | Store findings for other personas (auto-tagged with source persona) | read-write only |
+| `memory_list(scope="ensemble", ...)`   | List shared entries, filterable by persona or tag | All |
+
+There is no separate `workflow_memory_*` tool set.
 
 ### Access Control
 
 Each persona can be granted `read-write` or `read-only` access via `accessRules`. If no rules are specified, all personas default to `read-write`.
 
-- **read-write**: Can search, list, and store entries
-- **read-only**: Can search and list, but cannot store (the `workflow_memory_store` tool is not registered)
+- **read-write**: Can search, list, and store entries.
+- **read-only**: Can search and list, but cannot store (the agent-runner refuses to register `memory_store` for `scope="ensemble"`).
 
-Access control is enforced client-side in the agent runner — sufficient because the memory server is in-cluster behind a ClusterIP with no untrusted clients.
+Access control is enforced both client-side (the runner) and server-side (the memory-server verifies the caller's identity against the Ensemble's `accessRules`).
 
 ## Synthetic Membrane
 
-The Synthetic Membrane is an optional layer on top of Shared Workflow Memory that adds **selective permeability**, **provenance tracking**, **token budgets**, **circuit breakers**, and **time decay**. Inspired by biological cell membranes, it transforms the flat shared memory pool into a structured medium where agents share state selectively rather than broadcasting everything.
+The Synthetic Membrane is an optional layer on top of Shared Ensemble Memory that adds **selective permeability**, **provenance tracking**, **token budgets**, **circuit breakers**, **time decay**, and **cross-ensemble Import/Export**. Inspired by biological cell membranes, it transforms the flat shared memory pool into a structured medium where agents share state selectively rather than broadcasting everything.
 
 ### Why a Membrane?
 
@@ -216,7 +207,6 @@ metadata:
 spec:
   sharedMemory:
     enabled: true
-    storageSize: "1Gi"
     membrane:
       defaultVisibility: public
       permeability:
@@ -328,7 +318,7 @@ When an agent starts, the runner automatically queries both private and shared m
 
 ### Attribution
 
-Entries stored via `workflow_memory_store` are automatically tagged with the source persona's instance name. This enables filtering by persona (e.g., "show me what the researcher found") without relying on agents to self-tag correctly.
+Entries stored via `memory_store(scope="ensemble")` are automatically tagged with the source persona's instance name. This enables filtering by persona (e.g., "show me what the researcher found") without relying on agents to self-tag correctly.
 
 ### delegate_to_persona Tool
 
@@ -392,7 +382,7 @@ kubectl patch ensemble platform-team --type=merge -p '{
 }'
 ```
 
-The controller detects the `authRefs` change and reconciles — creating Agents, Schedules, and memory ConfigMaps for each persona.
+The controller detects the `authRefs` change and reconciles — creating Agents and Schedules for each persona, and seeding the central `memory-server` with each persona's `memory.seeds` entries.
 
 ## Writing Your Own Ensemble
 
@@ -413,7 +403,6 @@ spec:
         You plan work and delegate to the executor.
       skills:
         - k8s-ops
-        - memory
       schedule:
         type: heartbeat
         interval: "1h"
@@ -424,7 +413,6 @@ spec:
         You execute tasks assigned by the planner.
       skills:
         - k8s-ops
-        - memory
   relationships:
     - source: planner
       target: executor

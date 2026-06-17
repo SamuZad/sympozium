@@ -32,15 +32,12 @@ spec:
     - name: researcher
       displayName: Researcher
       systemPrompt: "You are a researcher."
-      skills: [memory]
     - name: writer
       displayName: Writer
       systemPrompt: "You are a technical writer."
-      skills: [memory]
     - name: reviewer
       displayName: Reviewer
       systemPrompt: "You are a code reviewer."
-      skills: [memory]
   relationships:
     - source: researcher
       target: writer

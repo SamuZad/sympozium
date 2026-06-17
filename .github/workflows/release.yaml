@@ -83,7 +83,7 @@ jobs:
           - skill-sre-observability
           - skill-github-gitops
           - skill-llmfit
-          - skill-memory
+          - memory-server
           - mcp-bridge
           - web-proxy
           - node-probe

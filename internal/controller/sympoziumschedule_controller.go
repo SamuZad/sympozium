@@ -10,7 +10,6 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/robfig/cron/v3"
 
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -19,6 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	sympoziumv1alpha1 "github.com/sympozium-ai/sympozium/api/v1alpha1"
+	"github.com/sympozium-ai/sympozium/pkg/memoryclient"
 )
 
 // maxScheduleRunCreateRetries bounds the collision-retry loop when the
@@ -33,6 +33,10 @@ type SympoziumScheduleReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 	Log    logr.Logger
+
+	// MemoryClient queries the central memory-server for scheduled runs
+	// that opt in via spec.includeMemory. Nil disables memory pre-loading.
+	MemoryClient *memoryclient.Client
 }
 
 // +kubebuilder:rbac:groups=sympozium.ai,resources=sympoziumschedules,verbs=get;list;watch;create;update;patch;delete
@@ -157,7 +161,7 @@ func (r *SympoziumScheduleReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	// Build the task, optionally including memory context.
 	task := schedule.Spec.Task
 	if schedule.Spec.IncludeMemory {
-		memoryContent := r.readMemoryConfigMap(ctx, schedule.Namespace, schedule.Spec.AgentRef)
+		memoryContent := r.fetchScheduledMemoryContext(ctx, log, schedule)
 		if memoryContent != "" {
 			task = fmt.Sprintf("## Memory Context\n%s\n\n## Task\n%s", memoryContent, task)
 		}
@@ -363,18 +367,36 @@ func (r *SympoziumScheduleReconciler) nextScheduledRunNumber(ctx context.Context
 	return base, nil
 }
 
-// readMemoryConfigMap reads the MEMORY.md content from the instance's memory
-// ConfigMap. Returns empty string if not found.
-func (r *SympoziumScheduleReconciler) readMemoryConfigMap(ctx context.Context, namespace, instanceName string) string {
-	cmName := fmt.Sprintf("%s-memory", instanceName)
-	var configMap corev1.ConfigMap
-	if err := r.Get(ctx, client.ObjectKey{
-		Namespace: namespace,
-		Name:      cmName,
-	}, &configMap); err != nil {
+// fetchScheduledMemoryContext returns the top recent agent-scope memories
+// for the schedule's referenced Agent, formatted for prepending to the
+// task. Returns empty when memory is disabled, the client is unset, or
+// the call fails (no schedule should ever fail because of memory issues).
+func (r *SympoziumScheduleReconciler) fetchScheduledMemoryContext(ctx context.Context, log logr.Logger, schedule *sympoziumv1alpha1.SympoziumSchedule) string {
+	if r.MemoryClient == nil || schedule.Spec.AgentRef == "" {
 		return ""
 	}
-	return configMap.Data["MEMORY.md"]
+	callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	hits, err := r.MemoryClient.List(callCtx, memoryclient.ListRequest{
+		Scope:     "agent",
+		AgentName: schedule.Spec.AgentRef,
+		Limit:     10,
+	})
+	if err != nil {
+		log.V(1).Info("memory pre-load failed, continuing without context", "err", err)
+		return ""
+	}
+	if len(hits) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	for i, h := range hits {
+		if i > 0 {
+			sb.WriteString("\n---\n")
+		}
+		sb.WriteString(h.Content)
+	}
+	return sb.String()
 }
 
 // SetupWithManager sets up the controller with the Manager.

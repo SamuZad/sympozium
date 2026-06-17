@@ -40,13 +40,10 @@ spec:
   agentConfigs:
     - name: alpha
       systemPrompt: "Agent alpha."
-      skills: [memory]
     - name: beta
       systemPrompt: "Agent beta."
-      skills: [memory]
     - name: gamma
       systemPrompt: "Agent gamma."
-      skills: [memory]
 `;
 		cy.writeFile(`cypress/tmp/${PACK}.yaml`, manifest);
 		cy.exec(`kubectl apply -f cypress/tmp/${PACK}.yaml`);
@@ -65,14 +62,12 @@ spec:
 			body: {
 				sharedMemory: {
 					enabled: true,
-					storageSize: "512Mi",
 				},
 			},
 		}).then((resp) => {
 			expect(resp.status).to.eq(200);
 			expect(resp.body.spec.sharedMemory).to.deep.include({
 				enabled: true,
-				storageSize: "512Mi",
 			});
 		});
 	});
@@ -84,7 +79,6 @@ spec:
 		}).then((resp) => {
 			expect(resp.status).to.eq(200);
 			expect(resp.body.spec.sharedMemory.enabled).to.eq(true);
-			expect(resp.body.spec.sharedMemory.storageSize).to.eq("512Mi");
 		});
 	});
 
@@ -96,7 +90,6 @@ spec:
 			body: {
 				sharedMemory: {
 					enabled: true,
-					storageSize: "512Mi",
 					accessRules: [
 						{ agentConfig: "alpha", access: "read-write" },
 						{ agentConfig: "beta", access: "read-write" },
@@ -127,7 +120,6 @@ spec:
 			body: {
 				sharedMemory: {
 					enabled: true,
-					storageSize: "512Mi",
 					accessRules: [
 						{ agentConfig: "alpha", access: "read-write" },
 						{ agentConfig: "beta", access: "read-only" },
@@ -138,7 +130,6 @@ spec:
 		}).then((resp) => {
 			expect(resp.status).to.eq(200);
 			expect(resp.body.spec.sharedMemory.enabled).to.eq(true);
-			expect(resp.body.spec.sharedMemory.storageSize).to.eq("512Mi");
 			const betaRule = resp.body.spec.sharedMemory.accessRules.find(
 				(r: { agentConfig: string }) => r.agentConfig === "beta",
 			);
@@ -171,7 +162,6 @@ spec:
 			body: {
 				sharedMemory: {
 					enabled: true,
-					storageSize: "1Gi",
 					accessRules: [
 						{ agentConfig: "alpha", access: "read-write" },
 						{ agentConfig: "beta", access: "read-write" },
@@ -210,11 +200,9 @@ spec:
     - name: coordinator
       displayName: Coordinator
       systemPrompt: "You coordinate."
-      skills: [memory]
     - name: worker
       displayName: Worker
       systemPrompt: "You execute tasks."
-      skills: [memory]
   relationships:
     - source: coordinator
       target: worker
@@ -222,7 +210,6 @@ spec:
       timeout: "10m"
   sharedMemory:
     enabled: true
-    storageSize: "1Gi"
     accessRules:
       - agentConfig: coordinator
         access: read-write
@@ -254,7 +241,6 @@ spec:
 
 			// Shared memory present
 			expect(spec.sharedMemory.enabled).to.eq(true);
-			expect(spec.sharedMemory.storageSize).to.eq("1Gi");
 			expect(spec.sharedMemory.accessRules).to.have.length(2);
 
 			// Workflow type preserved
@@ -291,7 +277,6 @@ spec:
 			body: {
 				sharedMemory: {
 					enabled: true,
-					storageSize: "2Gi",
 					accessRules: [
 						{ agentConfig: "coordinator", access: "read-write" },
 						{ agentConfig: "worker", access: "read-only" },
@@ -301,7 +286,6 @@ spec:
 		}).then((resp) => {
 			expect(resp.status).to.eq(200);
 			// Shared memory updated
-			expect(resp.body.spec.sharedMemory.storageSize).to.eq("2Gi");
 			const workerRule = resp.body.spec.sharedMemory.accessRules.find(
 				(r: { agentConfig: string }) => r.agentConfig === "worker",
 			);
@@ -335,15 +319,12 @@ spec:
     - name: analyst
       displayName: Analyst
       systemPrompt: "You analyze."
-      skills: [memory]
     - name: reporter
       displayName: Reporter
       systemPrompt: "You report."
-      skills: [memory]
     - name: auditor
       displayName: Auditor
       systemPrompt: "You audit."
-      skills: [memory]
   relationships:
     - source: analyst
       target: reporter
@@ -353,7 +334,6 @@ spec:
       type: sequential
   sharedMemory:
     enabled: true
-    storageSize: "1Gi"
     accessRules:
       - agentConfig: analyst
         access: read-write
@@ -454,7 +434,6 @@ spec:
     - name: solo
       displayName: Solo
       systemPrompt: "You work alone."
-      skills: [memory]
 `;
 		cy.writeFile(`cypress/tmp/${PACK}.yaml`, manifest);
 		cy.exec(`kubectl apply -f cypress/tmp/${PACK}.yaml`);
@@ -510,7 +489,6 @@ spec:
   agentConfigs:
     - name: agent
       systemPrompt: "You are an agent."
-      skills: [memory]
 `;
 		cy.writeFile(`cypress/tmp/${PACK}.yaml`, manifest);
 		cy.exec(`kubectl apply -f cypress/tmp/${PACK}.yaml`);
@@ -581,7 +559,6 @@ describe("Research Team — shared memory config", () => {
 
 			expect(spec.sharedMemory).to.exist;
 			expect(spec.sharedMemory.enabled).to.eq(true);
-			expect(spec.sharedMemory.storageSize).to.eq("1Gi");
 
 			const rules = spec.sharedMemory.accessRules;
 			expect(rules).to.have.length(4);
@@ -626,7 +603,6 @@ describe("Research Team — shared memory config", () => {
 			.scrollIntoView()
 			.should("be.visible");
 		cy.contains("Enabled").scrollIntoView().should("be.visible");
-		cy.contains("Storage: 1Gi").scrollIntoView().should("be.visible");
 	});
 
 	it("shows access rules for all 4 agents", () => {
@@ -720,20 +696,6 @@ spec:
 		});
 	});
 
-	it("can enable shared memory with default storageSize", () => {
-		cy.request({
-			url: `/api/v1/ensembles/${PACK}?namespace=${NS}`,
-			headers: apiHeaders(),
-		}).then((resp) => {
-			// storageSize defaults to "1Gi" if not specified
-			const sharedMem = resp.body.spec.sharedMemory;
-			if (sharedMem && sharedMem.storageSize) {
-				expect(sharedMem.storageSize).to.eq("1Gi");
-			}
-			// If sharedMemory is undefined, the previous test didn't run — skip gracefully
-		});
-	});
-
 	it("can set shared memory alongside enabling the pack", () => {
 		cy.request({
 			method: "PATCH",
@@ -743,7 +705,6 @@ spec:
 				enabled: false,
 				sharedMemory: {
 					enabled: true,
-					storageSize: "2Gi",
 					accessRules: [
 						{ agentConfig: "one", access: "read-write" },
 						{ agentConfig: "two", access: "read-only" },
@@ -756,7 +717,6 @@ spec:
 			// enabled=false is omitted by Go's omitempty, so check for falsy
 			expect(resp.body.spec.enabled).to.not.eq(true);
 			expect(resp.body.spec.sharedMemory.enabled).to.eq(true);
-			expect(resp.body.spec.sharedMemory.storageSize).to.eq("2Gi");
 			expect(resp.body.spec.sharedMemory.accessRules).to.have.length(2);
 		});
 	});
@@ -771,7 +731,6 @@ spec:
 				workflowType: "delegation",
 				sharedMemory: {
 					enabled: true,
-					storageSize: "1Gi",
 					accessRules: [
 						{ agentConfig: "one", access: "read-write" },
 						{ agentConfig: "two", access: "read-write" },

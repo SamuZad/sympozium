@@ -1,5 +1,9 @@
 package v1alpha1
 
+import (
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
 // MembraneSpec configures the synthetic membrane layer for shared memory,
 // enabling selective permeability, provenance tracking, token budgets,
 // and circuit breakers across agent configurations in an ensemble.
@@ -23,6 +27,31 @@ type MembraneSpec struct {
 	// +optional
 	TrustGroups []TrustGroup `json:"trustGroups,omitempty"`
 
+	// Export declares which memories owned by Agents in THIS ensemble may
+	// be read by Agents in OTHER ensembles (typically in other namespaces).
+	//
+	// Export is one half of a two-sided opt-in: a reader only sees an
+	// exported memory if its own ensemble's Import rules also accept the
+	// producing ensemble. Without a matching Export, cross-ensemble reads
+	// silently return zero rows (no 403).
+	//
+	// Empty list = no cross-ensemble export. This is the safe default; a
+	// missing Membrane keeps memory strictly within the owning ensemble.
+	// +optional
+	Export []MembraneExportRule `json:"export,omitempty"`
+
+	// Import declares which OTHER ensembles' exported memories Agents in
+	// THIS ensemble are willing to read.
+	//
+	// Import is the other half of the opt-in: even if a peer Exports to
+	// us, we must Import from them. Unmatched memories are filtered out
+	// of search results, not surfaced as permission errors.
+	//
+	// Empty list = no cross-ensemble import. Search results contain only
+	// memories produced inside this ensemble.
+	// +optional
+	Import []MembraneImportRule `json:"import,omitempty"`
+
 	// TokenBudget configures ensemble-level token spending limits.
 	// +optional
 	TokenBudget *TokenBudgetSpec `json:"tokenBudget,omitempty"`
@@ -34,6 +63,81 @@ type MembraneSpec struct {
 	// TimeDecay configures how old entries lose salience in search results.
 	// +optional
 	TimeDecay *TimeDecaySpec `json:"timeDecay,omitempty"`
+}
+
+// MembraneExportRule names a class of memories produced inside this
+// ensemble and the set of peer ensembles allowed to read them.
+//
+// All fields combine with AND semantics. A memory is exportable iff it
+// matches every populated filter AND the consumer matches the target
+// selectors.
+type MembraneExportRule struct {
+	// Name is a human-readable identifier (e.g. "prod-incident-postmortems").
+	// Surfaces in status conditions and audit logs.
+	// +optional
+	Name string `json:"name,omitempty"`
+
+	// Visibilities is the set of source-visibility tiers eligible for
+	// export. Defaults to ["public"]. "private" entries are NEVER
+	// exportable regardless of this field.
+	// +optional
+	// +kubebuilder:validation:items:Enum=public;trusted
+	Visibilities []string `json:"visibilities,omitempty"`
+
+	// Tags filters by memory tags. A memory matches if it carries AT LEAST
+	// ONE of these tags. Empty = no tag filter (all memories match).
+	// +optional
+	Tags []string `json:"tags,omitempty"`
+
+	// ToEnsembles selects which peer Ensembles are allowed to consume
+	// memories matched by this rule.
+	//
+	// Both selectors must match (AND). At least one selector MUST be set
+	// — an unrestricted export is rejected at admission to prevent
+	// "share with everything" footguns.
+	ToEnsembles EnsembleTargetSelector `json:"toEnsembles"`
+}
+
+// MembraneImportRule declares which exported memories from peer
+// ensembles this ensemble's Agents are willing to read.
+//
+// Fields combine with AND semantics (same as Export). Unmatched memories
+// are filtered out of search results silently.
+type MembraneImportRule struct {
+	// Name is a human-readable identifier.
+	// +optional
+	Name string `json:"name,omitempty"`
+
+	// Tags filters which exported memories to ingest. Empty = no tag
+	// filter (accept everything the peer exports).
+	// +optional
+	Tags []string `json:"tags,omitempty"`
+
+	// FromEnsembles selects which peer Ensembles to read from.
+	// Same admission rule as Export.ToEnsembles: at least one selector
+	// must be set.
+	FromEnsembles EnsembleTargetSelector `json:"fromEnsembles"`
+}
+
+// EnsembleTargetSelector picks a set of Ensemble objects across the
+// cluster by (namespace, ensemble) labels. Both selectors are evaluated
+// in label-selector form (matchLabels + matchExpressions); a missing
+// selector means "match nothing" — the admission webhook rejects any
+// rule whose selectors are both empty.
+type EnsembleTargetSelector struct {
+	// NamespaceSelector picks namespaces by label. Use the empty selector
+	// `{}` to mean "all namespaces" — but only when paired with a
+	// non-empty EnsembleSelector, since the combination is what bounds
+	// the blast radius.
+	// +optional
+	NamespaceSelector *metav1.LabelSelector `json:"namespaceSelector,omitempty"`
+
+	// EnsembleSelector picks Ensembles by label within the selected
+	// namespaces. Use the empty selector `{}` to mean "all ensembles in
+	// the selected namespaces" — but only when paired with a non-empty
+	// NamespaceSelector.
+	// +optional
+	EnsembleSelector *metav1.LabelSelector `json:"ensembleSelector,omitempty"`
 }
 
 // PermeabilityRule defines what an agent config exposes to and accepts from

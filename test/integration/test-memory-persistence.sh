@@ -1,23 +1,29 @@
 #!/usr/bin/env bash
-# Integration test: Memory persistence across AgentRuns.
+# Integration test: central memory-server persistence.
 #
 # Proves that:
-#   1. Memory server starts and is healthy for an instance with the memory skill
-#   2. Memories stored via the memory server API persist on the PVC
-#   3. Memories survive across AgentRun lifecycles (store in run 1, retrieve in run 2)
-#   4. FTS5 search returns relevant results
-#   5. Memory server is NOT created for instances without the memory skill
-#   6. wait-for-memory init container times out (doesn't hang forever)
+#   1. The central sympozium-memory-server in ${SYMPOZIUM_NAMESPACE} is healthy
+#   2. Memories stored via the /v1/store API are listable and searchable
+#   3. Hybrid (pgvector + tsvector) search returns relevant results
+#   4. Memories survive a memory-server pod restart (PostgreSQL PVC persistence)
 #
-# Does NOT require an LLM provider — tests the memory server directly via port-forward.
+# Auth: uses an admin SA bearer token (kubectl create token sympozium-apiserver -n
+# sympozium-system); the apiserver SA is in MEMORY_ADMIN_SAS so it bypasses
+# membership and scope filters and may store/list/delete under any agentName.
+#
+# Does NOT require an LLM provider.
 
 set -euo pipefail
 
 NAMESPACE="${TEST_NAMESPACE:-default}"
 SYSTEM_NS="${SYMPOZIUM_NAMESPACE:-sympozium-system}"
-APISERVER_URL="${APISERVER_URL:-http://127.0.0.1:19090}"
-PORT_FORWARD_LOCAL_PORT="${APISERVER_PORT:-19090}"
+MEMORY_SVC="${MEMORY_SERVICE:-sympozium-memory-server}"
 TIMEOUT="${TEST_TIMEOUT:-120}"
+# Memory rows live under whichever namespace identifies the writer. When we
+# write directly via the admin SA (sympozium-apiserver), the server pins
+# row.namespace to the SA's namespace (SYSTEM_NS). We must therefore also
+# read from SYSTEM_NS, not TEST_NAMESPACE.
+MEM_NS="$SYSTEM_NS"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -30,345 +36,180 @@ info() { echo -e "${YELLOW}● $*${NC}"; }
 
 EXIT_CODE=0
 SUFFIX="$(date +%s)"
-MEM_INSTANCE="inttest-mem-${SUFFIX}"
-NOMEM_INSTANCE="inttest-nomem-${SUFFIX}"
-MEM_SECRET="${MEM_INSTANCE}-test-key"
-NOMEM_SECRET="${NOMEM_INSTANCE}-test-key"
+# Synthetic agentName under which all test memories are stored. We don't need a
+# real Agent CR — the agent_name column is just a scope tag from the admin SA's
+# perspective. cleanup() wipes everything under this tag at the end.
+AGENT_NAME="inttest-mempersist-${SUFFIX}"
 MEM_PF_PID=""
-API_PF_PID=""
-APISERVER_TOKEN=""
+MEM_PORT="${MEM_PORT:-19292}"
+MEM_URL="http://127.0.0.1:${MEM_PORT}"
+MEMORY_TOKEN=""
 
 cleanup() {
   info "Cleaning up memory persistence test resources..."
+  if [[ -n "$MEMORY_TOKEN" ]]; then
+    curl -sS -X DELETE -G "${MEM_URL}/v1/admin/scope" \
+      -H "Authorization: Bearer ${MEMORY_TOKEN}" \
+      --data-urlencode "scope=agent" \
+      --data-urlencode "agentName=${AGENT_NAME}" \
+      --data-urlencode "namespace=${MEM_NS}" >/dev/null 2>&1 || true
+  fi
   [[ -n "$MEM_PF_PID" ]] && kill "$MEM_PF_PID" 2>/dev/null || true
-  [[ -n "$API_PF_PID" ]] && kill "$API_PF_PID" 2>/dev/null || true
-  kubectl delete agentrun -n "$NAMESPACE" -l "sympozium.ai/instance=${MEM_INSTANCE}" --ignore-not-found >/dev/null 2>&1 || true
-  kubectl delete agentrun -n "$NAMESPACE" -l "sympozium.ai/instance=${NOMEM_INSTANCE}" --ignore-not-found >/dev/null 2>&1 || true
-  kubectl delete sympoziuminstance "$MEM_INSTANCE" "$NOMEM_INSTANCE" -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1 || true
-  kubectl delete secret "$MEM_SECRET" "$NOMEM_SECRET" -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1 || true
-  kubectl delete configmap -n "$NAMESPACE" -l "sympozium.ai/instance=${MEM_INSTANCE}" --ignore-not-found >/dev/null 2>&1 || true
-  kubectl delete configmap -n "$NAMESPACE" -l "sympozium.ai/instance=${NOMEM_INSTANCE}" --ignore-not-found >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
-resolve_apiserver_token() {
-  [[ -n "$APISERVER_TOKEN" ]] && return 0
-  local secret_name
-  secret_name="$(kubectl get deploy -n "$SYSTEM_NS" sympozium-apiserver \
-    -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="SYMPOZIUM_UI_TOKEN")].valueFrom.secretKeyRef.name}' 2>/dev/null || true)"
-  if [[ -n "$secret_name" ]]; then
-    APISERVER_TOKEN="$(kubectl get secret -n "$SYSTEM_NS" "$secret_name" \
-      -o jsonpath='{.data.token}' 2>/dev/null | base64 -d 2>/dev/null || true)"
+resolve_memory_token() {
+  MEMORY_TOKEN="$(kubectl create token sympozium-apiserver -n "$SYSTEM_NS" --duration=1h 2>/dev/null || true)"
+  if [[ -z "$MEMORY_TOKEN" ]]; then
+    fail "Could not obtain admin SA token (kubectl create token sympozium-apiserver -n $SYSTEM_NS)"
+    return 1
   fi
 }
 
-api_request() {
-  local method="$1" path="$2" body="${3:-}"
-  local url="${APISERVER_URL}${path}?namespace=${NAMESPACE}"
-  local -a headers=(-H "Content-Type: application/json")
-  [[ -n "$APISERVER_TOKEN" ]] && headers+=(-H "Authorization: Bearer ${APISERVER_TOKEN}")
-  if [[ -n "$body" ]]; then
-    curl -sS -X "$method" "${headers[@]}" --data "$body" "$url"
-  else
-    curl -sS -X "$method" "${headers[@]}" "$url"
-  fi
-}
-
-wait_for_deployment() {
-  local name="$1" elapsed=0
-  while [[ "$elapsed" -lt "$TIMEOUT" ]]; do
-    local ready
-    ready="$(kubectl get deployment "$name" -n "$NAMESPACE" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
-    if [[ "$ready" == "1" ]]; then
-      return 0
-    fi
-    sleep 3
-    elapsed=$((elapsed + 3))
+port_forward_memory() {
+  [[ -n "$MEM_PF_PID" ]] && kill "$MEM_PF_PID" 2>/dev/null || true
+  kubectl port-forward -n "$SYSTEM_NS" "svc/${MEMORY_SVC}" "${MEM_PORT}:8080" &>/dev/null &
+  MEM_PF_PID=$!
+  local elapsed=0
+  while [[ "$elapsed" -lt 15 ]]; do
+    curl -fsS "${MEM_URL}/healthz" >/dev/null 2>&1 && return 0
+    sleep 1
+    elapsed=$((elapsed + 1))
   done
+  fail "Port-forward to memory server timed out"
   return 1
 }
 
-wait_for_service() {
-  local name="$1" elapsed=0
-  while [[ "$elapsed" -lt "$TIMEOUT" ]]; do
-    if kubectl get svc "$name" -n "$NAMESPACE" >/dev/null 2>&1; then
-      return 0
-    fi
-    sleep 2
-    elapsed=$((elapsed + 2))
-  done
-  return 1
+mem_store() {
+  local content="$1" tags_json="${2:-[]}"
+  curl -sS -X POST "${MEM_URL}/v1/store" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${MEMORY_TOKEN}" \
+    -d "{\"scope\":\"agent\",\"agentName\":\"${AGENT_NAME}\",\"content\":${content},\"tags\":${tags_json}}" 2>/dev/null
+}
+
+mem_search() {
+  curl -sS -X POST "${MEM_URL}/v1/search" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${MEMORY_TOKEN}" \
+    -d "{\"scope\":\"agent\",\"agentName\":\"${AGENT_NAME}\",\"query\":\"$1\",\"topK\":${2:-5}}" 2>/dev/null
+}
+
+mem_list() {
+  curl -sS -G "${MEM_URL}/v1/list" \
+    -H "Authorization: Bearer ${MEMORY_TOKEN}" \
+    --data-urlencode "scope=agent" \
+    --data-urlencode "agentName=${AGENT_NAME}" \
+    --data-urlencode "namespace=${MEM_NS}" \
+    --data-urlencode "limit=${1:-50}" 2>/dev/null
+}
+
+mem_count() {
+  mem_list "$@" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d.get("results",[])))' 2>/dev/null || echo "0"
 }
 
 # ── Setup ─────────────────────────────────────────────────────────────────────
 
-info "Running memory persistence integration test in namespace '${NAMESPACE}'"
+info "Running central memory-server persistence test"
+info "  memory-server: ${SYSTEM_NS}/svc/${MEMORY_SVC}"
+info "  agentName (synthetic): ${AGENT_NAME}"
 
-# Start API server port-forward.
-kubectl port-forward -n "$SYSTEM_NS" svc/sympozium-apiserver "${PORT_FORWARD_LOCAL_PORT}:8080" &>/dev/null &
-API_PF_PID=$!
-for _ in $(seq 1 15); do
-  curl -fsS "${APISERVER_URL}/healthz" >/dev/null 2>&1 && break
-  sleep 1
-done
-resolve_apiserver_token
+resolve_memory_token || exit 1
+port_forward_memory || exit 1
 
-# Create test secret.
-kubectl create secret generic "$MEM_SECRET" \
-  --from-literal=OPENAI_API_KEY=sk-test-dummy \
-  -n "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f - >/dev/null 2>&1
+# ── Test 1: Memory server is healthy ─────────────────────────────────────────
 
-# ── Test 1: Instance with memory skill gets a memory server ──────────────────
+info "Test 1: Memory server health check"
 
-info "Test 1: Instance with memory skill gets a memory server"
-
-cat <<EOF | kubectl apply -f - >/dev/null 2>&1
-apiVersion: sympozium.ai/v1alpha1
-kind: Agent
-metadata:
-  name: ${MEM_INSTANCE}
-  namespace: ${NAMESPACE}
-spec:
-  agents:
-    default:
-      model: gpt-4o-mini
-  authRefs:
-    - provider: openai
-      secret: ${MEM_SECRET}
-  skills:
-    - skillPackRef: memory
-  memory:
-    enabled: true
-EOF
-
-if wait_for_deployment "${MEM_INSTANCE}-memory"; then
-  pass "Test 1: Memory server Deployment is ready"
+if curl -fsS "${MEM_URL}/healthz" >/dev/null 2>&1; then
+  pass "Test 1: /healthz responds OK"
 else
-  fail "Test 1: Memory server Deployment never became ready"
-  kubectl get deployment "${MEM_INSTANCE}-memory" -n "$NAMESPACE" -o yaml 2>&1 | tail -20
+  fail "Test 1: /healthz did not respond"
   exit 1
 fi
 
-if wait_for_service "${MEM_INSTANCE}-memory"; then
-  pass "Test 1: Memory server Service exists"
+if curl -fsS "${MEM_URL}/readyz" >/dev/null 2>&1; then
+  pass "Test 1: /readyz responds OK (Postgres reachable)"
 else
-  fail "Test 1: Memory server Service not found"
-  exit 1
+  fail "Test 1: /readyz did not respond (Postgres may be down)"
 fi
 
-# ── Test 2: Memory server health check ───────────────────────────────────────
+# ── Test 2: Store and list memories ──────────────────────────────────────────
 
-info "Test 2: Memory server health check"
+info "Test 2: Store and list memories"
 
-# Port-forward to memory server.
-local_mem_port=19292
-kubectl port-forward -n "$NAMESPACE" "svc/${MEM_INSTANCE}-memory" "${local_mem_port}:8080" &>/dev/null &
-MEM_PF_PID=$!
-sleep 3
+initial_count="$(mem_count)"
+info "  Initial entry count under agent '${AGENT_NAME}': ${initial_count}"
 
-health="$(curl -sS "http://127.0.0.1:${local_mem_port}/health" 2>/dev/null || true)"
-if echo "$health" | grep -qi "ok\|healthy"; then
-  pass "Test 2: Memory server health check passed"
+store1="$(mem_store '"The production database is PostgreSQL 15 running on db-prod-01."' '["infrastructure","database"]')"
+if echo "$store1" | grep -qi '"id"'; then
+  pass "Test 2a: Memory 1 stored"
 else
-  fail "Test 2: Memory server health check failed (got: ${health})"
-  exit 1
+  fail "Test 2a: Failed to store memory 1 (got: ${store1})"
 fi
 
-# ── Test 3: Store and retrieve memories ──────────────────────────────────────
-
-info "Test 3: Store and retrieve memories"
-
-# Store memory 1.
-store_resp="$(curl -sS -X POST "http://127.0.0.1:${local_mem_port}/store" \
-  -H "Content-Type: application/json" \
-  -d '{"content": "The production database is PostgreSQL 15 running on db-prod-01.", "tags": ["infrastructure", "database"]}' 2>/dev/null)"
-if echo "$store_resp" | grep -qi "ok\|stored\|success\|id"; then
-  pass "Test 3a: Memory 1 stored"
+store2="$(mem_store '"Alert escalation: page oncall if P1 latency exceeds 500ms for 5 minutes."' '["runbook","alerting"]')"
+if echo "$store2" | grep -qi '"id"'; then
+  pass "Test 2b: Memory 2 stored"
 else
-  fail "Test 3a: Failed to store memory 1 (got: ${store_resp})"
+  fail "Test 2b: Failed to store memory 2 (got: ${store2})"
 fi
 
-# Store memory 2.
-store_resp2="$(curl -sS -X POST "http://127.0.0.1:${local_mem_port}/store" \
-  -H "Content-Type: application/json" \
-  -d '{"content": "Alert escalation: page oncall if P1 latency exceeds 500ms for 5 minutes.", "tags": ["runbook", "alerting"]}' 2>/dev/null)"
-if echo "$store_resp2" | grep -qi "ok\|stored\|success\|id"; then
-  pass "Test 3b: Memory 2 stored"
+mem_store '"Deploy cadence: releases happen every Tuesday at 10am UTC."' '["process","releases"]' >/dev/null
+
+post_count="$(mem_count)"
+if [[ "$post_count" -ge $((initial_count + 3)) ]]; then
+  pass "Test 2c: List shows ${post_count} entries (initial ${initial_count} + 3 new)"
 else
-  fail "Test 3b: Failed to store memory 2 (got: ${store_resp2})"
+  fail "Test 2c: List shows ${post_count} entries (expected >= $((initial_count + 3)))"
+  mem_list | head -10
 fi
 
-# Store memory 3.
-curl -sS -X POST "http://127.0.0.1:${local_mem_port}/store" \
-  -H "Content-Type: application/json" \
-  -d '{"content": "Deploy cadence: releases happen every Tuesday at 10am UTC.", "tags": ["process", "releases"]}' >/dev/null 2>&1
+# ── Test 3: Hybrid search returns relevant results ───────────────────────────
 
-# List all memories.
-list_resp="$(curl -sS "http://127.0.0.1:${local_mem_port}/list" 2>/dev/null)"
-mem_count="$(echo "$list_resp" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d.get("content",d.get("memories",d.get("results",[])))))' 2>/dev/null || echo "0")"
-if [[ "$mem_count" -ge 3 ]]; then
-  pass "Test 3c: List shows ${mem_count} memories (expected >= 3)"
-else
-  fail "Test 3c: List shows ${mem_count} memories (expected >= 3)"
-  echo "$list_resp" | head -5
-fi
+info "Test 3: Hybrid (pgvector + tsvector) search"
 
-# ── Test 4: FTS5 search returns relevant results ────────────────────────────
-
-info "Test 4: FTS5 search"
-
-search_resp="$(curl -sS -X POST "http://127.0.0.1:${local_mem_port}/search" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "database postgresql", "top_k": 5}' 2>/dev/null)"
-
+search_resp="$(mem_search "database postgresql")"
 if echo "$search_resp" | grep -q "PostgreSQL"; then
-  pass "Test 4a: Search for 'database postgresql' found the infrastructure memory"
+  pass "Test 3a: Search for 'database postgresql' found the infrastructure memory"
 else
-  fail "Test 4a: Search did not find 'PostgreSQL' (got: ${search_resp})"
+  fail "Test 3a: Search did not find 'PostgreSQL' (got: ${search_resp:0:200})"
 fi
 
-search_resp2="$(curl -sS -X POST "http://127.0.0.1:${local_mem_port}/search" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "alert oncall escalation", "top_k": 5}' 2>/dev/null)"
-
+search_resp2="$(mem_search "alert oncall escalation")"
 if echo "$search_resp2" | grep -q "oncall"; then
-  pass "Test 4b: Search for 'alert oncall escalation' found the runbook memory"
+  pass "Test 3b: Search for 'alert oncall escalation' found the runbook memory"
 else
-  fail "Test 4b: Search did not find 'oncall' (got: ${search_resp2})"
+  fail "Test 3b: Search did not find 'oncall' (got: ${search_resp2:0:200})"
 fi
 
-# Negative search — should not find unrelated content.
-search_resp3="$(curl -sS -X POST "http://127.0.0.1:${local_mem_port}/search" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "kubernetes agent sandbox gvisor", "top_k": 5}' 2>/dev/null)"
+# ── Test 4: Memories persist after memory-server pod restart ─────────────────
 
-match_count="$(echo "$search_resp3" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d.get("results",[])))' 2>/dev/null || echo "?")"
-pass "Test 4c: Unrelated search returned ${match_count} results (fuzzy match expected)"
+info "Test 4: Memories persist after memory-server pod restart"
 
-# ── Test 5: Memories persist after pod restart ───────────────────────────────
-
-info "Test 5: Memories persist after memory server pod restart"
-
-# Kill the port-forward, restart the deployment, re-forward.
+# Stop our port-forward; restart the central deployment; re-forward.
 kill "$MEM_PF_PID" 2>/dev/null || true; MEM_PF_PID=""
-kubectl rollout restart deployment "${MEM_INSTANCE}-memory" -n "$NAMESPACE" >/dev/null 2>&1
-kubectl rollout status deployment "${MEM_INSTANCE}-memory" -n "$NAMESPACE" --timeout=60s >/dev/null 2>&1
 
-kubectl port-forward -n "$NAMESPACE" "svc/${MEM_INSTANCE}-memory" "${local_mem_port}:8080" &>/dev/null &
-MEM_PF_PID=$!
-sleep 3
+kubectl rollout restart deployment "${MEMORY_SVC}" -n "$SYSTEM_NS" >/dev/null 2>&1
+kubectl rollout status deployment "${MEMORY_SVC}" -n "$SYSTEM_NS" --timeout=90s >/dev/null 2>&1 || {
+  fail "Test 4: memory-server rollout did not become ready"
+  exit 1
+}
 
-# Search again — memories should still be there (PVC-backed).
-search_after_restart="$(curl -sS -X POST "http://127.0.0.1:${local_mem_port}/search" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "database postgresql", "top_k": 5}' 2>/dev/null)"
+port_forward_memory || exit 1
 
+search_after_restart="$(mem_search "database postgresql")"
 if echo "$search_after_restart" | grep -q "PostgreSQL"; then
-  pass "Test 5: Memories survived pod restart (PVC persistence verified)"
+  pass "Test 4: Memories survived memory-server pod restart (Postgres PVC verified)"
 else
-  fail "Test 5: Memories lost after restart (got: ${search_after_restart})"
+  fail "Test 4: Memories lost after restart (got: ${search_after_restart:0:200})"
 fi
-
-# ── Test 6: Instance without memory skill has no memory server ───────────────
-
-info "Test 6: Instance without memory skill has no memory server"
-
-kubectl create secret generic "$NOMEM_SECRET" \
-  --from-literal=OPENAI_API_KEY=sk-test-dummy \
-  -n "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f - >/dev/null 2>&1
-
-cat <<EOF | kubectl apply -f - >/dev/null 2>&1
-apiVersion: sympozium.ai/v1alpha1
-kind: Agent
-metadata:
-  name: ${NOMEM_INSTANCE}
-  namespace: ${NAMESPACE}
-spec:
-  agents:
-    default:
-      model: gpt-4o-mini
-  authRefs:
-    - provider: openai
-      secret: ${NOMEM_SECRET}
-  skills:
-    - skillPackRef: k8s-ops
-EOF
-
-# Wait a few seconds for the instance controller to reconcile.
-sleep 5
-
-nomem_deploy="$(kubectl get deployment "${NOMEM_INSTANCE}-memory" -n "$NAMESPACE" 2>&1 || true)"
-if echo "$nomem_deploy" | grep -q "NotFound\|not found"; then
-  pass "Test 6: No memory server for instance without memory skill"
-else
-  fail "Test 6: Unexpected memory server found for instance without memory skill"
-fi
-
-# ── Test 7: wait-for-memory timeout ─────────────────────────────────────────
-
-info "Test 7: wait-for-memory init container has timeout (not infinite)"
-
-# Build a test run to inspect the generated init container command.
-# We do this by inspecting an actual pod spec — create a run against the
-# memory-enabled instance and check the init container.
-RUN_NAME="inttest-mem-timeout-${SUFFIX}"
-cat <<EOF | kubectl apply -f - >/dev/null 2>&1
-apiVersion: sympozium.ai/v1alpha1
-kind: AgentRun
-metadata:
-  name: ${RUN_NAME}
-  namespace: ${NAMESPACE}
-  labels:
-    sympozium.ai/instance: ${MEM_INSTANCE}
-    sympozium.ai/component: agent-run
-spec:
-  agentRef: ${MEM_INSTANCE}
-  agentId: default
-  sessionKey: "test-mem-timeout-${SUFFIX}"
-  task: "Memory timeout test"
-  model:
-    provider: openai
-    model: gpt-4o-mini
-    authSecretRef: ${MEM_SECRET}
-  skills:
-    - skillPackRef: memory
-EOF
-
-# Wait for the pod to appear.
-elapsed=0
-POD_NAME=""
-while [[ "$elapsed" -lt 30 ]]; do
-  POD_NAME="$(kubectl get agentrun "$RUN_NAME" -n "$NAMESPACE" -o jsonpath='{.status.podName}' 2>/dev/null || true)"
-  [[ -n "$POD_NAME" ]] && break
-  sleep 2
-  elapsed=$((elapsed + 2))
-done
-
-if [[ -n "$POD_NAME" ]]; then
-  init_cmd="$(kubectl get pod "$POD_NAME" -n "$NAMESPACE" -o jsonpath='{.spec.initContainers[?(@.name=="wait-for-memory")].command}' 2>/dev/null || true)"
-  if echo "$init_cmd" | grep -q "exit 1"; then
-    pass "Test 7: wait-for-memory has timeout with exit 1 (not infinite loop)"
-  else
-    fail "Test 7: wait-for-memory command does not contain timeout exit"
-    echo "Command: $init_cmd"
-  fi
-else
-  # No pod yet — check if the controller is requeueing waiting for memory server.
-  phase="$(kubectl get agentrun "$RUN_NAME" -n "$NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
-  if [[ "$phase" == "Pending" || -z "$phase" ]]; then
-    pass "Test 7: AgentRun is pending (controller waiting for memory server — correct behavior)"
-  else
-    fail "Test 7: Unexpected phase: ${phase}"
-  fi
-fi
-
-kubectl delete agentrun "$RUN_NAME" -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1 || true
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 
 echo ""
 if [[ "$EXIT_CODE" -eq 0 ]]; then
-  pass "All memory persistence tests passed"
+  pass "All central memory-server persistence tests passed"
 else
   fail "Some memory persistence tests failed"
 fi

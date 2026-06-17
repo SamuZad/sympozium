@@ -1,114 +1,101 @@
 # Persistent Memory
 
-Each `Agent` can enable **persistent memory** — a SQLite database with FTS5 full-text search, served by a memory sidecar that runs alongside agent pods. The database lives on a PersistentVolume, so memory survives across ephemeral agent runs.
+Sympozium runs a **single, central memory server** for the whole cluster — `sympozium-memory-server` in the `sympozium-system` namespace. It stores agent and ensemble memory as rows in PostgreSQL with the [`pgvector`](https://github.com/pgvector/pgvector) extension, and serves hybrid (vector + full-text) retrieval over an HTTP API.
 
-Agents interact with memory through three tools exposed via file-based JSON IPC (the same pattern used by MCP tools):
+There is **no per-instance memory sidecar**, no `<name>-memory` ConfigMap, no `MEMORY.md` file, and no SQLite PVC. Every agent pod talks to the same service.
+
+## The Three Tools
+
+Agents interact with memory through three tools that the agent-runner exposes automatically:
 
 | Tool | Description |
 |------|-------------|
-| `memory_search(query, top_k?)` | Full-text search across stored memories. Returns the top _k_ results (default 10). |
-| `memory_store(content, tags?)` | Store a new memory entry with optional tags for categorisation. |
-| `memory_list(tags?, limit?)` | List memories, optionally filtered by tags. |
+| `memory_search(query, top_k?, scope?, tags?)` | Hybrid (semantic + full-text) search across memory rows the caller is allowed to see. Default `scope` is `"agent"`. |
+| `memory_store(content, tags?, scope?, visibility?)` | Store a new memory row. Default `scope` is `"agent"` (the caller's private slice). |
+| `memory_list(tags?, limit?, scope?)` | List rows ordered by recency, optionally filtered by tag. |
+
+The `scope` argument selects which pool the call targets:
+
+- `"agent"` — the calling agent's private memory. Only that agent can read or write it.
+- `"ensemble"` — the shared pool for the agent's Ensemble. Every persona in the same pack can read; personas with write access can store.
 
 ## How It Works
 
-1. The `memory` SkillPack adds a **memory sidecar** (`cmd/memory-server/`) to the agent pod.
-2. A **PersistentVolumeClaim** is created per instance to hold `memory.db` — the SQLite database.
-3. The agent and memory sidecar share an `/ipc` volume. The agent writes JSON tool requests; the sidecar responds with results.
-4. SQLite FTS5 indexes all stored content for fast full-text search.
-5. Because the PVC outlives individual pods, memories persist across runs.
-
 ```mermaid
 graph LR
-    A["Agent Container"] -- "JSON IPC<br/>/ipc volume" --> M["Memory Sidecar"]
-    M -- "reads / writes" --> DB[("SQLite + FTS5<br/>on PVC")]
+    A1["Agent Pod<br/>(default ns)"] -- "POST /v1/search<br/>SA bearer token" --> MS["memory-server<br/>(sympozium-system)"]
+    A2["Agent Pod<br/>(another ns)"] -- "POST /v1/store<br/>SA bearer token" --> MS
+    CTRL["Controller / API Server"] -- "admin SA<br/>seed + auto-store" --> MS
+    MS -- "TokenReview" --> KAPI["kube-apiserver"]
+    MS -- "INSERT / SELECT" --> PG[("PostgreSQL<br/>+ pgvector")]
 ```
 
-## Enabling Memory
+1. Every agent pod is given an env var `MEMORY_SERVER_URL` pointing at the central service.
+2. The agent-runner authenticates with its pod's ServiceAccount bearer token.
+3. The server validates the token with a Kubernetes `TokenReview`, then resolves the caller's identity — `(namespace, agentName, ensembleName)` — by looking up the `Agent` and its owning `Ensemble`.
+4. Reads and writes are scoped by that identity. The server enforces who may write what, and which rows may be returned, before SQL ever runs.
+5. Embeddings are computed by the memory-server itself against an OpenAI-compatible embedding endpoint (see [Configuration](../reference/configuration.md)).
 
-Add the `memory` SkillPack to your instance's skills list:
+## HTTP API
+
+| Method | Path | Caller | Purpose |
+|--------|------|--------|---------|
+| `GET`  | `/healthz`, `/readyz` | unauth | Liveness / readiness |
+| `POST` | `/v1/store`           | any pod | Insert a row |
+| `POST` | `/v1/search`          | any pod | Hybrid retrieval |
+| `GET`  | `/v1/list`            | any pod | Recency-ordered listing |
+| `GET`  | `/v1/stats`           | any pod | Row counts + membership info |
+| `GET`  | `/v1/provenance`      | any pod | Walk a row's `parent_id` chain |
+| `DELETE` | `/v1/admin/scope`   | **admin only** | Wipe an entire `(namespace, scope, agent|ensemble)` slice |
+| `POST` | `/v1/admin/delete-by-tags` | **admin only** | Targeted deletion |
+
+Admin endpoints are restricted to ServiceAccounts listed in the `MEMORY_ADMIN_SAS` env var. The Helm chart auto-includes `sympozium-system/sympozium-controller-manager` and `sympozium-system/sympozium-apiserver`.
+
+Application code does not call these endpoints directly — use `pkg/memoryclient` (Go) or the agent tools (LLM).
+
+## Scopes and Visibility
+
+Each row carries a `(scope, agentName, ensembleName, visibility)` tuple.
+
+| Scope      | Who writes  | Who reads (within the ensemble) |
+|------------|-------------|---------------------------------|
+| `agent`    | the agent itself (or an admin) | only that agent |
+| `ensemble` | any persona in the ensemble with the relevant access | all personas in the ensemble |
+
+Within `scope=ensemble`, the `visibility` field adds finer control:
+
+- `public` — visible to every persona in the ensemble. The default for ensemble-scope writes, and the **only** visibility that can leak across ensembles via the Synthetic Membrane.
+- `trusted` — visible only to peers in the same `trustGroup`.
+- `private` — **not allowed** on `scope=ensemble` writes; the server returns 400. Use `scope=agent` for personal notes.
+
+For `scope=agent` writes, `visibility` defaults to `private` — the agent's own silo. The agent can always read what it wrote; trust peers and strangers cannot. Set `visibility=trusted` or `visibility=public` to opt rows into the trust-peer or public read sets.
+
+## Auto-Store and Auto-Inject
+
+The agent-runner is **not** the only writer. On every `AgentRun`:
+
+- The controller posts the run's `task` and final response to memory as rows tagged `["auto", "agent-run"]` (the "auto-store" path).
+- On failure, the failure record is also written, tagged with `failure` so it can be retrieved by post-mortem queries.
+- On the next run for the same agent, the runner pulls the top _N_ recent rows and injects them into the system prompt as `Your Past Findings` — giving the agent continuity without spending tool calls.
+
+This is what makes a fresh Pod feel like a long-lived agent.
+
+## Shared Ensemble Memory
+
+Personas inside an `Ensemble` share a pool by passing `scope: "ensemble"`:
 
 ```yaml
-apiVersion: sympozium.ai/v1alpha1
-kind: Agent
-metadata:
-  name: my-agent
-spec:
-  skills:
-    - skillPackRef: memory
+# Agent code (or LLM tool call) looks like:
+memory_store(
+  content="Customer X reported a regression in v0.10.34.",
+  tags=["finding", "regression"],
+  scope="ensemble",
+)
 ```
 
-Or reference it from a Ensemble:
+There is no separate `workflow_memory_*` tool any more — `scope` is the switch.
 
-```yaml
-apiVersion: sympozium.ai/v1alpha1
-kind: Ensemble
-metadata:
-  name: sre-watchdog
-spec:
-  personas:
-    - name: sre-watchdog
-      skills:
-        - skillPackRef: k8s-ops
-        - skillPackRef: memory
-      memory:
-        seeds:
-          - "Track recurring issues for trend analysis"
-          - "Note any nodes that frequently report NotReady"
-```
-
-Seed memories are inserted into the SQLite database when the instance is first created.
-
-## SkillPack Configuration
-
-The memory SkillPack is defined at `config/skills/memory.yaml`. It follows the standard SkillPack pattern — Markdown instructions mounted at `/skills/` plus a sidecar container:
-
-- **Skills layer:** Instructions that teach the agent when and how to use `memory_search`, `memory_store`, and `memory_list`.
-- **Sidecar layer:** The `memory-server` container that manages the SQLite database and responds to IPC requests.
-- **No RBAC required:** The memory sidecar only accesses its own PVC — it does not talk to the Kubernetes API.
-
-## Data Persistence
-
-| Aspect | Detail |
-|--------|--------|
-| **Storage** | One PVC per instance, named `<instance>-memory` |
-| **Database** | SQLite 3 with FTS5 extension |
-| **Lifecycle** | PVC persists until the Agent is deleted (or manually removed) |
-| **Backup** | Standard PV backup tools apply (Velero, volume snapshots, etc.) |
-| **Upgradeable** | The SQLite schema is designed to support a future upgrade path to vector search |
-
-## Viewing Memory
-
-View an agent's stored memories through the TUI:
-
-```
-/memory <instance-name>
-```
-
-Or query the database directly by exec-ing into the memory sidecar during a run:
-
-```bash
-kubectl exec <pod> -c memory-server -- sqlite3 /data/memory.db "SELECT content, tags FROM memories ORDER BY created_at DESC LIMIT 10;"
-```
-
-## Shared Workflow Memory
-
-When agents work together in a **Ensemble**, each persona has its own private memory by default. **Shared Workflow Memory** adds a pack-level memory pool that all personas can access, enabling team knowledge accumulation.
-
-### Private vs Shared Memory
-
-| Aspect | Private Memory | Shared Workflow Memory |
-|--------|---------------|----------------------|
-| **Scope** | One instance | All personas in a Ensemble |
-| **Storage** | `<instance>-memory-db` PVC | `<pack>-shared-memory-db` PVC |
-| **Tools** | `memory_search`, `memory_store`, `memory_list` | `workflow_memory_search`, `workflow_memory_store`, `workflow_memory_list` |
-| **Access** | Always read-write | Per-persona: `read-write` or `read-only` |
-| **Attribution** | N/A (single owner) | Auto-tagged with source persona name |
-| **Auto-context** | Top 3 results injected as "Your Past Findings" | Top 3 results injected as "Team Knowledge" |
-
-### Enabling
-
-Add `sharedMemory` to the Ensemble spec:
+Enable shared memory on the Ensemble:
 
 ```yaml
 apiVersion: sympozium.ai/v1alpha1
@@ -118,7 +105,6 @@ metadata:
 spec:
   sharedMemory:
     enabled: true
-    storageSize: "1Gi"
     accessRules:
       - persona: researcher
         access: read-write
@@ -126,57 +112,22 @@ spec:
         access: read-only
 ```
 
-### Infrastructure
+Per-persona access (`read-write` vs `read-only`) is enforced by the agent-runner. There is no per-pack PVC, Deployment, or Service to provision — every Ensemble shares the same `memory-server`.
 
-The Ensemble controller provisions three Kubernetes resources:
+## Cross-Ensemble Sharing — the Synthetic Membrane
 
-```mermaid
-graph LR
-    A1["Agent Pod<br/>(researcher)"] -- "WORKFLOW_MEMORY_SERVER_URL" --> SM["Shared Memory Server"]
-    A2["Agent Pod<br/>(writer)"] -- "WORKFLOW_MEMORY_SERVER_URL" --> SM
-    A3["Agent Pod<br/>(reviewer)"] -- "WORKFLOW_MEMORY_SERVER_URL<br/>(read-only)" --> SM
-    SM -- "reads / writes" --> DB[("SQLite + FTS5<br/>on shared PVC")]
-```
-
-- **PVC**: `<pack>-shared-memory-db` — `ReadWriteOnce`, single replica
-- **Deployment**: `<pack>-shared-memory` — same `skill-memory` image, `Recreate` strategy
-- **Service**: `<pack>-shared-memory` — ClusterIP on port 8080
-
-Agent pods receive two env vars:
-- `WORKFLOW_MEMORY_SERVER_URL` — points to the shared memory service
-- `WORKFLOW_MEMORY_ACCESS` — `read-write` or `read-only` (from access rules)
-
-A `wait-for-shared-memory` init container ensures the server is ready before the agent starts.
-
-### Tools
-
-| Tool | Description |
-|------|-------------|
-| `workflow_memory_search(query, top_k?)` | Full-text search across all team knowledge |
-| `workflow_memory_store(content, tags?)` | Store findings for other personas (auto-tagged with source persona) |
-| `workflow_memory_list(tags?, limit?)` | List entries, filterable by tag or persona |
-
-The `workflow_memory_store` tool is only available to personas with `read-write` access. The source persona name is automatically added as a tag for attribution.
-
-### Synthetic Membrane
-
-The **Synthetic Membrane** is an optional layer on top of Shared Workflow Memory that adds selective permeability, provenance tracking, token budgets, circuit breakers, and time decay. It transforms the flat shared memory pool into a structured medium where agents share state selectively.
-
-Add a `membrane` block inside `sharedMemory`:
+Two Ensembles can share `public` rows by declaring matching Import/Export rules in `sharedMemory.membrane`. The memory-server walks reachable peers server-side (see [`cmd/memory-server/reachable.go`](https://github.com/sympozium-ai/sympozium/blob/main/cmd/memory-server/reachable.go)) and merges results into a single response — no client-side fan-out is required.
 
 ```yaml
 spec:
   sharedMemory:
     enabled: true
-    storageSize: "1Gi"
     membrane:
       defaultVisibility: public
       permeability:
         - agentConfig: researcher
           defaultVisibility: trusted
           exposeTags: ["findings"]
-        - agentConfig: reviewer
-          defaultVisibility: private
       trustGroups:
         - name: content-team
           agentConfigs: ["researcher", "writer"]
@@ -187,50 +138,86 @@ spec:
         consecutiveFailures: 3
       timeDecay:
         ttl: "168h"
+      import:
+        - namespaceSelector:
+            matchLabels: {tier: research}
+          ensembleSelector:
+            matchLabels: {membrane: open}
+      export:
+        - toEnsembles:
+            matchLabels: {membrane: open}
 ```
-
-Key capabilities:
 
 | Feature | What it does |
 |---------|-------------|
-| **Permeability** | Three-tier visibility (public/trusted/private) per persona with tag-level selectivity |
-| **Trust groups** | Named groups of personas that can see each other's "trusted" entries |
+| **Permeability** | Three-tier visibility (`public` / `trusted` / `private`) per persona with tag-level selectivity |
+| **Trust groups** | Named groups of personas that can see each other's `trusted` entries |
 | **Token budget** | Caps total token consumption across all runs; halts or warns on breach |
-| **Circuit breaker** | Opens after N consecutive delegation failures, blocking further spawns |
+| **Circuit breaker** | Opens after _N_ consecutive delegation failures |
 | **Time decay** | Excludes old entries from search results via configurable TTL |
-| **Provenance** | Every entry tracks its source agent and derivation chain via `parent_id` |
+| **Import / Export** | Two-sided match between ensembles. Only `visibility=public` rows are ever merged across the membrane |
+| **Provenance** | Every row tracks its source agent and derivation chain via `parent_id` |
 
-When the membrane is configured, agent pods receive additional env vars (`WORKFLOW_MEMBRANE_VISIBILITY`, `WORKFLOW_MEMBRANE_TRUST_PEERS`, `WORKFLOW_MEMBRANE_ACCEPT_TAGS`, `WORKFLOW_MEMBRANE_MAX_AGE`) that the agent runner uses to filter store and search calls automatically.
-
-See [Ensembles — Synthetic Membrane](ensembles.md#synthetic-membrane) for full configuration reference.
+See [Ensembles — Synthetic Membrane](ensembles.md#synthetic-membrane) for the full configuration reference.
 
 !!! tip "Further Reading"
     The membrane design is based on the [Synthetic Membrane](https://zenodo.org/records/20070699) research paper: *"The Synthetic Membrane: A Shared Permeable Boundary for Multi-Agent AI Systems"* (April 2026).
 
-### Viewing Shared Memory
+## Seeding from Ensembles
 
-Query the shared memory via the API:
+A persona can ship with starter memories:
+
+```yaml
+spec:
+  personas:
+    - name: sre-watchdog
+      memory:
+        seeds:
+          - "Track recurring issues for trend analysis"
+          - "Note any nodes that frequently report NotReady"
+        seedTTLDays: 90
+```
+
+When the Ensemble is activated, the controller POSTs each seed to the memory server with tags `[seed, ensemble:<pack>, persona:<name>, seed-hash:<hash>]`. Seeds are deduplicated by hash, so editing the Ensemble does not stack duplicates.
+
+## Viewing Memory
+
+Through the TUI:
+
+```
+/memory <instance-name>
+```
+
+Through the API server:
 
 ```bash
+# Per-agent
 curl -H "Authorization: Bearer $TOKEN" \
-  http://localhost:9090/api/v1/ensembles/research-delegation-example/shared-memory
+  http://localhost:9090/api/v1/agents/sre-watchdog/memory?limit=20
+
+# Per-ensemble shared pool
+curl -H "Authorization: Bearer $TOKEN" \
+  http://localhost:9090/api/v1/ensembles/platform-team/shared-memory
 ```
 
-Or exec into the shared memory pod:
+Or talk to the memory-server directly (requires an admin SA token):
 
 ```bash
-kubectl exec deploy/research-delegation-example-shared-memory -c memory-server -- \
-  sqlite3 /data/memory.db "SELECT content, tags FROM memories ORDER BY created_at DESC LIMIT 10;"
+TOKEN=$(kubectl create token sympozium-apiserver -n sympozium-system --duration=1h)
+kubectl port-forward -n sympozium-system svc/sympozium-memory-server 18080:8080 &
+curl -G "http://localhost:18080/v1/list" \
+  -H "Authorization: Bearer $TOKEN" \
+  --data-urlencode "scope=agent" \
+  --data-urlencode "agentName=sre-watchdog" \
+  --data-urlencode "namespace=default" \
+  --data-urlencode "limit=20"
 ```
 
-## Migration from ConfigMap Memory (Legacy)
+## Data Persistence
 
-The previous ConfigMap-based memory system (`<instance>-memory` ConfigMap with `MEMORY.md`) is preserved as a **legacy fallback**. If an instance has `spec.memory.enabled: true` but does not include the `memory` SkillPack, the controller falls back to the ConfigMap approach.
-
-To migrate:
-
-1. Add `memory` to the instance's skills list.
-2. Existing ConfigMap memories can be imported by storing them via `memory_store` during the first run — the agent's skill instructions include guidance for this.
-3. Once migrated, you can disable the legacy ConfigMap by removing `spec.memory.enabled` or setting it to `false`.
-
-Both systems can coexist during the transition period. The memory sidecar takes precedence when both are present.
+| Aspect | Detail |
+|--------|--------|
+| **Storage** | Single PostgreSQL database (typically a managed service or the in-cluster Postgres the Helm chart can install) |
+| **Index** | `pgvector` (semantic) + `tsvector` (full-text) |
+| **Lifecycle** | Rows persist across pod restarts and agent re-creation. Removal happens through `DELETE /v1/admin/scope`, the API server's per-agent / per-ensemble `DELETE` endpoints, or row TTL |
+| **Backup** | Standard PostgreSQL backup tooling (`pg_dump`, snapshots, etc.) |

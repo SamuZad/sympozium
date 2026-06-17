@@ -146,3 +146,119 @@ OTel resource attributes: convert map to comma-separated "key=value" pairs.
 {{- end -}}
 {{- join "," $pairs -}}
 {{- end }}
+
+{{/*
+Memory server image.
+*/}}
+{{- define "sympozium.memoryServerImage" -}}
+{{- $repo := .Values.memory.server.image.repository | default (printf "%s/memory-server" .Values.image.registry) }}
+{{- $tag := .Values.memory.server.image.tag | default (include "sympozium.imageTag" .) }}
+{{- printf "%s:%s" $repo $tag }}
+{{- end }}
+
+{{/*
+Memory server in-cluster URL — used by the controller to set
+MEMORY_SERVER_URL on agent pods.
+*/}}
+{{- define "sympozium.memoryServerURL" -}}
+{{- printf "http://%s-memory-server.%s.svc:%d" (include "sympozium.fullname" .) (include "sympozium.namespace" .) (int .Values.memory.server.service.port) }}
+{{- end }}
+
+{{/*
+Bundled Postgres connection string. Only used when memory.postgres.enabled
+AND no database.url / database.urlSecret is set.
+*/}}
+{{- define "sympozium.bundledPostgresURL" -}}
+{{- $host := printf "%s-postgres.%s.svc" (include "sympozium.fullname" .) (include "sympozium.namespace" .) -}}
+{{- $port := int .Values.memory.postgres.service.port -}}
+{{- $db := .Values.memory.postgres.auth.database -}}
+{{- $user := .Values.memory.postgres.auth.username -}}
+{{- printf "postgres://%s:$(POSTGRES_PASSWORD)@%s:%d/%s?sslmode=disable" $user $host $port $db -}}
+{{- end }}
+
+{{/*
+Name of the Secret that holds the bundled Postgres password.
+*/}}
+{{- define "sympozium.bundledPostgresSecret" -}}
+{{- printf "%s-postgres" (include "sympozium.fullname" .) -}}
+{{- end }}
+
+{{/*
+Name of the Secret that holds the embedding API key (when chart-managed).
+*/}}
+{{- define "sympozium.memoryEmbeddingSecret" -}}
+{{- printf "%s-memory-embedding" (include "sympozium.fullname" .) -}}
+{{- end }}
+
+{{/*
+Memory server env block — shared between the migration Job and the serve
+Deployment so they always see the same connection + embedding config.
+Renders the `env:` list contents (no leading `env:` key).
+*/}}
+{{- define "sympozium.memoryServerEnv" -}}
+{{- /* DATABASE_URL: secretRef > raw url > bundled postgres */ -}}
+{{- if .Values.memory.database.urlSecret }}
+- name: DATABASE_URL
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.memory.database.urlSecret | quote }}
+      key: DATABASE_URL
+{{- else if .Values.memory.database.url }}
+- name: DATABASE_URL
+  value: {{ tpl .Values.memory.database.url . | quote }}
+{{- else if .Values.memory.postgres.enabled }}
+{{- $secretName := .Values.memory.postgres.auth.existingSecret | default (include "sympozium.bundledPostgresSecret" .) }}
+- name: POSTGRES_PASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: {{ $secretName | quote }}
+      key: password
+- name: DATABASE_URL
+  value: {{ include "sympozium.bundledPostgresURL" . | quote }}
+{{- else }}
+{{- fail "memory.enabled is true but no database is configured. Either point at an external Postgres (memory.database.url or memory.database.urlSecret), OR enable the bundled single-node Postgres (memory.postgres.enabled=true, suitable for dev/kind only), OR disable memory entirely (memory.enabled=false)." }}
+{{- end }}
+- name: MEMORY_DB_AUTH
+  value: {{ .Values.memory.database.auth.mode | quote }}
+{{- if .Values.memory.database.auth.awsRegion }}
+- name: AWS_REGION
+  value: {{ .Values.memory.database.auth.awsRegion | quote }}
+{{- end }}
+- name: MEMORY_LISTEN
+  value: {{ .Values.memory.server.listen | quote }}
+- name: MEMORY_NAMESPACE
+  value: {{ include "sympozium.namespace" . | quote }}
+- name: MEMORY_EMBEDDING_PROVIDER
+  value: {{ .Values.memory.embedding.provider | quote }}
+- name: MEMORY_EMBEDDING_MODEL
+  value: {{ .Values.memory.embedding.model | quote }}
+- name: MEMORY_EMBEDDING_DIM
+  value: {{ .Values.memory.embedding.dimension | quote }}
+{{- if .Values.memory.embedding.baseURL }}
+- name: MEMORY_EMBEDDING_BASE_URL
+  value: {{ .Values.memory.embedding.baseURL | quote }}
+{{- end }}
+{{- if or .Values.memory.embedding.apiKey .Values.memory.embedding.apiKeySecretRef }}
+- name: MEMORY_EMBEDDING_API_KEY
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.memory.embedding.apiKeySecretRef | default (include "sympozium.memoryEmbeddingSecret" .) | quote }}
+      key: EMBEDDING_API_KEY
+{{- end }}
+- name: MEMORY_DEFAULT_TTL_DAYS
+  value: {{ .Values.memory.server.defaultTTLDays | quote }}
+- name: MEMORY_TOKEN_CACHE_TTL
+  value: {{ .Values.memory.server.tokenCache.ttl | quote }}
+- name: MEMORY_TOKEN_CACHE_SIZE
+  value: {{ .Values.memory.server.tokenCache.size | quote }}
+- name: MEMORY_MEMBERSHIP_CACHE_TTL
+  value: {{ .Values.memory.server.membershipCache.ttl | quote }}
+- name: MEMORY_MEMBERSHIP_CACHE_SIZE
+  value: {{ .Values.memory.server.membershipCache.size | quote }}
+{{- $admins := .Values.memory.server.adminServiceAccounts | default list }}
+{{- /* Always include the controller + apiserver SAs as admins. */ -}}
+{{- $admins = append $admins (printf "%s/sympozium-controller-manager" (include "sympozium.namespace" .)) }}
+{{- $admins = append $admins (printf "%s/sympozium-apiserver" (include "sympozium.namespace" .)) }}
+- name: MEMORY_ADMIN_SAS
+  value: {{ join "," $admins | quote }}
+{{- end }}

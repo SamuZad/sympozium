@@ -362,7 +362,7 @@ spec:
                       Store CSI), PVCs, or projected Secret/ConfigMap volumes to the
                       sidecar. Volumes are appended at the pod level, so multiple sidecars
                       on the same pod must use unique volume names. Names must not collide
-                      with reserved volumes (workspace, ipc, skills, tmp, memory, mcp-config)
+                      with reserved volumes (workspace, ipc, skills, tmp, mcp-config)
                       or volumes contributed by other sidecars.
                     items:
                       description: Volume represents a named volume in a pod that

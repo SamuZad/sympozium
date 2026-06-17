@@ -156,7 +156,7 @@ type SkillSidecar struct {
 	// Store CSI), PVCs, or projected Secret/ConfigMap volumes to the
 	// sidecar. Volumes are appended at the pod level, so multiple sidecars
 	// on the same pod must use unique volume names. Names must not collide
-	// with reserved volumes (workspace, ipc, skills, tmp, memory, mcp-config)
+	// with reserved volumes (workspace, ipc, skills, tmp, mcp-config)
 	// or volumes contributed by other sidecars.
 	// +optional
 	Volumes []corev1.Volume `json:"volumes,omitempty"`

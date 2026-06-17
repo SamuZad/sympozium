@@ -12,7 +12,6 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -115,7 +114,7 @@ func (r *AgentRunReconciler) reconcilePendingAgentSandbox(
 	}
 
 	// Ensure ServiceAccount.
-	if err := r.ensureAgentServiceAccount(ctx, agentRun.Namespace); err != nil {
+	if err := r.ensureAgentServiceAccount(ctx, agentRun); err != nil {
 		return ctrl.Result{}, fmt.Errorf("ensuring agent service account: %w", err)
 	}
 
@@ -136,33 +135,6 @@ func (r *AgentRunReconciler) reconcilePendingAgentSandbox(
 			continue
 		}
 		taskSidecars = append(taskSidecars, sc)
-	}
-
-	// Wait for memory server if memory skill is attached.
-	if agentRunHasMemorySkill(agentRun) {
-		memoryDeployName := fmt.Sprintf("%s-memory", agentRun.Spec.AgentRef)
-		var memoryDeploy appsv1.Deployment
-		if err := r.Get(ctx, client.ObjectKey{
-			Namespace: agentRun.Namespace,
-			Name:      memoryDeployName,
-		}, &memoryDeploy); err != nil {
-			age := time.Since(agentRun.CreationTimestamp.Time)
-			if age > 120*time.Second {
-				return ctrl.Result{}, r.failRun(ctx, agentRun,
-					fmt.Sprintf("memory server deployment %q not found after %s", memoryDeployName, age.Truncate(time.Second)))
-			}
-			log.Info("Memory server deployment not found, requeueing", "deployment", memoryDeployName, "age", age.Truncate(time.Second))
-			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
-		}
-		if memoryDeploy.Status.ReadyReplicas < 1 {
-			age := time.Since(agentRun.CreationTimestamp.Time)
-			if age > 120*time.Second {
-				return ctrl.Result{}, r.failRun(ctx, agentRun,
-					fmt.Sprintf("memory server deployment %q has no ready replicas after %s", memoryDeployName, age.Truncate(time.Second)))
-			}
-			log.Info("Memory server not ready, requeueing", "deployment", memoryDeployName, "readyReplicas", memoryDeploy.Status.ReadyReplicas, "age", age.Truncate(time.Second))
-			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
-		}
 	}
 
 	// Mirror skills and create RBAC.
@@ -330,7 +302,6 @@ func (r *AgentRunReconciler) reconcileRunningAgentSandbox(
 			}
 			return ctrl.Result{}, r.failRun(ctx, agentRun, resultErr)
 		}
-		r.extractAndPersistMemory(ctx, log, agentRun)
 		hasPostRunHooks := agentRun.Spec.Lifecycle != nil && len(agentRun.Spec.Lifecycle.PostRun) > 0
 		if hasPostRunHooks {
 			return r.startPostRun(ctx, log, agentRun, 0, result, usage)
@@ -387,7 +358,7 @@ func (r *AgentRunReconciler) buildSandboxCR(
 
 	// Build the pod template spec that goes inside the Sandbox CR.
 	podSpec := map[string]interface{}{
-		"serviceAccountName": "sympozium-agent",
+		"serviceAccountName": agentServiceAccountName(agentRun),
 		"restartPolicy":      "Never",
 		"securityContext": map[string]interface{}{
 			"runAsNonRoot": runAsNonRoot,
@@ -542,7 +513,7 @@ func (r *AgentRunReconciler) EnsureWarmPool(
 	// Build a basic pod template for warm pool sandboxes.
 	spec["podTemplate"] = map[string]interface{}{
 		"spec": map[string]interface{}{
-			"serviceAccountName": "sympozium-agent",
+			"serviceAccountName": AgentServiceAccountName(instance),
 			"containers": []interface{}{
 				map[string]interface{}{
 					"name":    "agent",

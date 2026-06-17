@@ -1,7 +1,8 @@
-# Skill sidecar: memory
-# Provides SQLite-backed persistent memory with FTS5 full-text search.
-# Communicates with agent-runner via file-based IPC in /ipc/tools/.
-# The SQLite database is stored on a PersistentVolume at /data/memory.db.
+# Sympozium central memory server.
+#
+# Modes:
+#   memory-server migrate   — apply the SQL schema and exit (Helm Job)
+#   memory-server serve     — run the HTTP API (Deployment, scalable)
 FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
 ARG TARGETOS=linux
 ARG TARGETARCH
@@ -15,4 +16,6 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -mod=mod -ldfla
 FROM gcr.io/distroless/static:nonroot
 COPY --from=builder /memory-server /memory-server
 USER 65532:65532
+EXPOSE 8080
 ENTRYPOINT ["/memory-server"]
+CMD ["serve"]

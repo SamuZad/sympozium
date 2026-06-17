@@ -16,23 +16,18 @@ import type { Agent, Ensemble } from "@/lib/api";
 
 /** Build a Agent YAML manifest from wizard form state. */
 export function instanceYamlFromWizard(result: WizardResult): string {
-  const skills = result.skills
-    .filter((s) => s !== "memory")
-    .map((s) => {
-      const ref: Record<string, YamlValue> = { skillPackRef: s };
-      if (s === "web-endpoint") {
-        const params: Record<string, string> = {};
-        if (result.webEndpointRPM && result.webEndpointRPM !== "60")
-          params.rate_limit_rpm = result.webEndpointRPM;
-        if (result.webEndpointHostname)
-          params.hostname = result.webEndpointHostname;
-        if (Object.keys(params).length > 0) ref.params = params;
-      }
-      return ref;
-    });
-
-  // Always include the memory skill
-  skills.unshift({ skillPackRef: "memory" });
+  const skills = result.skills.map((s) => {
+    const ref: Record<string, YamlValue> = { skillPackRef: s };
+    if (s === "web-endpoint") {
+      const params: Record<string, string> = {};
+      if (result.webEndpointRPM && result.webEndpointRPM !== "60")
+        params.rate_limit_rpm = result.webEndpointRPM;
+      if (result.webEndpointHostname)
+        params.hostname = result.webEndpointHostname;
+      if (Object.keys(params).length > 0) ref.params = params;
+    }
+    return ref;
+  });
 
   const channels = result.channels.map((type) => {
     const ch: Record<string, YamlValue> = { type };

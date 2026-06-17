@@ -429,9 +429,18 @@ spec:
                           description: Enabled indicates whether persistent memory
                             is active.
                           type: boolean
+                        seedTTLDays:
+                          description: |-
+                            SeedTTLDays, when set to a positive value, expires every seed entry
+                            after this many days. Useful for time-bound seeds like sprint goals
+                            or rotation context. When nil or zero, seeds are stored permanently
+                            (the server-side default TTL still applies if one is configured).
+                          minimum: 0
+                          type: integer
                         seeds:
-                          description: Seeds is a list of initial memory entries injected
-                            into MEMORY.md.
+                          description: |-
+                            Seeds is a list of initial memory entries pre-populated in the
+                            central memory server for this agent on creation.
                           items:
                             type: string
                           type: array
@@ -2925,10 +2934,65 @@ spec:
                       - agentConfig
                       type: object
                     type: array
+                  embedding:
+                    description: |-
+                      Embedding optionally pins the embedding model for THIS ensemble's
+                      shared pool. All agent writes to the pool must use the same model
+                      (the memory-server rejects mismatches with 409). When unset, the
+                      cluster default embedding is used.
+                    properties:
+                      apiKeySecretRef:
+                        description: |-
+                          APIKeySecretRef references the Secret holding the embedding API key.
+                          When unset, the cluster-default embedding secret is used.
+                        properties:
+                          key:
+                            description: Key inside the Secret.
+                            minLength: 1
+                            type: string
+                          name:
+                            description: Name of the Secret in the same namespace
+                              as the referencing resource.
+                            minLength: 1
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                      baseURL:
+                        description: BaseURL points at an OpenAI-compatible endpoint
+                          (Ollama, vLLM, etc.).
+                        type: string
+                      dimension:
+                        description: |-
+                          Dimension is the output dimensionality of the model. Must match the
+                          `vector(N)` column dimension configured for memory-server. When
+                          unset, the cluster default dimension is assumed.
+                        minimum: 1
+                        type: integer
+                      model:
+                        description: |-
+                          Model is the provider-specific model identifier
+                          (e.g. "text-embedding-3-small").
+                        minLength: 1
+                        type: string
+                      provider:
+                        description: |-
+                          Provider identifies the embedding API to call.
+                          One of: openai, azure_openai, ollama.
+                        enum:
+                        - openai
+                        - azure_openai
+                        - ollama
+                        type: string
+                    required:
+                    - model
+                    - provider
+                    type: object
                   enabled:
                     default: false
-                    description: Enabled activates the shared memory server for this
-                      ensemble.
+                    description: Enabled opts this ensemble's agents into a shared
+                      memory scope.
                     type: boolean
                   membrane:
                     description: |-
@@ -2961,6 +3025,308 @@ spec:
                         - trusted
                         - private
                         type: string
+                      export:
+                        description: |-
+                          Export declares which memories owned by Agents in THIS ensemble may
+                          be read by Agents in OTHER ensembles (typically in other namespaces).
+
+                          Export is one half of a two-sided opt-in: a reader only sees an
+                          exported memory if its own ensemble's Import rules also accept the
+                          producing ensemble. Without a matching Export, cross-ensemble reads
+                          silently return zero rows (no 403).
+
+                          Empty list = no cross-ensemble export. This is the safe default; a
+                          missing Membrane keeps memory strictly within the owning ensemble.
+                        items:
+                          description: |-
+                            MembraneExportRule names a class of memories produced inside this
+                            ensemble and the set of peer ensembles allowed to read them.
+
+                            All fields combine with AND semantics. A memory is exportable iff it
+                            matches every populated filter AND the consumer matches the target
+                            selectors.
+                          properties:
+                            name:
+                              description: |-
+                                Name is a human-readable identifier (e.g. "prod-incident-postmortems").
+                                Surfaces in status conditions and audit logs.
+                              type: string
+                            tags:
+                              description: |-
+                                Tags filters by memory tags. A memory matches if it carries AT LEAST
+                                ONE of these tags. Empty = no tag filter (all memories match).
+                              items:
+                                type: string
+                              type: array
+                            toEnsembles:
+                              description: |-
+                                ToEnsembles selects which peer Ensembles are allowed to consume
+                                memories matched by this rule.
+
+                                Both selectors must match (AND). At least one selector MUST be set
+                                — an unrestricted export is rejected at admission to prevent
+                                "share with everything" footguns.
+                              properties:
+                                ensembleSelector:
+                                  description: |-
+                                    EnsembleSelector picks Ensembles by label within the selected
+                                    namespaces. Use the empty selector `{}` to mean "all ensembles in
+                                    the selected namespaces" — but only when paired with a non-empty
+                                    NamespaceSelector.
+                                  properties:
+                                    matchExpressions:
+                                      description: matchExpressions is a list of label
+                                        selector requirements. The requirements are
+                                        ANDed.
+                                      items:
+                                        description: |-
+                                          A label selector requirement is a selector that contains values, a key, and an operator that
+                                          relates the key and values.
+                                        properties:
+                                          key:
+                                            description: key is the label key that
+                                              the selector applies to.
+                                            type: string
+                                          operator:
+                                            description: |-
+                                              operator represents a key's relationship to a set of values.
+                                              Valid operators are In, NotIn, Exists and DoesNotExist.
+                                            type: string
+                                          values:
+                                            description: |-
+                                              values is an array of string values. If the operator is In or NotIn,
+                                              the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                              the values array must be empty. This array is replaced during a strategic
+                                              merge patch.
+                                            items:
+                                              type: string
+                                            type: array
+                                            x-kubernetes-list-type: atomic
+                                        required:
+                                        - key
+                                        - operator
+                                        type: object
+                                      type: array
+                                      x-kubernetes-list-type: atomic
+                                    matchLabels:
+                                      additionalProperties:
+                                        type: string
+                                      description: |-
+                                        matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                                        map is equivalent to an element of matchExpressions, whose key field is "key", the
+                                        operator is "In", and the values array contains only "value". The requirements are ANDed.
+                                      type: object
+                                  type: object
+                                  x-kubernetes-map-type: atomic
+                                namespaceSelector:
+                                  description: |-
+                                    NamespaceSelector picks namespaces by label. Use the empty selector
+                                    `{}` to mean "all namespaces" — but only when paired with a
+                                    non-empty EnsembleSelector, since the combination is what bounds
+                                    the blast radius.
+                                  properties:
+                                    matchExpressions:
+                                      description: matchExpressions is a list of label
+                                        selector requirements. The requirements are
+                                        ANDed.
+                                      items:
+                                        description: |-
+                                          A label selector requirement is a selector that contains values, a key, and an operator that
+                                          relates the key and values.
+                                        properties:
+                                          key:
+                                            description: key is the label key that
+                                              the selector applies to.
+                                            type: string
+                                          operator:
+                                            description: |-
+                                              operator represents a key's relationship to a set of values.
+                                              Valid operators are In, NotIn, Exists and DoesNotExist.
+                                            type: string
+                                          values:
+                                            description: |-
+                                              values is an array of string values. If the operator is In or NotIn,
+                                              the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                              the values array must be empty. This array is replaced during a strategic
+                                              merge patch.
+                                            items:
+                                              type: string
+                                            type: array
+                                            x-kubernetes-list-type: atomic
+                                        required:
+                                        - key
+                                        - operator
+                                        type: object
+                                      type: array
+                                      x-kubernetes-list-type: atomic
+                                    matchLabels:
+                                      additionalProperties:
+                                        type: string
+                                      description: |-
+                                        matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                                        map is equivalent to an element of matchExpressions, whose key field is "key", the
+                                        operator is "In", and the values array contains only "value". The requirements are ANDed.
+                                      type: object
+                                  type: object
+                                  x-kubernetes-map-type: atomic
+                              type: object
+                            visibilities:
+                              description: |-
+                                Visibilities is the set of source-visibility tiers eligible for
+                                export. Defaults to ["public"]. "private" entries are NEVER
+                                exportable regardless of this field.
+                              items:
+                                enum:
+                                - public
+                                - trusted
+                                type: string
+                              type: array
+                          required:
+                          - toEnsembles
+                          type: object
+                        type: array
+                      import:
+                        description: |-
+                          Import declares which OTHER ensembles' exported memories Agents in
+                          THIS ensemble are willing to read.
+
+                          Import is the other half of the opt-in: even if a peer Exports to
+                          us, we must Import from them. Unmatched memories are filtered out
+                          of search results, not surfaced as permission errors.
+
+                          Empty list = no cross-ensemble import. Search results contain only
+                          memories produced inside this ensemble.
+                        items:
+                          description: |-
+                            MembraneImportRule declares which exported memories from peer
+                            ensembles this ensemble's Agents are willing to read.
+
+                            Fields combine with AND semantics (same as Export). Unmatched memories
+                            are filtered out of search results silently.
+                          properties:
+                            fromEnsembles:
+                              description: |-
+                                FromEnsembles selects which peer Ensembles to read from.
+                                Same admission rule as Export.ToEnsembles: at least one selector
+                                must be set.
+                              properties:
+                                ensembleSelector:
+                                  description: |-
+                                    EnsembleSelector picks Ensembles by label within the selected
+                                    namespaces. Use the empty selector `{}` to mean "all ensembles in
+                                    the selected namespaces" — but only when paired with a non-empty
+                                    NamespaceSelector.
+                                  properties:
+                                    matchExpressions:
+                                      description: matchExpressions is a list of label
+                                        selector requirements. The requirements are
+                                        ANDed.
+                                      items:
+                                        description: |-
+                                          A label selector requirement is a selector that contains values, a key, and an operator that
+                                          relates the key and values.
+                                        properties:
+                                          key:
+                                            description: key is the label key that
+                                              the selector applies to.
+                                            type: string
+                                          operator:
+                                            description: |-
+                                              operator represents a key's relationship to a set of values.
+                                              Valid operators are In, NotIn, Exists and DoesNotExist.
+                                            type: string
+                                          values:
+                                            description: |-
+                                              values is an array of string values. If the operator is In or NotIn,
+                                              the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                              the values array must be empty. This array is replaced during a strategic
+                                              merge patch.
+                                            items:
+                                              type: string
+                                            type: array
+                                            x-kubernetes-list-type: atomic
+                                        required:
+                                        - key
+                                        - operator
+                                        type: object
+                                      type: array
+                                      x-kubernetes-list-type: atomic
+                                    matchLabels:
+                                      additionalProperties:
+                                        type: string
+                                      description: |-
+                                        matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                                        map is equivalent to an element of matchExpressions, whose key field is "key", the
+                                        operator is "In", and the values array contains only "value". The requirements are ANDed.
+                                      type: object
+                                  type: object
+                                  x-kubernetes-map-type: atomic
+                                namespaceSelector:
+                                  description: |-
+                                    NamespaceSelector picks namespaces by label. Use the empty selector
+                                    `{}` to mean "all namespaces" — but only when paired with a
+                                    non-empty EnsembleSelector, since the combination is what bounds
+                                    the blast radius.
+                                  properties:
+                                    matchExpressions:
+                                      description: matchExpressions is a list of label
+                                        selector requirements. The requirements are
+                                        ANDed.
+                                      items:
+                                        description: |-
+                                          A label selector requirement is a selector that contains values, a key, and an operator that
+                                          relates the key and values.
+                                        properties:
+                                          key:
+                                            description: key is the label key that
+                                              the selector applies to.
+                                            type: string
+                                          operator:
+                                            description: |-
+                                              operator represents a key's relationship to a set of values.
+                                              Valid operators are In, NotIn, Exists and DoesNotExist.
+                                            type: string
+                                          values:
+                                            description: |-
+                                              values is an array of string values. If the operator is In or NotIn,
+                                              the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                              the values array must be empty. This array is replaced during a strategic
+                                              merge patch.
+                                            items:
+                                              type: string
+                                            type: array
+                                            x-kubernetes-list-type: atomic
+                                        required:
+                                        - key
+                                        - operator
+                                        type: object
+                                      type: array
+                                      x-kubernetes-list-type: atomic
+                                    matchLabels:
+                                      additionalProperties:
+                                        type: string
+                                      description: |-
+                                        matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                                        map is equivalent to an element of matchExpressions, whose key field is "key", the
+                                        operator is "In", and the values array contains only "value". The requirements are ANDed.
+                                      type: object
+                                  type: object
+                                  x-kubernetes-map-type: atomic
+                              type: object
+                            name:
+                              description: Name is a human-readable identifier.
+                              type: string
+                            tags:
+                              description: |-
+                                Tags filters which exported memories to ingest. Empty = no tag
+                                filter (accept everything the peer exports).
+                              items:
+                                type: string
+                              type: array
+                          required:
+                          - fromEnsembles
+                          type: object
+                        type: array
                       permeability:
                         description: |-
                           Permeability defines per-agent-config visibility and selectivity rules.
@@ -3075,12 +3441,10 @@ spec:
                           type: object
                         type: array
                     type: object
-                  storageSize:
-                    default: 1Gi
-                    description: |-
-                      StorageSize is the PVC storage request for the shared memory database.
-                      Defaults to "1Gi".
-                    type: string
+                  ttlDays:
+                    description: TTLDays for shared entries. 0 = cluster default.
+                    minimum: 1
+                    type: integer
                 required:
                 - enabled
                 type: object
@@ -3249,7 +3613,7 @@ spec:
                   out by this ensemble. Useful for declaring a single Vault CSI
                   SecretProviderClass volume that all team members share. Names must not
                   collide with Sympozium-reserved volume names
-                  (workspace, ipc, skills, tmp, memory, mcp-config).
+                  (workspace, ipc, skills, tmp, mcp-config).
                 items:
                   description: Volume represents a named volume in a pod that may
                     be accessed by any container in the pod.

@@ -159,7 +159,7 @@ type EnsembleSpec struct {
 	// out by this ensemble. Useful for declaring a single Vault CSI
 	// SecretProviderClass volume that all team members share. Names must not
 	// collide with Sympozium-reserved volume names
-	// (workspace, ipc, skills, tmp, memory, mcp-config).
+	// (workspace, ipc, skills, tmp, mcp-config).
 	// +optional
 	Volumes []corev1.Volume `json:"volumes,omitempty"`
 
@@ -353,22 +353,39 @@ type AgentConfigMemory struct {
 	// +kubebuilder:default=true
 	Enabled bool `json:"enabled"`
 
-	// Seeds is a list of initial memory entries injected into MEMORY.md.
+	// Seeds is a list of initial memory entries pre-populated in the
+	// central memory server for this agent on creation.
 	// +optional
 	Seeds []string `json:"seeds,omitempty"`
+
+	// SeedTTLDays, when set to a positive value, expires every seed entry
+	// after this many days. Useful for time-bound seeds like sprint goals
+	// or rotation context. When nil or zero, seeds are stored permanently
+	// (the server-side default TTL still applies if one is configured).
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	SeedTTLDays *int `json:"seedTTLDays,omitempty"`
 }
 
-// SharedMemorySpec configures a shared memory pool for all agent configurations in an ensemble.
+// SharedMemorySpec configures the ensemble-shared memory pool. The pool
+// lives in the cluster's central memory-server; this spec only opts the
+// ensemble in and optionally pins its embedding model.
 type SharedMemorySpec struct {
-	// Enabled activates the shared memory server for this ensemble.
+	// Enabled opts this ensemble's agents into a shared memory scope.
 	// +kubebuilder:default=false
 	Enabled bool `json:"enabled"`
 
-	// StorageSize is the PVC storage request for the shared memory database.
-	// Defaults to "1Gi".
-	// +kubebuilder:default="1Gi"
+	// Embedding optionally pins the embedding model for THIS ensemble's
+	// shared pool. All agent writes to the pool must use the same model
+	// (the memory-server rejects mismatches with 409). When unset, the
+	// cluster default embedding is used.
 	// +optional
-	StorageSize string `json:"storageSize,omitempty"`
+	Embedding *EmbeddingConfig `json:"embedding,omitempty"`
+
+	// TTLDays for shared entries. 0 = cluster default.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	TTLDays int `json:"ttlDays,omitempty"`
 
 	// AccessRules defines per-agent-configuration access controls for the shared memory.
 	// If empty, all agent configurations get read-write access.
