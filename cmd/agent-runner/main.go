@@ -231,6 +231,10 @@ func main() {
 	// Resolve tool definitions.
 	var tools []ToolDef
 	if toolsEnabled {
+		// Pull the canonical sidecar inventory from SYMPOZIUM_SKILL_TARGETS so
+		// defaultTools can advertise valid `target` values and executeCommand
+		// can resolve LLM-supplied short names against it.
+		loadSkillTargets()
 		tools = defaultTools()
 		// Expose the `skills` tool only when at least one skill is mounted —
 		// an empty enum would make the tool definition invalid for some providers.

@@ -39,16 +39,33 @@ type ToolDef struct {
 
 // defaultTools returns the set of tools available to the agent.
 func defaultTools() []ToolDef {
+	targetProp := map[string]any{
+		"type": "string",
+		"description": "Optional. Name of the skill sidecar that should execute this command " +
+			"(must match a SkillPack name attached to this agent, e.g. 'github-gitops'). " +
+			"Leave empty to allow any attached sidecar to claim the request.",
+	}
+	execDesc := "Execute a shell command in a Kubernetes skill sidecar container. " +
+		"Use this to run kubectl, bash scripts, curl, jq, and other CLI tools. " +
+		"Commands execute in /workspace by default. " +
+		"If specialized MCP tools are available for the task, prefer those instead. " +
+		"When multiple skill sidecars are attached, set 'target' to the name of the skill " +
+		"that owns the tool you need (e.g. 'github-gitops' for `gh`, 'k8s-ops' for `kubectl`). " +
+		"If 'target' is omitted, any sidecar may serve the request (legacy behavior)."
+	if len(skillTargets) > 0 {
+		targetProp["enum"] = append([]string{}, skillTargets...)
+		targetProp["description"] = fmt.Sprintf(
+			"Optional. SkillPack name of the sidecar that should execute this command. "+
+				"Must be one of the attached targets: %s. A short name (e.g. 'github-gitops') "+
+				"is accepted when it uniquely identifies one of the listed targets.",
+			strings.Join(skillTargets, ", "),
+		)
+		execDesc += fmt.Sprintf(" Attached sidecar targets: %s.", strings.Join(skillTargets, ", "))
+	}
 	tools := []ToolDef{
 		{
-			Name: ToolExecuteCommand,
-			Description: "Execute a shell command in a Kubernetes skill sidecar container. " +
-				"Use this to run kubectl, bash scripts, curl, jq, and other CLI tools. " +
-				"Commands execute in /workspace by default. " +
-				"If specialized MCP tools are available for the task, prefer those instead. " +
-				"When multiple skill sidecars are attached, set 'target' to the name of the skill " +
-				"that owns the tool you need (e.g. 'github-gitops' for `gh`, 'k8s-ops' for `kubectl`). " +
-				"If 'target' is omitted, any sidecar may serve the request (legacy behavior).",
+			Name:        ToolExecuteCommand,
+			Description: execDesc,
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -64,12 +81,7 @@ func defaultTools() []ToolDef {
 						"type":        "integer",
 						"description": "Timeout in seconds (default 30, max 120).",
 					},
-					"target": map[string]any{
-						"type": "string",
-						"description": "Optional. Name of the skill sidecar that should execute this command " +
-							"(must match a SkillPack name attached to this agent, e.g. 'github-gitops'). " +
-							"Leave empty to allow any attached sidecar to claim the request.",
-					},
+					"target": targetProp,
 				},
 				"required": []string{"command"},
 			},
@@ -981,10 +993,15 @@ func executeCommand(ctx context.Context, args map[string]any) string {
 		timeoutSec = 120
 	}
 
-	target, _ := args["target"].(string)
-	// Normalize: trim whitespace and lowercase so SkillPack name comparisons
-	// are tolerant of LLM casing variations ("Github-Gitops" vs "github-gitops").
-	target = normalizeSidecarTarget(target)
+	rawTarget, _ := args["target"].(string)
+	// Resolve against the inventory injected by the controller via
+	// SYMPOZIUM_SKILL_TARGETS. This converts a short skill name like
+	// "github-gitops" to the canonical SkillPack metadata.name (e.g.
+	// "<release>-github-gitops") that the sidecar's tool-executor matches.
+	target, err := resolveSkillTarget(rawTarget, skillTargets)
+	if err != nil {
+		return fmt.Sprintf("Error: %v", err)
+	}
 
 	id := fmt.Sprintf("%d", time.Now().UnixNano())
 
