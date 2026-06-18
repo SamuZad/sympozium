@@ -8502,7 +8502,7 @@ func tuiCreateRun(ns, instance, task string) (string, error) {
 				Temperature:              inst.Spec.Agents.Default.Temperature,
 			},
 			Skills:           inst.Spec.Skills,
-			Timeout:          &metav1.Duration{Duration: 10 * time.Minute},
+			Timeout:          &metav1.Duration{Duration: inst.Spec.Agents.Default.EffectiveRunTimeout()},
 			ImagePullSecrets: inst.Spec.ImagePullSecrets,
 		},
 	}

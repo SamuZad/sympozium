@@ -129,6 +129,12 @@ func resolveAuthSecret(inst *sympoziumv1alpha1.Agent) string {
 	return ""
 }
 
+// resolveRunTimeout returns the wall-clock cap for a single AgentRun
+// spawned for inst, honouring spec.agents.default.runTimeout when set.
+func resolveRunTimeout(inst *sympoziumv1alpha1.Agent) time.Duration {
+	return inst.Spec.Agents.Default.EffectiveRunTimeout()
+}
+
 // applyTriggers evaluates the channel's start/stop keyword rules against
 // the inbound message, persists any mute-state transition, emits the
 // associated Slack reaction, and returns true when the router should
@@ -304,7 +310,7 @@ func (cr *ChannelRouter) handleInbound(ctx context.Context, event *eventbus.Even
 				NodeSelector:             inst.Spec.Agents.Default.NodeSelector,
 			},
 			Skills:           inst.Spec.Skills,
-			Timeout:          &metav1.Duration{Duration: 10 * time.Minute},
+			Timeout:          &metav1.Duration{Duration: resolveRunTimeout(inst)},
 			ImagePullSecrets: inst.Spec.ImagePullSecrets,
 			Lifecycle:        inst.Spec.Agents.Default.Lifecycle,
 			Tolerations:      inst.Spec.Agents.Default.Tolerations,

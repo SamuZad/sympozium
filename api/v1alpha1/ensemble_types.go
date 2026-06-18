@@ -297,6 +297,13 @@ type AgentConfigSpec struct {
 	// +optional
 	Subagents *SubagentsSpec `json:"subagents,omitempty"`
 
+	// RunTimeout is the maximum duration for each agent run (e.g. "15m", "1h").
+	// Propagated verbatim to the generated Agent's
+	// spec.agents.default.runTimeout. When empty, the controller default
+	// applies (10 minutes for cloud providers, 30 minutes for local).
+	// +optional
+	RunTimeout string `json:"runTimeout,omitempty"`
+
 	// Env defines additional environment variables injected into the
 	// agent-runner container of every AgentRun created for this agent
 	// configuration. Propagated to the generated Agent's

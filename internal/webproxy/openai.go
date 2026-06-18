@@ -205,7 +205,7 @@ func (p *Proxy) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				NodeSelector:             inst.Spec.Agents.Default.NodeSelector,
 			},
 			Skills:           childSkills,
-			Timeout:          &metav1.Duration{Duration: 10 * time.Minute},
+			Timeout:          &metav1.Duration{Duration: resolveRunTimeout(inst)},
 			ImagePullSecrets: inst.Spec.ImagePullSecrets,
 			Lifecycle:        inst.Spec.Agents.Default.Lifecycle,
 			Tolerations:      inst.Spec.Agents.Default.Tolerations,
