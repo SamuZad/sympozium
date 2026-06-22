@@ -21,6 +21,7 @@ import (
 	sympoziumv1alpha1 "github.com/sympozium-ai/sympozium/api/v1alpha1"
 	channelpkg "github.com/sympozium-ai/sympozium/internal/channel"
 	"github.com/sympozium-ai/sympozium/internal/eventbus"
+	"github.com/sympozium-ai/sympozium/internal/sessionkey"
 )
 
 var routerTracer = otel.Tracer("sympozium.ai/channel-router")
@@ -298,7 +299,7 @@ func (cr *ChannelRouter) handleInbound(ctx context.Context, event *eventbus.Even
 		Spec: sympoziumv1alpha1.AgentRunSpec{
 			AgentRef:   msg.InstanceName,
 			AgentID:    "primary",
-			SessionKey: fmt.Sprintf("channel-%s-%s-%d", msg.Channel, msg.ChatID, time.Now().UnixNano()),
+			SessionKey: sessionkey.ForChannel(msg.Channel, msg.ChatID, msg.ThreadID),
 			Task:       msg.Text,
 			Model: sympoziumv1alpha1.ModelSpec{
 				Provider:                 provider,

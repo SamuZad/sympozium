@@ -36,6 +36,7 @@ import (
 	sympoziumv1alpha1 "github.com/sympozium-ai/sympozium/api/v1alpha1"
 	"github.com/sympozium-ai/sympozium/internal/controller"
 	"github.com/sympozium-ai/sympozium/internal/eventbus"
+	"github.com/sympozium-ai/sympozium/internal/sessionkey"
 	"github.com/sympozium-ai/sympozium/pkg/memoryclient"
 )
 
@@ -847,7 +848,7 @@ func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
 		req.AgentID = "primary"
 	}
 	if req.SessionKey == "" {
-		req.SessionKey = fmt.Sprintf("session-%d", time.Now().UnixNano())
+		req.SessionKey = sessionkey.ForAPIServerDefault()
 	}
 	if req.Timeout == "" {
 		req.Timeout = "5m"
