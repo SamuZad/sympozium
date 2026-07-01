@@ -1,11 +1,71 @@
 package controller
 
 import (
+	"context"
 	"testing"
+
+	"github.com/go-logr/logr"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	sympoziumv1alpha1 "github.com/sympozium-ai/sympozium/api/v1alpha1"
 	channel "github.com/sympozium-ai/sympozium/internal/channel"
+	"github.com/sympozium-ai/sympozium/internal/eventbus"
 )
+
+func TestChannelRouterHandleInboundCopiesModelTuning(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := sympoziumv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
+
+	maxTokens := int32(12000)
+	inst := &sympoziumv1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "helper", Namespace: "default"},
+		Spec: sympoziumv1alpha1.AgentSpec{
+			Agents: sympoziumv1alpha1.AgentsSpec{
+				Default: sympoziumv1alpha1.AgentConfig{
+					Model:       "gpt-5.5",
+					Thinking:    "high",
+					MaxTokens:   &maxTokens,
+					Temperature: "0.2",
+				},
+			},
+		},
+	}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(inst).Build()
+	cr := &ChannelRouter{Client: cl, Log: logr.Discard()}
+
+	event, err := eventbus.NewEvent(eventbus.TopicChannelMessageRecv, nil, channel.InboundMessage{
+		InstanceName: "helper",
+		Channel:      "telegram",
+		ChatID:       "chat-1",
+		Text:         "hello",
+	})
+	if err != nil {
+		t.Fatalf("NewEvent: %v", err)
+	}
+	cr.handleInbound(context.Background(), event)
+
+	var runs sympoziumv1alpha1.AgentRunList
+	if err := cl.List(context.Background(), &runs); err != nil {
+		t.Fatalf("List AgentRuns: %v", err)
+	}
+	if len(runs.Items) != 1 {
+		t.Fatalf("AgentRun count = %d, want 1", len(runs.Items))
+	}
+	model := runs.Items[0].Spec.Model
+	if model.Thinking != "high" {
+		t.Errorf("Thinking = %q, want high", model.Thinking)
+	}
+	if model.MaxTokens == nil || *model.MaxTokens != maxTokens {
+		t.Errorf("MaxTokens = %v, want %d", model.MaxTokens, maxTokens)
+	}
+	if model.Temperature != "0.2" {
+		t.Errorf("Temperature = %q, want 0.2", model.Temperature)
+	}
+}
 
 func TestCheckChannelAccess(t *testing.T) {
 	tests := []struct {

@@ -195,10 +195,13 @@ observability:
     batchTimeout: "5s"
   mcpBridge:
     batchTimeout: "1s"
-  # -- Built-in OpenTelemetry collector
+  # -- Built-in OpenTelemetry collector. We default to the contrib distro
+  # because we use the `transform` processor (OTTL) to normalize harness-
+  # specific metric names (e.g. codex's `turn.token_usage` →
+  # `gen_ai.client.token.usage`) so dashboards stay harness-agnostic.
   collector:
     image:
-      repository: otel/opentelemetry-collector
+      repository: otel/opentelemetry-collector-contrib
       tag: "0.104.0"
     resources:
       limits:
@@ -212,6 +215,22 @@ observability:
       otlpHttpPort: 4318
       metricsPort: 8889
       healthPort: 13133
+    # -- Prometheus exporter tuning (collector `prometheus` exporter).
+    prometheus:
+      # -- Convert OTel resource attributes (e.g. sympozium.agent_run.id,
+      # sympozium.instance.name, k8s.namespace.name) into Prometheus labels.
+      # Enables per-AgentRun / per-instance breakdowns of token usage and
+      # other metrics. Note: agent_run.id is high-cardinality — every run
+      # creates new label values — so enable deliberately.
+      resourceToTelemetryConversion: false
+      # -- Emit OpenMetrics exposition format (adds exemplars support).
+      enableOpenMetrics: false
+      # -- How long a metric stays exposed without a fresh data point.
+      # Empty uses the exporter default (5m).
+      metricExpiration: ""
+    # -- Debug exporter verbosity (basic|normal|detailed).
+    debug:
+      verbosity: "normal"
   # -- Default instance observability settings (used when creating new instances)
   defaultInstance:
     enabled: true

@@ -674,6 +674,8 @@ func (r *AgentReconciler) ensureWebEndpointAgentRun(ctx context.Context, instanc
 			Volumes:          instance.Spec.Volumes,
 			VolumeMounts:     instance.Spec.VolumeMounts,
 			Env:              instance.Spec.Agents.Default.Env,
+			Workspace:        instance.Spec.Workspace,
+			Harness:          instance.Spec.Harness,
 		},
 	}
 

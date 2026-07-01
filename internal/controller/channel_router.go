@@ -309,6 +309,9 @@ func (cr *ChannelRouter) handleInbound(ctx context.Context, event *eventbus.Even
 				ProviderHeaders:          inst.Spec.Agents.Default.ProviderHeaders,
 				ProviderHeadersSecretRef: inst.Spec.Agents.Default.ProviderHeadersSecretRef,
 				NodeSelector:             inst.Spec.Agents.Default.NodeSelector,
+				Thinking:                 inst.Spec.Agents.Default.Thinking,
+				MaxTokens:                inst.Spec.Agents.Default.MaxTokens,
+				Temperature:              inst.Spec.Agents.Default.Temperature,
 			},
 			Skills:           inst.Spec.Skills,
 			Timeout:          &metav1.Duration{Duration: resolveRunTimeout(inst)},
@@ -319,6 +322,8 @@ func (cr *ChannelRouter) handleInbound(ctx context.Context, event *eventbus.Even
 			Volumes:          inst.Spec.Volumes,
 			VolumeMounts:     inst.Spec.VolumeMounts,
 			Env:              inst.Spec.Agents.Default.Env,
+			Workspace:        inst.Spec.Workspace,
+			Harness:          inst.Spec.Harness,
 		},
 	}
 

@@ -159,6 +159,86 @@ func TestReconcileAgentConfig_PropagatesVolumes(t *testing.T) {
 	}
 }
 
+func TestReconcileAgentConfig_PropagatesWorkspace(t *testing.T) {
+	pack := &sympoziumv1alpha1.Ensemble{
+		ObjectMeta: metav1.ObjectMeta{Name: "pack", Namespace: "ns"},
+		Spec:       sympoziumv1alpha1.EnsembleSpec{Enabled: true},
+	}
+	persona := &sympoziumv1alpha1.AgentConfigSpec{Name: "lead", SystemPrompt: "lead"}
+	r, _ := newEnsembleTestReconciler(t, pack)
+
+	if _, err := r.reconcileAgentConfig(context.Background(), logr.Discard(), pack, persona, 0, ""); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	pack.Spec.Workspace = &sympoziumv1alpha1.WorkspaceSpec{
+		PerSessionPVC: true,
+		Size:          "5Gi",
+	}
+	if _, err := r.reconcileAgentConfig(context.Background(), logr.Discard(), pack, persona, 0, ""); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	got := &sympoziumv1alpha1.Agent{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "pack-lead", Namespace: "ns"}, got); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Spec.Workspace == nil {
+		t.Fatal("Workspace not propagated")
+	}
+	if !got.Spec.Workspace.PerSessionPVC || got.Spec.Workspace.Size != "5Gi" {
+		t.Errorf("Workspace = %+v, want {PerSessionPVC:true Size:5Gi}", got.Spec.Workspace)
+	}
+
+	// Persona override wins.
+	persona.Workspace = &sympoziumv1alpha1.WorkspaceSpec{PerSessionPVC: false, Size: "1Gi"}
+	if _, err := r.reconcileAgentConfig(context.Background(), logr.Discard(), pack, persona, 0, ""); err != nil {
+		t.Fatalf("override: %v", err)
+	}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "pack-lead", Namespace: "ns"}, got); err != nil {
+		t.Fatalf("get after override: %v", err)
+	}
+	if got.Spec.Workspace == nil || got.Spec.Workspace.Size != "1Gi" {
+		t.Errorf("persona override not propagated; got %+v", got.Spec.Workspace)
+	}
+}
+
+func TestReconcileAgentConfig_PropagatesHarness(t *testing.T) {
+	pack := &sympoziumv1alpha1.Ensemble{
+		ObjectMeta: metav1.ObjectMeta{Name: "pack", Namespace: "ns"},
+		Spec:       sympoziumv1alpha1.EnsembleSpec{Enabled: true},
+	}
+	persona := &sympoziumv1alpha1.AgentConfigSpec{Name: "lead", SystemPrompt: "lead"}
+	r, _ := newEnsembleTestReconciler(t, pack)
+
+	if _, err := r.reconcileAgentConfig(context.Background(), logr.Discard(), pack, persona, 0, ""); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	pack.Spec.Harness = "codex"
+	if _, err := r.reconcileAgentConfig(context.Background(), logr.Discard(), pack, persona, 0, ""); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	got := &sympoziumv1alpha1.Agent{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "pack-lead", Namespace: "ns"}, got); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Spec.Harness != "codex" {
+		t.Errorf("Harness = %q, want codex", got.Spec.Harness)
+	}
+
+	// Persona override wins.
+	persona.Harness = "agent-runner"
+	if _, err := r.reconcileAgentConfig(context.Background(), logr.Discard(), pack, persona, 0, ""); err != nil {
+		t.Fatalf("override: %v", err)
+	}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "pack-lead", Namespace: "ns"}, got); err != nil {
+		t.Fatalf("get after override: %v", err)
+	}
+	if got.Spec.Harness != "agent-runner" {
+		t.Errorf("persona override not propagated; Harness = %q, want agent-runner", got.Spec.Harness)
+	}
+}
+
 func TestReconcileAgentConfig_PropagatesAgentSandbox(t *testing.T) {
 	pack := &sympoziumv1alpha1.Ensemble{
 		ObjectMeta: metav1.ObjectMeta{Name: "pack", Namespace: "ns"},

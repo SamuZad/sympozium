@@ -82,6 +82,20 @@ type AgentSpec struct {
 	// /workspace remains an ephemeral emptyDir as before.
 	// +optional
 	Workspace *WorkspaceSpec `json:"workspace,omitempty"`
+
+	// Harness selects the agent loop to run inside the agent container.
+	// Sympozium ships a controller-managed shim image per supported
+	// harness so users don't pin digests by hand (this is why no image
+	// field is exposed here). Add a value to the enum below to introduce
+	// a new harness family. Empty (the default) and "agent-runner" both
+	// select the built-in agent-runner; the explicit value exists so a
+	// persona can opt out of an ensemble-wide harness.
+	//
+	// Typically used together with Workspace.PerSessionPVC so the
+	// harness's persistent state survives across AgentRuns.
+	// +kubebuilder:validation:Enum="";agent-runner;codex;claude-code
+	// +optional
+	Harness string `json:"harness,omitempty"`
 }
 
 // MCPServerRef references a remote MCP server for tool integration.

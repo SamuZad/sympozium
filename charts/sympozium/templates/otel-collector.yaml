@@ -19,12 +19,44 @@ data:
 
     processors:
       batch: {}
+      # Normalize harness-specific metric names emitted by codex (and future
+      # CLI-wrapping harnesses) to the sympozium-canonical names emitted by
+      # the agent-runner. Dashboards can then query a single metric/attribute
+      # set regardless of which harness produced the data point.
+      transform/harness_normalize:
+        error_mode: ignore
+        metric_statements:
+          - context: metric
+            statements:
+              # codex tool metrics → sympozium-canonical
+              - set(name, "sympozium.tool.invocations") where name == "codex.tool.call"
+              - set(name, "sympozium.skill.duration") where name == "codex.tool.call.duration_ms"
+              # codex token usage → OTel GenAI semconv (matches agent-runner)
+              - set(name, "gen_ai.client.token.usage") where name == "turn.token_usage"
+          - context: datapoint
+            statements:
+              # codex uses `token_type`; semconv is `gen_ai.token.type`.
+              - set(attributes["gen_ai.token.type"], attributes["token_type"]) where attributes["token_type"] != nil
+              - delete_key(attributes, "token_type")
+              # codex uses `tool`; agent-runner uses `tool_name`.
+              - set(attributes["tool_name"], attributes["tool"]) where attributes["tool"] != nil
+              - delete_key(attributes, "tool")
 
     exporters:
       debug:
-        verbosity: normal
+        verbosity: {{ .Values.observability.collector.debug.verbosity | default "normal" }}
       prometheus:
         endpoint: 0.0.0.0:{{ .Values.observability.collector.service.metricsPort }}
+        {{- with .Values.observability.collector.prometheus }}
+        resource_to_telemetry_conversion:
+          enabled: {{ .resourceToTelemetryConversion | default false }}
+        {{- if .enableOpenMetrics }}
+        enable_open_metrics: {{ .enableOpenMetrics }}
+        {{- end }}
+        {{- if .metricExpiration }}
+        metric_expiration: {{ .metricExpiration | quote }}
+        {{- end }}
+        {{- end }}
 
     extensions:
       health_check:
@@ -39,7 +71,7 @@ data:
           exporters: [debug]
         metrics:
           receivers: [otlp]
-          processors: [batch]
+          processors: [transform/harness_normalize, batch]
           exporters: [prometheus, debug]
         logs:
           receivers: [otlp]

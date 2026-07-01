@@ -27,8 +27,7 @@ type agentObservability struct {
 
 	agentRuns       metric.Int64Counter
 	agentRunDurMs   metric.Float64Histogram
-	inTok           metric.Int64Counter
-	outTok          metric.Int64Counter
+	tokenUsage      metric.Int64Histogram
 	toolInvocations metric.Int64Counter
 	skillDurMs      metric.Float64Histogram
 }
@@ -114,13 +113,16 @@ func (o *agentObservability) initMetrics() {
 	if err != nil {
 		log.Printf("failed creating metric sympozium.agent.run.duration: %v", err)
 	}
-	o.inTok, err = meter.Int64Counter("gen_ai.usage.input_tokens")
+	// OTel GenAI semconv (experimental): single histogram with token_type
+	// attribute. Matches codex's `turn.token_usage` shape after collector-side
+	// normalization, giving unified dashboards across harnesses.
+	o.tokenUsage, err = meter.Int64Histogram(
+		"gen_ai.client.token.usage",
+		metric.WithUnit("{token}"),
+		metric.WithDescription("Number of input and output tokens used"),
+	)
 	if err != nil {
-		log.Printf("failed creating metric gen_ai.usage.input_tokens: %v", err)
-	}
-	o.outTok, err = meter.Int64Counter("gen_ai.usage.output_tokens")
-	if err != nil {
-		log.Printf("failed creating metric gen_ai.usage.output_tokens: %v", err)
+		log.Printf("failed creating metric gen_ai.client.token.usage: %v", err)
 	}
 	o.toolInvocations, err = meter.Int64Counter("sympozium.tool.invocations")
 	if err != nil {
@@ -181,11 +183,19 @@ func (o *agentObservability) recordRunMetrics(
 	if o.agentRunDurMs != nil {
 		o.agentRunDurMs.Record(ctx, float64(durationMs), attrs)
 	}
-	if inputTokens > 0 && o.inTok != nil {
-		o.inTok.Add(ctx, int64(inputTokens), metric.WithAttributes(attribute.String("model", model)))
-	}
-	if outputTokens > 0 && o.outTok != nil {
-		o.outTok.Add(ctx, int64(outputTokens), metric.WithAttributes(attribute.String("model", model)))
+	if o.tokenUsage != nil {
+		if inputTokens > 0 {
+			o.tokenUsage.Record(ctx, int64(inputTokens), metric.WithAttributes(
+				attribute.String("model", model),
+				attribute.String("gen_ai.token.type", "input"),
+			))
+		}
+		if outputTokens > 0 {
+			o.tokenUsage.Record(ctx, int64(outputTokens), metric.WithAttributes(
+				attribute.String("model", model),
+				attribute.String("gen_ai.token.type", "output"),
+			))
+		}
 	}
 }
 

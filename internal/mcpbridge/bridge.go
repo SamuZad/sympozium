@@ -40,6 +40,7 @@ type Bridge struct {
 	clients      map[string]*Client // server name -> client
 	toolIndex    map[string]string  // prefixed tool name -> server name
 	prefixIndex  map[string]string  // tools prefix -> server name
+	manifest     *MCPToolManifest
 	processed    sync.Map           // dedup fsnotify events
 }
 
@@ -77,6 +78,7 @@ func (b *Bridge) Run(ctx context.Context) error {
 	}
 
 	span.SetAttributes(attribute.Int("mcp.tools_discovered", len(manifest.Tools)))
+	b.manifest = manifest
 
 	// Phase 2: Write tool manifest for agent-runner
 	if err := WriteManifest(b.manifestPath, manifest); err != nil {
@@ -86,6 +88,22 @@ func (b *Bridge) Run(ctx context.Context) error {
 	}
 
 	log.Printf("Wrote tool manifest with %d tools to %s", len(manifest.Tools), b.manifestPath)
+
+	localMCPAddr := strings.TrimSpace(os.Getenv("MCP_BRIDGE_LISTEN_ADDR"))
+	if localMCPAddr == "" {
+		localMCPAddr = DefaultLocalMCPAddr
+	}
+	if !strings.EqualFold(localMCPAddr, "disabled") && !strings.EqualFold(localMCPAddr, "off") {
+		server, err := b.StartLocalMCPServer(ctx, localMCPAddr)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "local MCP endpoint failed")
+			return err
+		}
+		if server != nil {
+			defer server.Shutdown(context.Background())
+		}
+	}
 
 	// Phase 3: Watch for MCP requests and dispatch
 	return b.watchAndDispatch(ctx)
@@ -189,8 +207,6 @@ func extractIDFromFilename(path string) string {
 
 // handleRequest processes a single MCP request file.
 func (b *Bridge) handleRequest(ctx context.Context, path string) {
-	start := time.Now()
-
 	// Small delay to ensure file write is complete
 	time.Sleep(50 * time.Millisecond)
 
@@ -210,42 +226,46 @@ func (b *Bridge) handleRequest(ctx context.Context, path string) {
 		return
 	}
 
-	// Resolve target server
-	serverName := req.Server
-	toolName := req.Tool
+	result, err := b.callTool(ctx, req.ID, req.Server, req.Tool, req.Arguments, req.Meta)
+	if err != nil {
+		log.Printf("MCP tool call failed: %v", err)
+		b.writeErrorResult(req.ID, path, err.Error())
+		return
+	}
+
+	b.writeResult(req.ID, path, result)
+}
+
+func (b *Bridge) callTool(ctx context.Context, requestID, requestedServer, requestedTool string, arguments json.RawMessage, metaStrings map[string]string) (*MCPResult, error) {
+	start := time.Now()
+	serverName := requestedServer
+	toolName := requestedTool
 
 	if serverName == "" {
-		// Resolve by prefix: find the longest matching prefix
-		serverName, toolName = b.resolveByPrefix(req.Tool)
+		serverName, toolName = b.resolveByPrefix(requestedTool)
 		if serverName == "" {
-			log.Printf("No server found for tool %q", req.Tool)
-			b.writeErrorResult(req.ID, path, fmt.Sprintf("no MCP server found for tool %q", req.Tool))
 			mcpToolErrors.Add(ctx, 1, metric.WithAttributes(attribute.String("error", "no_server")))
-			return
+			return nil, fmt.Errorf("no MCP server found for tool %q", requestedTool)
 		}
 	} else {
-		// Server specified directly — still strip prefix from tool name
-		_, toolName = b.resolveByPrefix(req.Tool)
-		if toolName == req.Tool {
-			// No prefix found — use as-is
-			toolName = req.Tool
+		_, toolName = b.resolveByPrefix(requestedTool)
+		if toolName == requestedTool {
+			toolName = requestedTool
 		}
 	}
 
-	// Extract trace context from agent-runner's _meta
 	parentCtx := ctx
-	if tp, ok := req.Meta["traceparent"]; ok {
+	if tp, ok := metaStrings["traceparent"]; ok {
 		if remoteCtx := extractTraceparent(tp); remoteCtx.IsValid() {
 			parentCtx = trace.ContextWithRemoteSpanContext(ctx, remoteCtx)
 		}
 	}
 
-	// Start a span for the tool call
 	ctx, span := bridgeTracer.Start(parentCtx, "mcp.tool_call",
 		trace.WithAttributes(
 			attribute.String("mcp.tool", toolName),
 			attribute.String("mcp.server", serverName),
-			attribute.String("mcp.request_id", req.ID),
+			attribute.String("mcp.request_id", requestID),
 		),
 	)
 	defer span.End()
@@ -257,48 +277,44 @@ func (b *Bridge) handleRequest(ctx context.Context, path string) {
 	mcpToolCalls.Add(ctx, 1, attrs)
 
 	// Defense in depth: reject tool calls for tools not in the filtered index.
-	if _, known := b.toolIndex[req.Tool]; !known {
-		log.Printf("Tool %q not in filtered tool index, rejecting", req.Tool)
-		b.writeErrorResult(req.ID, path, fmt.Sprintf("tool %q is not available (filtered)", req.Tool))
+	if _, known := b.toolIndex[requestedTool]; !known {
+		log.Printf("Tool %q not in filtered tool index, rejecting", requestedTool)
 		span.SetStatus(codes.Error, "tool filtered")
 		mcpToolErrors.Add(ctx, 1, attrs)
-		return
+		return nil, fmt.Errorf("tool %q is not available (filtered)", requestedTool)
 	}
 
 	client, ok := b.clients[serverName]
 	if !ok {
 		log.Printf("No client for server %q", serverName)
-		b.writeErrorResult(req.ID, path, fmt.Sprintf("MCP server %q not connected", serverName))
 		span.SetStatus(codes.Error, "server not connected")
 		mcpToolErrors.Add(ctx, 1, attrs)
-		return
+		return nil, fmt.Errorf("MCP server %q not connected", serverName)
 	}
 
 	// Build meta for trace propagation
 	var meta map[string]any
-	if len(req.Meta) > 0 {
-		meta = make(map[string]any, len(req.Meta))
-		for k, v := range req.Meta {
+	if len(metaStrings) > 0 {
+		meta = make(map[string]any, len(metaStrings))
+		for k, v := range metaStrings {
 			meta[k] = v
 		}
 	}
 
 	// Call the tool
-	log.Printf("Calling MCP tool %q on server %q (request %s)", toolName, serverName, req.ID)
+	log.Printf("Calling MCP tool %q on server %q (request %s)", toolName, serverName, requestID)
 
-	callResult, err := client.CallTool(ctx, toolName, req.Arguments, meta)
+	callResult, err := client.CallTool(ctx, toolName, arguments, meta)
 	if err != nil {
-		log.Printf("MCP tool call failed: %v", err)
-		b.writeErrorResult(req.ID, path, err.Error())
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "tool call failed")
 		mcpToolErrors.Add(ctx, 1, attrs)
-		return
+		return nil, err
 	}
 
 	// Build result
 	result := MCPResult{
-		ID:      req.ID,
+		ID:      requestID,
 		Success: !callResult.IsError,
 		IsError: callResult.IsError,
 	}
@@ -318,17 +334,14 @@ func (b *Bridge) handleRequest(ctx context.Context, path string) {
 	// Marshal content
 	contentData, err := json.Marshal(callResult.Content)
 	if err != nil {
-		log.Printf("Failed to marshal content for request %s: %v", req.ID, err)
-		b.writeErrorResult(req.ID, path, "failed to marshal tool result content")
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "marshal failed")
-		return
+		return nil, fmt.Errorf("failed to marshal tool result content")
 	}
 	result.Content = contentData
 
-	b.writeResult(req.ID, path, &result)
-
 	mcpToolDuration.Record(ctx, float64(time.Since(start).Milliseconds()), attrs)
+	return &result, nil
 }
 
 // resolveByPrefix finds the server for a prefixed tool name and returns
@@ -412,6 +425,7 @@ func (b *Bridge) DiscoverAndWriteManifest(ctx context.Context) error {
 	}
 
 	span.SetAttributes(attribute.Int("mcp.tools_discovered", len(manifest.Tools)))
+	b.manifest = manifest
 
 	if err := WriteManifest(b.manifestPath, manifest); err != nil {
 		span.RecordError(err)

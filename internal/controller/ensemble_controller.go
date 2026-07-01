@@ -513,6 +513,7 @@ func (r *EnsembleReconciler) buildAgent(
 			Volumes:       pack.Spec.Volumes,
 			VolumeMounts:  pack.Spec.VolumeMounts,
 			Workspace:     resolveWorkspaceSpec(pack.Spec.Workspace, persona.Workspace),
+			Harness:       resolveHarness(pack.Spec.Harness, persona.Harness),
 		},
 	}
 
@@ -955,6 +956,17 @@ func resolveWorkspaceSpec(ensembleWS, personaWS *sympoziumv1alpha1.WorkspaceSpec
 	return nil
 }
 
+// resolveHarness picks the harness identifier to stamp on a generated
+// Agent: a non-empty persona value wins; otherwise the ensemble-level
+// value is used. Empty on both layers means "use the built-in
+// agent-runner".
+func resolveHarness(ensembleH, personaH string) string {
+	if personaH != "" {
+		return personaH
+	}
+	return ensembleH
+}
+
 // buildChannelSpec computes the desired ChannelSpec for a given channel type
 // from pack and persona configuration. Persona-level overrides take priority
 // over ensemble-level defaults for AccessControl and Triggers.
@@ -1173,6 +1185,8 @@ func (r *EnsembleReconciler) deliverStimulus(ctx context.Context, log logr.Logge
 			VolumeMounts:     targetInst.Spec.VolumeMounts,
 			Tolerations:      targetInst.Spec.Agents.Default.Tolerations,
 			Env:              targetInst.Spec.Agents.Default.Env,
+			Workspace:        targetInst.Spec.Workspace,
+			Harness:          targetInst.Spec.Harness,
 		},
 	}
 

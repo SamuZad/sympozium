@@ -510,14 +510,16 @@ func (r *AgentRunReconciler) EnsureWarmPool(
 		spec["runtimeClassName"] = runtimeClass
 	}
 
-	// Build a basic pod template for warm pool sandboxes.
+	// Build a basic pod template for warm pool sandboxes. The image
+	// follows the Agent's harness so a claimed sandbox boots straight
+	// into the right loop without re-pulling.
 	spec["podTemplate"] = map[string]interface{}{
 		"spec": map[string]interface{}{
 			"serviceAccountName": AgentServiceAccountName(instance),
 			"containers": []interface{}{
 				map[string]interface{}{
 					"name":    "agent",
-					"image":   r.imageRef("agent-runner"),
+					"image":   r.harnessImage(instance.Spec.Harness),
 					"command": []string{"sleep", "infinity"},
 					"resources": map[string]interface{}{
 						"requests": map[string]interface{}{

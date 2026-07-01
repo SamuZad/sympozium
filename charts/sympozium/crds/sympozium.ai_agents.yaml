@@ -2648,6 +2648,24 @@ spec:
                   - type
                   type: object
                 type: array
+              harness:
+                description: |-
+                  Harness selects the agent loop to run inside the agent container.
+                  Sympozium ships a controller-managed shim image per supported
+                  harness so users don't pin digests by hand (this is why no image
+                  field is exposed here). Add a value to the enum below to introduce
+                  a new harness family. Empty (the default) and "agent-runner" both
+                  select the built-in agent-runner; the explicit value exists so a
+                  persona can opt out of an ensemble-wide harness.
+
+                  Typically used together with Workspace.PerSessionPVC so the
+                  harness's persistent state survives across AgentRuns.
+                enum:
+                - ""
+                - agent-runner
+                - codex
+                - claude-code
+                type: string
               imagePullSecrets:
                 description: ImagePullSecrets are secrets to use when pulling container
                   images.

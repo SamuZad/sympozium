@@ -169,6 +169,8 @@ func (s *Spawner) Spawn(ctx context.Context, req SpawnRequest) (*SpawnResult, er
 		agentRun.Spec.Lifecycle = inst.Spec.Agents.Default.Lifecycle
 		agentRun.Spec.Tolerations = inst.Spec.Agents.Default.Tolerations
 		agentRun.Spec.Env = inst.Spec.Agents.Default.Env
+		agentRun.Spec.Workspace = inst.Spec.Workspace
+		agentRun.Spec.Harness = inst.Spec.Harness
 	}
 
 	if err := s.Client.Create(ctx, agentRun); err != nil {

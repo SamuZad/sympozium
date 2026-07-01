@@ -17,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	sympoziumv1alpha1 "github.com/sympozium-ai/sympozium/api/v1alpha1"
+	"github.com/sympozium-ai/sympozium/internal/sessionkey"
 )
 
 // helper builds a minimal AgentRun for testing.
@@ -275,6 +276,17 @@ func TestBuildContainers_AgentEnvVars_TemperatureInjected(t *testing.T) {
 
 	if got := envMapOf(cs[0].Env)["TEMPERATURE"]; got != "0.7" {
 		t.Errorf("TEMPERATURE = %q, want 0.7", got)
+	}
+}
+
+func TestBuildContainers_AgentEnvVars_ThinkingModeInjected(t *testing.T) {
+	r := &AgentRunReconciler{}
+	run := newTestRun()
+	run.Spec.Model.Thinking = "high"
+	cs, _ := r.buildContainers(run, false, nil, nil, nil)
+
+	if got := envMapOf(cs[0].Env)["THINKING_MODE"]; got != "high" {
+		t.Errorf("THINKING_MODE = %q, want high", got)
 	}
 }
 
@@ -779,6 +791,10 @@ func TestBuildContainers_ObservabilityEnv(t *testing.T) {
 	}
 	if !strings.Contains(agentEnv["SYMPOZIUM_OTEL_RESOURCE_ATTRIBUTES"], "sympozium.agent_run.id=test-run") {
 		t.Fatalf("missing run id in resource attributes: %q", agentEnv["SYMPOZIUM_OTEL_RESOURCE_ATTRIBUTES"])
+	}
+	wantSessionAttr := "sympozium.session.hash=" + sessionkey.Hash("sess-1")
+	if !strings.Contains(agentEnv["SYMPOZIUM_OTEL_RESOURCE_ATTRIBUTES"], wantSessionAttr) {
+		t.Fatalf("missing session hash in resource attributes: got %q, want substring %q", agentEnv["SYMPOZIUM_OTEL_RESOURCE_ATTRIBUTES"], wantSessionAttr)
 	}
 }
 

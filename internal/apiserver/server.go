@@ -930,6 +930,8 @@ func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
 			Lifecycle:        inst.Spec.Agents.Default.Lifecycle,
 			Tolerations:      inst.Spec.Agents.Default.Tolerations,
 			Env:              inst.Spec.Agents.Default.Env,
+			Workspace:        inst.Spec.Workspace,
+			Harness:          inst.Spec.Harness,
 		},
 	}
 
@@ -2213,6 +2215,8 @@ func (s *Server) triggerStimulus(w http.ResponseWriter, r *http.Request) {
 			VolumeMounts:     targetInst.Spec.VolumeMounts,
 			Tolerations:      targetInst.Spec.Agents.Default.Tolerations,
 			Env:              targetInst.Spec.Agents.Default.Env,
+			Workspace:        targetInst.Spec.Workspace,
+			Harness:          targetInst.Spec.Harness,
 		},
 	}
 
@@ -2559,7 +2563,7 @@ func (s *Server) getObservabilityMetrics(w http.ResponseWriter, r *http.Request)
 		sort.Strings(names)
 		resp.RawMetricNames = names
 	} else {
-		resp.RawMetricNames = []string{"sympozium.agent.runs", "gen_ai.usage.input_tokens", "gen_ai.usage.output_tokens", "sympozium.tool.invocations"}
+		resp.RawMetricNames = []string{"sympozium.agent.runs", "gen_ai.client.token.usage", "sympozium.tool.invocations"}
 	}
 
 	writeJSON(w, resp)

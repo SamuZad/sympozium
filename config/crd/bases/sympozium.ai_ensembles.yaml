@@ -164,6 +164,19 @@ spec:
                         AgentConfig.Env, which the controllers then copy onto each
                         AgentRunSpec.Env.
                       type: object
+                    harness:
+                      description: |-
+                        Harness overrides the ensemble-level Harness for this agent
+                        configuration. When non-empty, replaces the ensemble-level value
+                        entirely. Empty (the default) inherits the ensemble-level value;
+                        set "agent-runner" explicitly to opt this persona out of an
+                        ensemble-wide harness and fall back to the built-in agent-runner.
+                      enum:
+                      - ""
+                      - agent-runner
+                      - codex
+                      - claude-code
+                      type: string
                     lifecycle:
                       description: |-
                         Lifecycle defines pre and post run hooks for this agent configuration.
@@ -2866,6 +2879,19 @@ spec:
                 items:
                   type: string
                 type: array
+              harness:
+                description: |-
+                  Harness is the default agent loop applied to every Agent stamped
+                  out by this ensemble. Useful for declaring a homogeneous team of,
+                  say, claude-code agents in one place. Per-persona overrides in
+                  AgentConfigSpec.Harness take precedence. Empty (the default) and
+                  "agent-runner" both select the built-in agent-runner.
+                enum:
+                - ""
+                - agent-runner
+                - codex
+                - claude-code
+                type: string
               modelRef:
                 description: |-
                   ModelRef references a Model CR for cluster-local inference.

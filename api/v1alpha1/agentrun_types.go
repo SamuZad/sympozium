@@ -113,6 +113,24 @@ type AgentRunSpec struct {
 	// other volume present on the pod).
 	// +optional
 	VolumeMounts []corev1.VolumeMount `json:"volumeMounts,omitempty"`
+
+	// Workspace records the /workspace volume policy applied to this
+	// run, snapshotted from the parent Agent at AgentRun creation time.
+	// Primarily an audit trail — the WorkspaceSession reconciler is
+	// keyed by (agent, sessionKey) and remains the source of truth for
+	// PVC sizing and idle TTL. May be set directly on an AgentRun for
+	// ad-hoc runs that bypass an Agent.
+	// +optional
+	Workspace *WorkspaceSpec `json:"workspace,omitempty"`
+
+	// Harness selects the agent loop to run inside the agent container,
+	// snapshotted from the parent Agent at AgentRun creation time.
+	// Empty and "agent-runner" both select the built-in agent-runner.
+	// May be set directly on an AgentRun for ad-hoc runs that bypass an
+	// Agent.
+	// +kubebuilder:validation:Enum="";agent-runner;codex;claude-code
+	// +optional
+	Harness string `json:"harness,omitempty"`
 }
 
 // ParentRunRef links a sub-agent to its parent.

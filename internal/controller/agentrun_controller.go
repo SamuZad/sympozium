@@ -166,6 +166,22 @@ func (r *AgentRunReconciler) imageRef(name string) string {
 	return fmt.Sprintf("%s/%s:%s", registry, name, tag)
 }
 
+// harnessImage maps an AgentSpec.Harness enum value to the container
+// image that should run the agent loop. "" and "agent-runner" select
+// the built-in agent-runner; other values select a controller-managed
+// shim image (e.g. harness-codex). Unknown values fall back to the
+// agent-runner so a stale CR never produces a pod that fails to pull.
+func (r *AgentRunReconciler) harnessImage(harness string) string {
+	switch harness {
+	case "codex":
+		return r.imageRef("harness-codex")
+	case "claude-code":
+		return r.imageRef("harness-claude-code")
+	default:
+		return r.imageRef("agent-runner")
+	}
+}
+
 // resolveOTelEndpoint returns the OTLP endpoint for agent pods.
 // Priority: instance CRD → controller's own env → empty (noop).
 func resolveOTelEndpoint(instance *sympoziumv1alpha1.Agent) string {
@@ -1156,6 +1172,8 @@ func (r *AgentRunReconciler) triggerSequentialSuccessors(ctx context.Context, lo
 				VolumeMounts:     targetInst.Spec.VolumeMounts,
 				Tolerations:      targetInst.Spec.Agents.Default.Tolerations,
 				Env:              targetInst.Spec.Agents.Default.Env,
+				Workspace:        targetInst.Spec.Workspace,
+				Harness:          targetInst.Spec.Harness,
 			},
 		}
 
@@ -2075,7 +2093,7 @@ func (r *AgentRunReconciler) buildContainers(
 		// Main agent container
 		{
 			Name:            "agent",
-			Image:           r.imageRef("agent-runner"),
+			Image:           r.harnessImage(agentRun.Spec.Harness),
 			ImagePullPolicy: corev1.PullIfNotPresent,
 			SecurityContext: &corev1.SecurityContext{
 				ReadOnlyRootFilesystem:   &readOnly,
@@ -2634,6 +2652,14 @@ func buildObservabilityEnv(agentRun *sympoziumv1alpha1.AgentRun, obs *sympoziumv
 		"sympozium.instance.name": agentRun.Spec.AgentRef,
 		"sympozium.agent_run.id":  agentRun.Name,
 		"k8s.namespace.name":      agentRun.Namespace,
+	}
+	// Emit the session-key hash — the same identity workspace PVCs are keyed
+	// on — so metrics can be grouped per logical thread/session. We hash
+	// rather than emit the raw key because session keys can contain channel
+	// and user identifiers (PII) and arbitrary characters; the hash is the
+	// stable, label-safe identifier shared with the PVC/WorkspaceSession.
+	if agentRun.Spec.SessionKey != "" {
+		attrs["sympozium.session.hash"] = sessionkey.Hash(agentRun.Spec.SessionKey)
 	}
 	for k, v := range obs.ResourceAttributes {
 		attrs[k] = v

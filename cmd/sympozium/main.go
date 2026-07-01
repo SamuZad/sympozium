@@ -8505,6 +8505,8 @@ func tuiCreateRun(ns, instance, task string) (string, error) {
 			Skills:           inst.Spec.Skills,
 			Timeout:          &metav1.Duration{Duration: inst.Spec.Agents.Default.EffectiveRunTimeout()},
 			ImagePullSecrets: inst.Spec.ImagePullSecrets,
+			Workspace:        inst.Spec.Workspace,
+			Harness:          inst.Spec.Harness,
 		},
 	}
 	if err := k8sClient.Create(ctx, run); err != nil {

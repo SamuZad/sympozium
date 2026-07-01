@@ -23,7 +23,7 @@ CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 BIN_DIR = bin
 
 # All binaries
-BINARIES = controller apiserver ipc-bridge webhook agent-runner sympozium web-proxy node-probe
+BINARIES = controller apiserver ipc-bridge webhook agent-runner sympozium web-proxy node-probe sympozium-tool
 
 # All channel binaries
 CHANNELS = telegram whatsapp discord slack
@@ -32,7 +32,7 @@ CHANNELS = telegram whatsapp discord slack
 IMAGES = controller apiserver ipc-bridge webhook agent-runner web-proxy node-probe \
          channel-telegram channel-whatsapp channel-discord channel-slack \
 		 skill-k8s-ops skill-sre-observability skill-github-gitops skill-llmfit memory-server \
-		 llmfit-daemon mcp-bridge
+		 llmfit-daemon mcp-bridge harness-codex
 
 .PHONY: all build test clean generate manifests docker-build docker-push install help web-build web-dev web-dev-serve web-clean web-install setup-hooks integration-tests ux-tests
 

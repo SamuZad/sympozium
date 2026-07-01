@@ -175,6 +175,15 @@ type EnsembleSpec struct {
 	// AgentConfigSpec.Workspace take precedence.
 	// +optional
 	Workspace *WorkspaceSpec `json:"workspace,omitempty"`
+
+	// Harness is the default agent loop applied to every Agent stamped
+	// out by this ensemble. Useful for declaring a homogeneous team of,
+	// say, claude-code agents in one place. Per-persona overrides in
+	// AgentConfigSpec.Harness take precedence. Empty (the default) and
+	// "agent-runner" both select the built-in agent-runner.
+	// +kubebuilder:validation:Enum="";agent-runner;codex;claude-code
+	// +optional
+	Harness string `json:"harness,omitempty"`
 }
 
 // AgentConfigSpec defines a single agent configuration within an Ensemble.
@@ -325,6 +334,15 @@ type AgentConfigSpec struct {
 	// ensemble-level value entirely.
 	// +optional
 	Workspace *WorkspaceSpec `json:"workspace,omitempty"`
+
+	// Harness overrides the ensemble-level Harness for this agent
+	// configuration. When non-empty, replaces the ensemble-level value
+	// entirely. Empty (the default) inherits the ensemble-level value;
+	// set "agent-runner" explicitly to opt this persona out of an
+	// ensemble-wide harness and fall back to the built-in agent-runner.
+	// +kubebuilder:validation:Enum="";agent-runner;codex;claude-code
+	// +optional
+	Harness string `json:"harness,omitempty"`
 }
 
 // AgentConfigWebEndpoint configures the web endpoint for an agent configuration.
