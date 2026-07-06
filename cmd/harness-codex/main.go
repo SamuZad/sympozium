@@ -216,11 +216,45 @@ func writeAgentsMD(codexHome string) error {
 		b.WriteString(sp)
 		b.WriteString("\n")
 	}
+	writeChannelContextSection(&b)
 	writeSympoziumToolsSection(&b)
 	if b.Len() == 0 {
 		return nil
 	}
 	return os.WriteFile(filepath.Join(codexHome, "AGENTS.md"), []byte(b.String()), 0o644)
+}
+
+// writeChannelContextSection gives codex the conversational frame the
+// agent-runner injects into its system prompt. `codex exec` is otherwise a
+// stateless one-shot whose only context is the task string, so without this
+// codex "misses the fact" a message belongs to a Slack/Telegram/Discord thread
+// and treats every turn in isolation — which also lets cross-thread memories
+// (the memory-server is scoped by agent/ensemble, not by thread) bleed in as if
+// they were relevant. Keep it terse: a couple of sentences is the anchor.
+func writeChannelContextSection(b *strings.Builder) {
+	channel := strings.TrimSpace(os.Getenv("SOURCE_CHANNEL"))
+	if channel == "" {
+		// Not a channel-triggered run (e.g. schedule, web, TUI). Nothing to anchor.
+		return
+	}
+	chatID := strings.TrimSpace(os.Getenv("SOURCE_CHAT_ID"))
+	threadID := strings.TrimSpace(os.Getenv("SOURCE_THREAD_ID"))
+
+	reply := fmt.Sprintf("sympozium-tool send-message --channel %s --chat-id %s", channel, chatID)
+	if threadID != "" {
+		reply += fmt.Sprintf(" --thread-id %s", threadID)
+	}
+
+	b.WriteString("\n# Channel context\n\n")
+	fmt.Fprintf(b, "This task was received through the **%s** channel (chat ID `%s`). "+
+		"Reply through this channel by running `%s` to deliver results, ask follow-up "+
+		"questions, or send notifications to the user.", channel, chatID, reply)
+	if threadID != "" {
+		fmt.Fprintf(b, " The originating message is in thread `%s` — keep replies in the "+
+			"same thread (the command above already targets it) and treat this as a "+
+			"continuation, not an isolated request.", threadID)
+	}
+	b.WriteString("\n")
 }
 
 // writeSympoziumToolsSection appends documentation for the `sympozium-tool`
