@@ -135,6 +135,14 @@ type AgentRunReconciler struct {
 	// terminal AgentRun state handlers). Nil when MemoryServerURL is
 	// empty; all memory-writing code paths must tolerate that.
 	MemoryClient *memoryclient.Client
+
+	// ArtifactServerURL is the base URL of the central artifact-server
+	// (e.g. "http://release-artifact-server.sympozium-system.svc:8080").
+	// When set, the controller stamps it onto every agent pod so the
+	// harness can upload produced files by reference instead of shipping
+	// bytes over the event bus. Empty disables the artifact subsystem;
+	// the chart sets this only when artifact.enabled=true.
+	ArtifactServerURL string
 }
 
 const imageRegistry = "ghcr.io/sympozium-ai/sympozium"
@@ -898,11 +906,11 @@ type sidecarFailure struct {
 // never resolve on their own with RestartPolicyNever and should immediately
 // fail the AgentRun.
 var fatalWaitingReasons = map[string]bool{
-	"ImagePullBackOff":          true,
-	"ErrImagePull":              true,
-	"InvalidImageName":          true,
+	"ImagePullBackOff":           true,
+	"ErrImagePull":               true,
+	"InvalidImageName":           true,
 	"CreateContainerConfigError": true,
-	"CreateContainerError":      true,
+	"CreateContainerError":       true,
 }
 
 // checkSidecarFailures inspects all non-"agent" containers in the agent pod
@@ -2209,6 +2217,15 @@ func (r *AgentRunReconciler) buildContainers(
 	if memoryEnabled && r.MemoryServerURL != "" {
 		containers[0].Env = append(containers[0].Env,
 			corev1.EnvVar{Name: "MEMORY_SERVER_URL", Value: r.MemoryServerURL},
+		)
+	}
+
+	// Wire the central artifact-server when the controller knows the
+	// service URL. The harness authenticates with its projected SA token
+	// and uploads produced files by reference; nothing else to inject.
+	if r.ArtifactServerURL != "" {
+		containers[0].Env = append(containers[0].Env,
+			corev1.EnvVar{Name: "ARTIFACT_SERVER_URL", Value: r.ArtifactServerURL},
 		)
 	}
 

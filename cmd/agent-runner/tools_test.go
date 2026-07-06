@@ -1,7 +1,10 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -107,5 +110,104 @@ func TestExecuteCommandToolDefAdvertisesTarget(t *testing.T) {
 		if r == "target" {
 			t.Fatalf("'target' must be optional, but appears in required: %v", required)
 		}
+	}
+}
+
+func TestSendChannelMessageToolDefAdvertisesAttachments(t *testing.T) {
+	var def *ToolDef
+	tools := defaultTools()
+	for i := range tools {
+		if tools[i].Name == ToolSendChannelMessage {
+			def = &tools[i]
+			break
+		}
+	}
+	if def == nil {
+		t.Fatalf("send_channel_message tool not found in defaultTools()")
+	}
+	props, ok := def.Parameters["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("properties missing or wrong type in send_channel_message schema")
+	}
+	if _, ok := props["attachments"]; !ok {
+		t.Fatalf("send_channel_message schema is missing optional attachments property: %v", props)
+	}
+	required, _ := def.Parameters["required"].([]string)
+	for _, r := range required {
+		if r == "attachments" {
+			t.Fatalf("attachments must be optional, but appears in required: %v", required)
+		}
+	}
+}
+
+func TestParseChannelAttachments(t *testing.T) {
+	attachments, errText := parseChannelAttachments([]any{
+		map[string]any{"url": "https://example.com/chart.png", "filename": "chart.png", "mimeType": "image/png"},
+	})
+	if errText != "" {
+		t.Fatalf("parseChannelAttachments returned error: %s", errText)
+	}
+	if len(attachments) != 1 {
+		t.Fatalf("len(attachments) = %d, want 1", len(attachments))
+	}
+	if attachments[0].Type != "image" || attachments[0].URL != "https://example.com/chart.png" || attachments[0].Filename != "chart.png" || attachments[0].MimeType != "image/png" {
+		t.Fatalf("attachment = %+v", attachments[0])
+	}
+
+	_, errText = parseChannelAttachments([]any{map[string]any{"url": "http://example.com/insecure.png"}})
+	if !strings.Contains(errText, "https://") {
+		t.Fatalf("expected https validation error, got %q", errText)
+	}
+}
+
+func TestParseChannelAttachmentsReadsLocalPath(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("/tmp", "sympozium-attachment-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	pngBytes := []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d}
+	path := filepath.Join(tmpDir, "chart.png")
+	if err := os.WriteFile(path, pngBytes, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	attachments, errText := parseChannelAttachments([]any{map[string]any{"path": path}})
+	if errText != "" {
+		t.Fatalf("parseChannelAttachments returned error: %s", errText)
+	}
+	if len(attachments) != 1 {
+		t.Fatalf("len(attachments) = %d, want 1", len(attachments))
+	}
+	attachment := attachments[0]
+	if attachment.Type != "image" || attachment.URL != "" || attachment.Filename != "chart.png" || attachment.MimeType != "image/png" {
+		t.Fatalf("attachment metadata = %+v", attachment)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(attachment.ContentBase64)
+	if err != nil {
+		t.Fatalf("decode ContentBase64: %v", err)
+	}
+	if string(decoded) != string(pngBytes) {
+		t.Fatalf("decoded attachment content = %v, want %v", decoded, pngBytes)
+	}
+}
+
+func TestParseChannelAttachmentsHonorsConfiguredMaxBytes(t *testing.T) {
+	t.Setenv(channelAttachmentMaxBytesEnv, "8")
+	tmpDir, err := os.MkdirTemp("/tmp", "sympozium-attachment-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	path := filepath.Join(tmpDir, "chart.png")
+	if err := os.WriteFile(path, []byte("more than eight bytes"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	_, errText := parseChannelAttachments([]any{map[string]any{"path": path}})
+	if !strings.Contains(errText, "max is 8 bytes") {
+		t.Fatalf("expected configured max-bytes error, got %q", errText)
 	}
 }

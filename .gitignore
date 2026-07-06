@@ -6,6 +6,7 @@ bin/
 /ipc-bridge
 /mcp-bridge
 /memory-server
+/artifact-server
 /harness-codex
 /node-probe
 /web-proxy

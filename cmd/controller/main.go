@@ -93,11 +93,18 @@ func main() {
 	}
 
 	// Register controllers
+	// Central artifact-server URL is only set by the Helm chart when
+	// artifact.enabled=true. When empty, artifact-aware code paths
+	// (agent + channel pod env injection) are no-ops and the harness
+	// falls back to inline base64 attachments.
+	artifactServerURL := os.Getenv("ARTIFACT_SERVER_URL")
+
 	if err := (&controller.AgentReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Log:      ctrl.Log.WithName("controllers").WithName("Agent"),
-		ImageTag: imageTag,
+		Client:            mgr.GetClient(),
+		Scheme:            mgr.GetScheme(),
+		Log:               ctrl.Log.WithName("controllers").WithName("Agent"),
+		ImageTag:          imageTag,
+		ArtifactServerURL: artifactServerURL,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Agent")
 		os.Exit(1)
@@ -130,17 +137,18 @@ func main() {
 	}
 
 	agentRunReconciler := &controller.AgentRunReconciler{
-		Client:           mgr.GetClient(),
-		APIReader:        mgr.GetAPIReader(),
-		Scheme:           mgr.GetScheme(),
-		Log:              ctrl.Log.WithName("controllers").WithName("AgentRun"),
-		PodBuilder:       podBuilder,
-		Clientset:        clientset,
-		ImageTag:         imageTag,
-		RunHistoryLimit:  maxRunHistory,
-		DynamicClient:    dynamicClient,
-		MemoryServerURL: memoryServiceURL,
-		MemoryClient:     memoryClient,
+		Client:            mgr.GetClient(),
+		APIReader:         mgr.GetAPIReader(),
+		Scheme:            mgr.GetScheme(),
+		Log:               ctrl.Log.WithName("controllers").WithName("AgentRun"),
+		PodBuilder:        podBuilder,
+		Clientset:         clientset,
+		ImageTag:          imageTag,
+		RunHistoryLimit:   maxRunHistory,
+		DynamicClient:     dynamicClient,
+		MemoryServerURL:   memoryServiceURL,
+		MemoryClient:      memoryClient,
+		ArtifactServerURL: artifactServerURL,
 	}
 	if err := agentRunReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentRun")

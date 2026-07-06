@@ -31,7 +31,7 @@ CHANNELS = telegram whatsapp discord slack
 # All images
 IMAGES = controller apiserver ipc-bridge webhook agent-runner web-proxy node-probe \
          channel-telegram channel-whatsapp channel-discord channel-slack \
-		 skill-k8s-ops skill-sre-observability skill-github-gitops skill-llmfit memory-server \
+		 skill-k8s-ops skill-sre-observability skill-github-gitops skill-llmfit memory-server artifact-server \
 		 llmfit-daemon mcp-bridge harness-codex
 
 .PHONY: all build test clean generate manifests docker-build docker-push install help web-build web-dev web-dev-serve web-clean web-install setup-hooks integration-tests ux-tests

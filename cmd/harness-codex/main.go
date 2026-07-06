@@ -18,13 +18,19 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -135,6 +141,7 @@ func run(ctx context.Context) error {
 	} else {
 		res.Status = "success"
 		res.Response = response
+		res.Attachments = buildResponseAttachments(ctx, response, envOr("WORKSPACE_DIR", "/workspace"))
 	}
 	o.recordRun(ctx, status, instance, model, namespace, duration)
 
@@ -249,8 +256,9 @@ func writeSympoziumToolsSection(b *strings.Builder) {
 		"## send-message (reply via a channel)\n\n" +
 		"Notify the user through Telegram/Slack/Discord/WhatsApp. Omit `--chat-id` for self-chat; pass `--thread-id` to stay in an existing Slack/Discord thread.\n\n" +
 		"```\n" +
-		"sympozium-tool send-message --channel <telegram|slack|discord|whatsapp> --text \"...\" [--chat-id ID] [--thread-id ID]\n" +
+		"sympozium-tool send-message --channel <telegram|slack|discord|whatsapp> --text \"...\" [--chat-id ID] [--thread-id ID] [--attachment-path /tmp/chart.png]\n" +
 		"```\n\n" +
+		"Slack image attachments can use `--attachment-path` for a local generated PNG or `--attachment-url` for a public HTTPS image. Local files are capped by CHANNEL_ATTACHMENT_MAX_BYTES (default 768000).\n\n" +
 		"## schedule (recurring agent runs)\n\n" +
 		"Create/update/suspend/resume/delete a `SympoziumSchedule`. Each fire triggers a fresh agent run with the given task.\n\n" +
 		"```\n" +
@@ -489,6 +497,304 @@ func runCodex(ctx context.Context, o *harnessObservability) (string, error) {
 		return "", fmt.Errorf("codex exec failed: %w", runErr)
 	}
 	return "", nil
+}
+
+// buildResponseAttachments scans the agent's final answer for files it produced
+// (e.g. a generated chart or CSV) and returns them as attachments so the
+// auto-relayed reply can deliver the files, not just a dead local path.
+//
+// Detection is deterministic and does not depend on the model choosing to call
+// a tool: any local path the final answer references — as a Markdown link or a
+// bare absolute path — that exists under an allowed root and fits the size
+// budget is attached.
+//
+// Delivery has two modes. When ARTIFACT_SERVER_URL is set, bytes are uploaded
+// to the artifact-server over HTTP and the attachment carries only a small
+// ArtifactID reference — nothing large rides the event bus, so a generous
+// per-file cap applies and there is no cumulative budget. When it is unset, the
+// bytes are embedded inline as base64 and a conservative cumulative budget is
+// enforced to stay under the event-bus max message size; anything beyond the
+// budget is skipped, leaving the text reply intact.
+func buildResponseAttachments(ctx context.Context, response, workspace string) []ipc.Attachment {
+	if strings.TrimSpace(response) == "" {
+		return nil
+	}
+	workspace = filepath.Clean(strings.TrimSpace(workspace))
+	if workspace == "" || workspace == "." {
+		workspace = "/workspace"
+	}
+
+	const maxAttachments = 10
+
+	uploader := newArtifactUploader()
+	perFileMax := resultAttachmentMaxBytes()
+	if uploader != nil {
+		perFileMax = artifactAttachmentMaxBytes()
+	}
+	totalBase64Budget := resultAttachmentTotalBase64Budget()
+
+	var (
+		out        []ipc.Attachment
+		seen       = map[string]bool{}
+		usedBase64 int64
+	)
+
+	for _, raw := range extractCandidateAttachmentPaths(response) {
+		if len(out) >= maxAttachments {
+			break
+		}
+		abs, ok := resolveResultAttachmentCandidate(raw, workspace)
+		if !ok || seen[abs] {
+			continue
+		}
+		seen[abs] = true
+
+		info, err := os.Stat(abs)
+		if err != nil || info.IsDir() || !info.Mode().IsRegular() {
+			continue
+		}
+		if info.Size() <= 0 || info.Size() > perFileMax {
+			continue
+		}
+		data, err := os.ReadFile(abs)
+		if err != nil {
+			continue
+		}
+		mimeType := detectAttachmentMimeType(abs, data)
+		attType := "file"
+		if strings.HasPrefix(mimeType, "image/") {
+			attType = "image"
+		}
+		filename := filepath.Base(abs)
+
+		if uploader != nil {
+			id, size, err := uploader.upload(ctx, filename, mimeType, data)
+			if err != nil {
+				// Never fail the reply over a failed upload; drop the file and
+				// keep the text.
+				fmt.Fprintf(os.Stderr, "harness-codex: artifact upload failed for %s: %v\n", filename, err)
+				continue
+			}
+			out = append(out, ipc.Attachment{
+				Type:       attType,
+				ArtifactID: id,
+				Filename:   filename,
+				MimeType:   mimeType,
+				Size:       size,
+			})
+			continue
+		}
+
+		// Inline fallback (no artifact-server configured).
+		b64 := base64.StdEncoding.EncodeToString(data)
+		if usedBase64+int64(len(b64)) > totalBase64Budget {
+			// Skip rather than risk exceeding the event bus max message size.
+			continue
+		}
+		usedBase64 += int64(len(b64))
+		out = append(out, ipc.Attachment{
+			Type:          attType,
+			ContentBase64: b64,
+			Filename:      filename,
+			MimeType:      mimeType,
+			Size:          info.Size(),
+		})
+	}
+	return out
+}
+
+// artifactUploader posts agent-produced files to the artifact-server so their
+// bytes never ride the event bus. It is nil when ARTIFACT_SERVER_URL is unset,
+// in which case the caller falls back to inline base64 embedding.
+type artifactUploader struct {
+	baseURL string
+	token   string
+	client  *http.Client
+}
+
+// newArtifactUploader returns a configured uploader, or nil if the
+// artifact-server is not configured or the pod has no ServiceAccount token.
+func newArtifactUploader() *artifactUploader {
+	base := strings.TrimRight(strings.TrimSpace(os.Getenv("ARTIFACT_SERVER_URL")), "/")
+	if base == "" {
+		return nil
+	}
+	token, err := readServiceAccountToken()
+	if err != nil || token == "" {
+		fmt.Fprintf(os.Stderr, "harness-codex: artifact upload disabled (no SA token): %v\n", err)
+		return nil
+	}
+	return &artifactUploader{
+		baseURL: base,
+		token:   token,
+		client:  &http.Client{Timeout: 60 * time.Second},
+	}
+}
+
+// upload posts a single file and returns the artifact id and stored size.
+func (u *artifactUploader) upload(ctx context.Context, filename, mimeType string, data []byte) (string, int64, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.baseURL+"/v1/artifacts", bytes.NewReader(data))
+	if err != nil {
+		return "", 0, err
+	}
+	req.Header.Set("Authorization", "Bearer "+u.token)
+	req.Header.Set("Content-Type", mimeType)
+	req.Header.Set("X-Artifact-Filename", filename)
+
+	resp, err := u.client.Do(req)
+	if err != nil {
+		return "", 0, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	if resp.StatusCode != http.StatusCreated {
+		return "", 0, fmt.Errorf("artifact-server HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var ur struct {
+		ID   string `json:"id"`
+		Size int64  `json:"size"`
+	}
+	if err := json.Unmarshal(body, &ur); err != nil {
+		return "", 0, err
+	}
+	if ur.ID == "" {
+		return "", 0, fmt.Errorf("artifact-server returned empty id")
+	}
+	return ur.ID, ur.Size, nil
+}
+
+// readServiceAccountToken reads the projected pod SA token used to authenticate
+// to the artifact-server. SA_TOKEN_PATH overrides the location (tests).
+func readServiceAccountToken() (string, error) {
+	path := envOr("SA_TOKEN_PATH", "/var/run/secrets/kubernetes.io/serviceaccount/token")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(b)), nil
+}
+
+// artifactAttachmentMaxBytes is the per-file cap when uploading to the
+// artifact-server. Because bytes travel over HTTP rather than NATS, it defaults
+// far higher than the inline base64 cap. Configurable via
+// ARTIFACT_ATTACHMENT_MAX_BYTES.
+func artifactAttachmentMaxBytes() int64 {
+	if v := strings.TrimSpace(os.Getenv("ARTIFACT_ATTACHMENT_MAX_BYTES")); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			return n
+		}
+	}
+	return int64(25 * 1024 * 1024)
+}
+
+// markdownLinkTargetRE captures the target of a Markdown link: the text inside
+// the parentheses of `](target)`, stopping at whitespace or the closing paren
+// (so an optional `"title"` is excluded).
+var markdownLinkTargetRE = regexp.MustCompile(`\]\(\s*<?([^)\s>]+)`)
+
+// bareAbsPathRE captures whitespace/bracket-delimited absolute paths that carry
+// a file extension (e.g. `/workspace/chart.png`).
+var bareAbsPathRE = regexp.MustCompile(`(/[^\s()\[\]<>"'` + "`" + `]+\.[A-Za-z0-9]{1,10})`)
+
+// extractCandidateAttachmentPaths pulls likely local file references out of the
+// final answer: Markdown link targets first (in order), then bare absolute
+// paths. Scheme URLs (http://, s3://, …) are ignored — those are real
+// hyperlinks, not local artifacts.
+func extractCandidateAttachmentPaths(response string) []string {
+	var candidates []string
+	add := func(s string) {
+		s = strings.Trim(strings.TrimSpace(s), "`'\"<>")
+		if s == "" || strings.Contains(s, "://") {
+			return
+		}
+		candidates = append(candidates, s)
+	}
+	for _, m := range markdownLinkTargetRE.FindAllStringSubmatch(response, -1) {
+		add(m[1])
+	}
+	for _, m := range bareAbsPathRE.FindAllString(response, -1) {
+		add(m)
+	}
+	return candidates
+}
+
+// resolveResultAttachmentCandidate cleans a candidate reference, resolves it to
+// an absolute path (relative references resolve against the workspace), and
+// verifies it lives under an allowed root. It returns the absolute path and
+// whether it is acceptable.
+func resolveResultAttachmentCandidate(raw, workspace string) (string, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", false
+	}
+	var abs string
+	if filepath.IsAbs(raw) {
+		abs = filepath.Clean(raw)
+	} else {
+		abs = filepath.Clean(filepath.Join(workspace, raw))
+	}
+	if !isAllowedResultAttachmentPath(abs, workspace) {
+		return "", false
+	}
+	return abs, true
+}
+
+// isAllowedResultAttachmentPath restricts attachable files to the workspace and
+// /tmp so a referenced path can never exfiltrate arbitrary container files.
+func isAllowedResultAttachmentPath(abs, workspace string) bool {
+	roots := []string{workspace, "/workspace", "/tmp"}
+	for _, root := range roots {
+		root = filepath.Clean(root)
+		if abs == root {
+			return true
+		}
+		if strings.HasPrefix(abs, root+string(os.PathSeparator)) {
+			return true
+		}
+	}
+	return false
+}
+
+// detectAttachmentMimeType resolves a MIME type from the file extension, falling
+// back to content sniffing.
+func detectAttachmentMimeType(path string, data []byte) string {
+	if ext := filepath.Ext(path); ext != "" {
+		if mt := mime.TypeByExtension(ext); mt != "" {
+			if i := strings.IndexByte(mt, ';'); i >= 0 {
+				mt = mt[:i]
+			}
+			return strings.TrimSpace(mt)
+		}
+	}
+	sniff := data
+	if len(sniff) > 512 {
+		sniff = sniff[:512]
+	}
+	return http.DetectContentType(sniff)
+}
+
+// resultAttachmentMaxBytes is the per-file cap, shared with the send-message
+// tooling via CHANNEL_ATTACHMENT_MAX_BYTES (default 768000).
+func resultAttachmentMaxBytes() int64 {
+	if v := strings.TrimSpace(os.Getenv("CHANNEL_ATTACHMENT_MAX_BYTES")); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			return n
+		}
+	}
+	return int64(750 * 1024)
+}
+
+// resultAttachmentTotalBase64Budget caps the cumulative base64 size of all
+// embedded attachments on a single completion event, keeping it comfortably
+// under the NATS/JetStream max message size (default ~1 MB). Configurable via
+// CHANNEL_ATTACHMENT_TOTAL_MAX_BYTES (measured in base64 bytes).
+func resultAttachmentTotalBase64Budget() int64 {
+	if v := strings.TrimSpace(os.Getenv("CHANNEL_ATTACHMENT_TOTAL_MAX_BYTES")); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			return n
+		}
+	}
+	return int64(900 * 1000)
 }
 
 func writeResult(res ipc.AgentResult) error {

@@ -14,13 +14,17 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -541,6 +545,10 @@ type slackAPIResponse struct {
 // is non-2xx, or Slack reports ok:false. Errors classified as benign
 // (passed via okErrors) are treated as success.
 func (sc *SlackChannel) callSlackAPI(ctx context.Context, endpoint string, payload interface{}, okErrors ...string) error {
+	return sc.callSlackAPIInto(ctx, endpoint, payload, nil, okErrors...)
+}
+
+func (sc *SlackChannel) callSlackAPIInto(ctx context.Context, endpoint string, payload interface{}, out interface{}, okErrors ...string) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal payload: %w", err)
@@ -568,6 +576,54 @@ func (sc *SlackChannel) callSlackAPI(ctx context.Context, endpoint string, paylo
 		return fmt.Errorf("decode slack response: %w (body=%q)", err, string(respBody))
 	}
 	if parsed.OK {
+		if out != nil {
+			if err := json.Unmarshal(respBody, out); err != nil {
+				return fmt.Errorf("decode slack response: %w (body=%q)", err, string(respBody))
+			}
+		}
+		return nil
+	}
+	for _, ok := range okErrors {
+		if parsed.Error == ok {
+			return nil
+		}
+	}
+	return fmt.Errorf("slack %s rejected request: %s", endpoint, parsed.Error)
+}
+
+// callSlackAPIFormInto performs an application/x-www-form-urlencoded POST to a
+// Slack Web API endpoint. Some file-upload methods — notably
+// files.getUploadURLExternal — do not accept a JSON body and reject the call
+// with "invalid_arguments" unless the parameters arrive as form values.
+func (sc *SlackChannel) callSlackAPIFormInto(ctx context.Context, endpoint string, form url.Values, out interface{}, okErrors ...string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+sc.BotToken)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := sc.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("http: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("slack %s returned HTTP %d: %s", endpoint, resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+
+	var parsed slackAPIResponse
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		return fmt.Errorf("decode slack response: %w (body=%q)", err, string(respBody))
+	}
+	if parsed.OK {
+		if out != nil {
+			if err := json.Unmarshal(respBody, out); err != nil {
+				return fmt.Errorf("decode slack response: %w (body=%q)", err, string(respBody))
+			}
+		}
 		return nil
 	}
 	for _, ok := range okErrors {
@@ -580,23 +636,281 @@ func (sc *SlackChannel) callSlackAPI(ctx context.Context, endpoint string, paylo
 
 // sendMessage sends a message via the Slack chat.postMessage API.
 func (sc *SlackChannel) sendMessage(ctx context.Context, msg channel.OutboundMessage) error {
+	threadTS := msg.ThreadID
+	if threadTS == "" && sc.cfg != nil && sc.cfg.threading {
+		threadTS = msg.Metadata["replyToTS"]
+	}
+	if hasEmbeddedSlackAttachments(msg.Attachments) {
+		return sc.uploadFileAttachments(ctx, msg, threadTS)
+	}
+
 	payload := map[string]interface{}{
 		"channel": msg.ChatID,
 		"text":    msg.Text,
+	}
+	if len(msg.Attachments) > 0 {
+		blocks, err := slackBlocksForMessage(msg)
+		if err != nil {
+			return err
+		}
+		payload["blocks"] = blocks
 	}
 	// Resolve the thread to post in:
 	//  1. Explicit ThreadID set by the controller (message originally
 	//     came from inside a thread) — always honoured.
 	//  2. If threading is enabled and the original message has a known
 	//     ts (replyToTS metadata), open a thread anchored at that ts.
-	threadTS := msg.ThreadID
-	if threadTS == "" && sc.cfg != nil && sc.cfg.threading {
-		threadTS = msg.Metadata["replyToTS"]
-	}
 	if threadTS != "" {
 		payload["thread_ts"] = threadTS
 	}
 	return sc.callSlackAPI(ctx, "https://slack.com/api/chat.postMessage", payload)
+}
+
+func hasEmbeddedSlackAttachments(attachments []channel.Attachment) bool {
+	for _, attachment := range attachments {
+		if attachment.ContentBase64 != "" || attachment.ArtifactID != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func (sc *SlackChannel) uploadFileAttachments(ctx context.Context, msg channel.OutboundMessage, threadTS string) error {
+	files := make([]map[string]string, 0, len(msg.Attachments))
+	var artifactIDs []string // best-effort cleanup after a successful send
+	for i, attachment := range msg.Attachments {
+		// Acquire the bytes. Prefer an artifact-server reference (bytes never
+		// rode the event bus); fall back to inline base64.
+		var (
+			data        []byte
+			fetchedMime string
+			fetchedName string
+			err         error
+		)
+		switch {
+		case attachment.ArtifactID != "":
+			data, fetchedMime, fetchedName, err = sc.fetchArtifact(ctx, attachment.ArtifactID)
+			if err != nil {
+				return fmt.Errorf("fetch artifact %q: %w", attachment.ArtifactID, err)
+			}
+			artifactIDs = append(artifactIDs, attachment.ArtifactID)
+		case attachment.ContentBase64 != "":
+			data, err = base64.StdEncoding.DecodeString(attachment.ContentBase64)
+			if err != nil {
+				return fmt.Errorf("decode slack attachment %d: %w", i, err)
+			}
+		default:
+			return fmt.Errorf("slack cannot mix URL and local file attachments in one message")
+		}
+		if len(data) == 0 {
+			return fmt.Errorf("slack attachment %d is empty", i)
+		}
+
+		filename := attachment.Filename
+		if filename == "" {
+			filename = fetchedName
+		}
+		if filename == "" {
+			filename = fmt.Sprintf("attachment-%d", i+1)
+		}
+		mimeType := attachment.MimeType
+		if mimeType == "" {
+			mimeType = fetchedMime
+		}
+		if mimeType == "" {
+			mimeType = http.DetectContentType(data)
+		}
+		isImage := attachment.Type == "image" || strings.HasPrefix(mimeType, "image/")
+
+		var uploadURLResp struct {
+			OK        bool   `json:"ok"`
+			Error     string `json:"error,omitempty"`
+			UploadURL string `json:"upload_url"`
+			FileID    string `json:"file_id"`
+		}
+		// files.getUploadURLExternal only accepts form-encoded arguments; a JSON
+		// body is rejected with "invalid_arguments".
+		form := url.Values{}
+		form.Set("filename", filename)
+		form.Set("length", strconv.Itoa(len(data)))
+		if isImage {
+			form.Set("alt_txt", filename)
+		}
+		if err := sc.callSlackAPIFormInto(ctx, "https://slack.com/api/files.getUploadURLExternal", form, &uploadURLResp); err != nil {
+			return err
+		}
+		if uploadURLResp.UploadURL == "" || uploadURLResp.FileID == "" {
+			return fmt.Errorf("slack files.getUploadURLExternal response missing upload_url or file_id")
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, uploadURLResp.UploadURL, bytes.NewReader(data))
+		if err != nil {
+			return fmt.Errorf("build slack file upload request: %w", err)
+		}
+		req.Header.Set("Content-Type", mimeType)
+		resp, err := sc.client.Do(req)
+		if err != nil {
+			return fmt.Errorf("upload slack file %q: %w", filename, err)
+		}
+		respBody, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return fmt.Errorf("slack file upload for %q returned HTTP %d: %s", filename, resp.StatusCode, strings.TrimSpace(string(respBody)))
+		}
+
+		files = append(files, map[string]string{
+			"id":    uploadURLResp.FileID,
+			"title": filename,
+		})
+	}
+
+	completePayload := map[string]interface{}{
+		"channel_id": msg.ChatID,
+		"files":      files,
+	}
+	if msg.Text != "" {
+		completePayload["initial_comment"] = msg.Text
+	}
+	if threadTS != "" {
+		completePayload["thread_ts"] = threadTS
+	}
+	if err := sc.callSlackAPI(ctx, "https://slack.com/api/files.completeUploadExternal", completePayload); err != nil {
+		return err
+	}
+
+	// The file is now delivered to Slack; drop the artifact-server copies.
+	// Best-effort: a failure here only leaves an artifact to be swept at TTL.
+	for _, id := range artifactIDs {
+		if err := sc.deleteArtifact(ctx, id); err != nil {
+			sc.log.V(1).Info("artifact cleanup failed", "id", id, "err", err.Error())
+		}
+	}
+	return nil
+}
+
+// artifactServerBaseURL returns the configured artifact-server base URL with
+// any trailing slash trimmed, or "" if unset.
+func artifactServerBaseURL() string {
+	return strings.TrimRight(strings.TrimSpace(os.Getenv("ARTIFACT_SERVER_URL")), "/")
+}
+
+// readServiceAccountToken reads the projected pod SA token used to authenticate
+// to the artifact-server. SA_TOKEN_PATH overrides the location (tests).
+func readServiceAccountToken() (string, error) {
+	path := os.Getenv("SA_TOKEN_PATH")
+	if path == "" {
+		path = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(b)), nil
+}
+
+// fetchArtifact downloads an artifact's bytes from the artifact-server by id,
+// authenticating with the channel pod's ServiceAccount token. It returns the
+// bytes plus the server-reported MIME type and filename.
+func (sc *SlackChannel) fetchArtifact(ctx context.Context, id string) (data []byte, mimeType, filename string, err error) {
+	base := artifactServerBaseURL()
+	if base == "" {
+		return nil, "", "", fmt.Errorf("ARTIFACT_SERVER_URL is not configured")
+	}
+	token, err := readServiceAccountToken()
+	if err != nil {
+		return nil, "", "", fmt.Errorf("read SA token: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/v1/artifacts/"+id, nil)
+	if err != nil {
+		return nil, "", "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := sc.client.Do(req)
+	if err != nil {
+		return nil, "", "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+		return nil, "", "", fmt.Errorf("artifact-server HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	data, err = io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, "", "", err
+	}
+	mimeType = resp.Header.Get("Content-Type")
+	if cd := resp.Header.Get("Content-Disposition"); cd != "" {
+		if _, params, perr := mime.ParseMediaType(cd); perr == nil {
+			filename = params["filename"]
+		}
+	}
+	return data, mimeType, filename, nil
+}
+
+// deleteArtifact removes an artifact from the artifact-server after it has been
+// delivered. Best-effort: callers log but do not fail on error.
+func (sc *SlackChannel) deleteArtifact(ctx context.Context, id string) error {
+	base := artifactServerBaseURL()
+	if base == "" {
+		return nil
+	}
+	token, err := readServiceAccountToken()
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, base+"/v1/artifacts/"+id, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := sc.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
+		return fmt.Errorf("artifact-server delete HTTP %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func slackBlocksForMessage(msg channel.OutboundMessage) ([]map[string]interface{}, error) {
+	blocks := make([]map[string]interface{}, 0, len(msg.Attachments)+1)
+	if strings.TrimSpace(msg.Text) != "" {
+		blocks = append(blocks, map[string]interface{}{
+			"type": "section",
+			"text": map[string]string{
+				"type": "mrkdwn",
+				"text": msg.Text,
+			},
+		})
+	}
+	for i, attachment := range msg.Attachments {
+		attachmentType := attachment.Type
+		if attachmentType == "" {
+			attachmentType = "image"
+		}
+		if attachmentType != "image" {
+			return nil, fmt.Errorf("slack attachment %d has unsupported type %q", i, attachment.Type)
+		}
+		if attachment.URL == "" {
+			return nil, fmt.Errorf("slack image attachment %d requires url", i)
+		}
+		if !strings.HasPrefix(attachment.URL, "https://") {
+			return nil, fmt.Errorf("slack image attachment %d url must start with https://", i)
+		}
+		altText := attachment.Filename
+		if altText == "" {
+			altText = "image"
+		}
+		blocks = append(blocks, map[string]interface{}{
+			"type":      "image",
+			"image_url": attachment.URL,
+			"alt_text":  altText,
+		})
+	}
+	return blocks, nil
 }
 
 // addReaction adds an emoji reaction to a message via the Slack

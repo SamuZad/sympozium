@@ -413,6 +413,55 @@ serviceMonitor:
   interval: 30s
   labels: {}
 
+# -- Central artifact server (filesystem-backed blob store).
+# Agent-produced files are uploaded here by reference (unguessable id) and
+# downloaded by channel pods for delivery, so bytes never travel over NATS.
+# Reads/deletes are authenticated (TokenReview) and authorized by convention:
+# owner agent SA, its sibling "<name>-channel" SA, an explicit reader
+# allowlist, or an admin SA.
+artifact:
+  # -- Master switch. Disables the Deployment, Service, PVC and RBAC.
+  # When disabled the harness falls back to inline base64 attachments.
+  enabled: true
+  image:
+    repository: ""  # defaults to {{ .Values.image.registry }}/artifact-server
+    tag: ""
+  replicaCount: 1
+  service:
+    type: ClusterIP
+    port: 8080
+  listen: ":8080"
+  # -- Where blobs + metadata live inside the pod (PVC mount).
+  dataDir: /data
+  # -- fsGroup applied to the pod so the root-owned PVC is chowned to a group
+  # the nonroot container user belongs to (65532 = distroless nonroot gid).
+  fsGroup: 65532
+  # -- Maximum accepted upload size in bytes (default 25 MiB).
+  maxBytes: 26214400
+  # -- How long artifacts live before the pruner removes them.
+  ttl: "24h"
+  # -- TokenReview cache. Short TTL bounds revoked-token blast radius.
+  tokenCache:
+    ttl: "60s"
+    size: 4096
+  # -- SAs (format "namespace/sa") always allowed to read any artifact,
+  # in addition to the owner + sibling-channel convention.
+  readerServiceAccounts: []
+  # -- SAs that may read/delete any artifact. Controller SA is added
+  # automatically by the chart.
+  adminServiceAccounts: []
+  # -- Persistent volume for blob storage.
+  persistence:
+    enabled: true
+    size: 10Gi
+    storageClass: ""
+    accessModes:
+      - ReadWriteOnce
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
 # -- Central memory server (PostgreSQL + pgvector backed).
 # Replaces per-Agent SQLite. Agents auth with their SA token (TokenReview).
 # Cross-namespace sharing is gated by Ensemble.membrane export/import rules.

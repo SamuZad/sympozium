@@ -35,17 +35,25 @@ type OutboundMessage struct {
 	Text            string            `json:"text"`
 	Format          string            `json:"format,omitempty"` // plain, markdown, html
 	ReplyTo         string            `json:"replyTo,omitempty"`
+	Attachments     []Attachment      `json:"attachments,omitempty"`
 	Reaction        string            `json:"reaction,omitempty"`        // emoji identifier (channel-specific format)
 	TargetMessageID string            `json:"targetMessageId,omitempty"` // inbound message id this reaction targets
 	Metadata        map[string]string `json:"metadata,omitempty"`        // channel-specific routing hints (e.g. Slack replyToTS)
 }
 
 // Attachment represents a file or media attachment.
+//
+// Delivery uses exactly one of, in preference order: ArtifactID (fetched from
+// the artifact-server at send time so bytes stay off the event bus),
+// ContentBase64 (small inline files), or URL (a public URL embedded directly).
 type Attachment struct {
-	Type     string `json:"type"` // image, file, audio, video
-	URL      string `json:"url,omitempty"`
-	Filename string `json:"filename,omitempty"`
-	MimeType string `json:"mimeType,omitempty"`
+	Type          string `json:"type"` // image, file, audio, video
+	URL           string `json:"url,omitempty"`
+	ArtifactID    string `json:"artifactId,omitempty"`
+	ContentBase64 string `json:"contentBase64,omitempty"`
+	Filename      string `json:"filename,omitempty"`
+	MimeType      string `json:"mimeType,omitempty"`
+	Size          int64  `json:"size,omitempty"`
 }
 
 // HealthStatus represents the connection health of a channel.

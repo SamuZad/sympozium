@@ -23,11 +23,18 @@ type ModelConfig struct {
 }
 
 // AgentResult is written to /ipc/output/result.json by the agent on completion.
+//
+// Attachments carry files the agent produced (e.g. a generated chart) so the
+// final auto-relayed reply can deliver them through the originating channel.
+// The IPC bridge forwards result.json verbatim over NATS, so embedded bytes
+// must stay within the event bus max message size; producers are responsible
+// for enforcing a conservative total budget before populating this field.
 type AgentResult struct {
-	Status   string `json:"status"` // "success" or "error"
-	Response string `json:"response,omitempty"`
-	Error    string `json:"error,omitempty"`
-	Metrics  struct {
+	Status      string       `json:"status"` // "success" or "error"
+	Response    string       `json:"response,omitempty"`
+	Error       string       `json:"error,omitempty"`
+	Attachments []Attachment `json:"attachments,omitempty"`
+	Metrics     struct {
 		DurationMs     int64 `json:"durationMs"`
 		InputTokens    int   `json:"inputTokens"`
 		OutputTokens   int   `json:"outputTokens"`
@@ -162,11 +169,31 @@ type ExecResult struct {
 // Field names align with channel.OutboundMessage so the bridge can relay the
 // JSON directly without remapping.
 type OutboundMessage struct {
-	Channel  string          `json:"channel"`          // "telegram", "whatsapp", etc.
-	ChatID   string          `json:"chatId,omitempty"` // Chat/group ID; empty = owner/self
-	Text     string          `json:"text"`
-	Format   string          `json:"format,omitempty"` // "plain", "markdown", "html"
-	Metadata json.RawMessage `json:"metadata,omitempty"`
+	Channel     string          `json:"channel"`          // "telegram", "whatsapp", etc.
+	ChatID      string          `json:"chatId,omitempty"` // Chat/group ID; empty = owner/self
+	ThreadID    string          `json:"threadId,omitempty"`
+	Text        string          `json:"text"`
+	Format      string          `json:"format,omitempty"` // "plain", "markdown", "html"
+	Attachments []Attachment    `json:"attachments,omitempty"`
+	Metadata    json.RawMessage `json:"metadata,omitempty"`
+}
+
+// Attachment represents an outbound file or media attachment.
+//
+// An attachment is delivered by exactly one of, in preference order:
+//   - ArtifactID: an id in the artifact-server. The bytes are fetched from the
+//     artifact-server at delivery time, so nothing large rides the event bus.
+//   - ContentBase64: bytes embedded inline. Only for small files, since the
+//     whole payload must fit under the event-bus max message size.
+//   - URL: a publicly reachable URL the channel embeds directly.
+type Attachment struct {
+	Type          string `json:"type"` // image, file, audio, video
+	URL           string `json:"url,omitempty"`
+	ArtifactID    string `json:"artifactId,omitempty"`
+	ContentBase64 string `json:"contentBase64,omitempty"`
+	Filename      string `json:"filename,omitempty"`
+	MimeType      string `json:"mimeType,omitempty"`
+	Size          int64  `json:"size,omitempty"`
 }
 
 // StatusUpdate is written to /ipc/output/status.json for agent status.

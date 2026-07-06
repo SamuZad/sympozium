@@ -11,11 +11,15 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -77,8 +81,12 @@ func cmdSendMessage(argv []string) int {
 	chatID := fs.String("chat-id", "", "Target chat/group ID. Empty = owner/self-chat.")
 	threadID := fs.String("thread-id", "", "Optional thread id (Slack thread_ts, Discord thread id).")
 	format := fs.String("format", "", "Optional format hint: plain | markdown | html")
+	var attachmentPaths repeatedStringFlag
+	var attachmentURLs repeatedStringFlag
+	fs.Var(&attachmentPaths, "attachment-path", "Local image path to attach. May be repeated. Must be under /workspace, /tmp, /skills, or /ipc.")
+	fs.Var(&attachmentURLs, "attachment-url", "Public https image URL to attach. May be repeated.")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, `Usage: sympozium-tool send-message --channel <name> --text "..." [--chat-id ID] [--thread-id ID] [--format plain|markdown|html]
+		fmt.Fprintln(os.Stderr, `Usage: sympozium-tool send-message --channel <name> --text "..." [--chat-id ID] [--thread-id ID] [--format plain|markdown|html] [--attachment-path /tmp/chart.png]
 
 Writes /ipc/messages/send-<ts>.json. The IPC bridge relays it to the channel pod.
 Fire-and-forget: exits 0 once the message file is written.`)
@@ -95,21 +103,133 @@ Fire-and-forget: exits 0 once the message file is written.`)
 		fmt.Fprintln(os.Stderr, "error: --text is required")
 		return 2
 	}
+	attachments, err := buildSendMessageAttachments(attachmentPaths, attachmentURLs)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 2
+	}
 
 	msg := struct {
-		Channel  string `json:"channel"`
-		ChatID   string `json:"chatId,omitempty"`
-		ThreadID string `json:"threadId,omitempty"`
-		Text     string `json:"text"`
-		Format   string `json:"format,omitempty"`
+		Channel     string                  `json:"channel"`
+		ChatID      string                  `json:"chatId,omitempty"`
+		ThreadID    string                  `json:"threadId,omitempty"`
+		Text        string                  `json:"text"`
+		Format      string                  `json:"format,omitempty"`
+		Attachments []sendMessageAttachment `json:"attachments,omitempty"`
 	}{
-		Channel:  *channel,
-		ChatID:   *chatID,
-		ThreadID: *threadID,
-		Text:     *text,
-		Format:   *format,
+		Channel:     *channel,
+		ChatID:      *chatID,
+		ThreadID:    *threadID,
+		Text:        *text,
+		Format:      *format,
+		Attachments: attachments,
 	}
 	return writeIPC("/ipc/messages", "send", msg, fmt.Sprintf("Message queued for %s channel", *channel))
+}
+
+type repeatedStringFlag []string
+
+func (f *repeatedStringFlag) String() string { return strings.Join(*f, ",") }
+
+func (f *repeatedStringFlag) Set(value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fmt.Errorf("value cannot be empty")
+	}
+	*f = append(*f, value)
+	return nil
+}
+
+type sendMessageAttachment struct {
+	Type          string `json:"type"`
+	URL           string `json:"url,omitempty"`
+	ContentBase64 string `json:"contentBase64,omitempty"`
+	Filename      string `json:"filename,omitempty"`
+	MimeType      string `json:"mimeType,omitempty"`
+}
+
+const (
+	defaultChannelAttachmentMaxBytes = int64(750 * 1024)
+	channelAttachmentMaxBytesEnv     = "CHANNEL_ATTACHMENT_MAX_BYTES"
+)
+
+func buildSendMessageAttachments(paths, urls []string) ([]sendMessageAttachment, error) {
+	if len(paths)+len(urls) > 10 {
+		return nil, fmt.Errorf("attachments supports at most 10 items")
+	}
+	attachments := make([]sendMessageAttachment, 0, len(paths)+len(urls))
+	for _, url := range urls {
+		if !strings.HasPrefix(url, "https://") {
+			return nil, fmt.Errorf("attachment URL must start with https://")
+		}
+		attachments = append(attachments, sendMessageAttachment{Type: "image", URL: url})
+	}
+	for i, path := range paths {
+		attachment, err := readSendMessageAttachmentFile(i, path)
+		if err != nil {
+			return nil, err
+		}
+		attachments = append(attachments, attachment)
+	}
+	return attachments, nil
+}
+
+func readSendMessageAttachmentFile(index int, path string) (sendMessageAttachment, error) {
+	cleanPath := filepath.Clean(path)
+	if !isAllowedSendMessageAttachmentPath(cleanPath) {
+		return sendMessageAttachment{}, fmt.Errorf("attachment %d path access denied; path must be under /workspace, /skills, /tmp, or /ipc", index)
+	}
+	maxBytes, err := configuredChannelAttachmentMaxBytes()
+	if err != nil {
+		return sendMessageAttachment{}, err
+	}
+	info, err := os.Stat(cleanPath)
+	if err != nil {
+		return sendMessageAttachment{}, fmt.Errorf("attachment %d path is not readable: %w", index, err)
+	}
+	if info.IsDir() {
+		return sendMessageAttachment{}, fmt.Errorf("attachment %d path is a directory", index)
+	}
+	if info.Size() == 0 {
+		return sendMessageAttachment{}, fmt.Errorf("attachment %d path is empty", index)
+	}
+	if info.Size() > maxBytes {
+		return sendMessageAttachment{}, fmt.Errorf("attachment %d is %d bytes; max is %d bytes", index, info.Size(), maxBytes)
+	}
+	data, err := os.ReadFile(cleanPath)
+	if err != nil {
+		return sendMessageAttachment{}, fmt.Errorf("attachment %d path is not readable: %w", index, err)
+	}
+	if int64(len(data)) > maxBytes {
+		return sendMessageAttachment{}, fmt.Errorf("attachment %d is %d bytes; max is %d bytes", index, len(data), maxBytes)
+	}
+	return sendMessageAttachment{
+		Type:          "image",
+		ContentBase64: base64.StdEncoding.EncodeToString(data),
+		Filename:      filepath.Base(cleanPath),
+		MimeType:      http.DetectContentType(data),
+	}, nil
+}
+
+func configuredChannelAttachmentMaxBytes() (int64, error) {
+	raw := strings.TrimSpace(os.Getenv(channelAttachmentMaxBytesEnv))
+	if raw == "" {
+		return defaultChannelAttachmentMaxBytes, nil
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || value <= 0 {
+		return 0, fmt.Errorf("%s must be a positive integer byte count", channelAttachmentMaxBytesEnv)
+	}
+	return value, nil
+}
+
+func isAllowedSendMessageAttachmentPath(path string) bool {
+	for _, prefix := range []string{"/workspace", "/skills", "/tmp", "/ipc"} {
+		if path == prefix || strings.HasPrefix(path, prefix+string(os.PathSeparator)) {
+			return true
+		}
+	}
+	return false
 }
 
 // --- schedule ---------------------------------------------------------------
@@ -214,11 +334,23 @@ Examples:
 		return 2
 	}
 
+	// Forward piped stdin (e.g. `... -- python - <<'PY' ... PY`) to the
+	// sidecar command. The heredoc is consumed by the harness shell and
+	// arrives here as this process's stdin; without forwarding it, `python -`
+	// (or any stdin-reading command) would run against empty input in the
+	// sidecar and silently do nothing.
+	stdinData, err := readExecStdin()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 2
+	}
+
 	id := fmt.Sprintf("%d", time.Now().UnixNano())
 	req := struct {
 		ID      string            `json:"id"`
 		Command string            `json:"command"`
 		Args    []string          `json:"args,omitempty"`
+		Stdin   string            `json:"stdin,omitempty"`
 		WorkDir string            `json:"workDir,omitempty"`
 		Timeout int               `json:"timeout,omitempty"`
 		Target  string            `json:"target,omitempty"`
@@ -227,6 +359,7 @@ Examples:
 		ID:      id,
 		Command: cmdAndArgs[0],
 		Args:    cmdAndArgs[1:],
+		Stdin:   stdinData,
 		WorkDir: *workdir,
 		Timeout: *timeout,
 		Target:  resolvedTarget,
@@ -296,6 +429,33 @@ Examples:
 	fmt.Fprintln(os.Stderr, "error: timed out waiting for sidecar response — is the named SkillPack sidecar attached?")
 	_ = os.Remove(reqPath)
 	return 124
+}
+
+// execStdinMaxBytes bounds forwarded stdin so a single exec request stays a
+// reasonable size on the /ipc/tools tmpfs and in the JSON payload.
+const execStdinMaxBytes = 1 << 20 // 1 MiB
+
+// readExecStdin returns piped stdin for an exec invocation. It returns "" when
+// stdin is a character device (an interactive terminal, or /dev/null as the
+// codex harness supplies when no heredoc is present) and errors if the input
+// exceeds execStdinMaxBytes. A heredoc/pipe/file is a non-char-device, so it is
+// read and forwarded verbatim.
+func readExecStdin() (string, error) {
+	fi, err := os.Stdin.Stat()
+	if err != nil {
+		return "", nil // no usable stdin; treat as empty
+	}
+	if fi.Mode()&os.ModeCharDevice != 0 {
+		return "", nil // terminal or /dev/null — nothing piped
+	}
+	buf, err := io.ReadAll(io.LimitReader(os.Stdin, execStdinMaxBytes+1))
+	if err != nil {
+		return "", fmt.Errorf("read stdin: %w", err)
+	}
+	if len(buf) > execStdinMaxBytes {
+		return "", fmt.Errorf("stdin exceeds %d bytes", execStdinMaxBytes)
+	}
+	return string(buf), nil
 }
 
 func resolveExecTarget(input, rawInventory string) (string, error) {

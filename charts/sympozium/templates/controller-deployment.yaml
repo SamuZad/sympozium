@@ -101,6 +101,13 @@ spec:
             - name: MEMORY_SERVER_URL
               value: {{ include "sympozium.memoryServerURL" . | quote }}
             {{- end }}
+            {{- if .Values.artifact.enabled }}
+            # In-cluster URL of the central artifact-server. The controller
+            # injects this onto agent and channel pods so files travel by
+            # reference (id) over the event bus instead of as bytes.
+            - name: ARTIFACT_SERVER_URL
+              value: {{ include "sympozium.artifactServerURL" . | quote }}
+            {{- end }}
           ports:
             - containerPort: 8081
               name: health

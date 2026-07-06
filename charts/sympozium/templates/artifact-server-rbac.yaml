@@ -1,0 +1,47 @@
+{{- if and .Values.artifact.enabled .Values.rbac.create }}
+{{- $fullname := include "sympozium.fullname" . }}
+{{- $ns := include "sympozium.namespace" . }}
+# artifact-server ServiceAccount + RBAC.
+#
+# The artifact-server validates caller SA bearer tokens via TokenReview and
+# authorizes reads/deletes purely from the caller's SA name (owner agent SA,
+# its sibling "<name>-channel" SA, an explicit allowlist, or an admin SA).
+# It reads no CRDs, so the only cluster permission it needs is the ability to
+# create TokenReviews.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $fullname }}-artifact-server
+  namespace: {{ $ns }}
+  labels:
+    {{- include "sympozium.labels" . | nindent 4 }}
+    app.kubernetes.io/component: artifact-server
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $fullname }}-artifact-server
+  labels:
+    {{- include "sympozium.labels" . | nindent 4 }}
+    app.kubernetes.io/component: artifact-server
+rules:
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $fullname }}-artifact-server
+  labels:
+    {{- include "sympozium.labels" . | nindent 4 }}
+    app.kubernetes.io/component: artifact-server
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $fullname }}-artifact-server
+subjects:
+  - kind: ServiceAccount
+    name: {{ $fullname }}-artifact-server
+    namespace: {{ $ns }}
+{{- end }}

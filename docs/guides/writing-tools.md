@@ -513,13 +513,51 @@ Security-restricted to paths under `/workspace`, `/skills`, `/tmp`, and `/ipc`.
 | | |
 |--|--|
 | **Category** | IPC (bridge) |
-| **Parameters** | `channel` (required: `whatsapp`, `telegram`, `discord`, `slack`), `text` (required), `chatId` (optional) |
+| **Parameters** | `channel` (required: `whatsapp`, `telegram`, `discord`, `slack`), `text` (required), `chatId` (optional), `threadId` (optional), `attachments` (optional) |
 | **Requires** | IPC bridge + channel pod connected to the target channel |
 | **Returns** | Confirmation string |
 
 Writes an `OutboundMessage` to `/ipc/messages/send-<id>.json`. The IPC bridge relays it to NATS topic `channel.message.send`. The corresponding channel pod picks it up and delivers it.
 
 If `chatId` is empty, the message goes to the device owner (self-chat for WhatsApp, DM for others).
+
+Slack supports image attachments from a local agent-pod file path or a public `https://` URL. Local files are read by the agent runner or `sympozium-tool`, embedded in the outbound IPC message, and uploaded by the Slack channel pod through Slack's external file upload API. Keep local files reasonably small; attachments default to a 768000-byte cap to avoid oversized event-bus payloads. Set `CHANNEL_ATTACHMENT_MAX_BYTES` on the Agent/AgentRun to adjust it.
+
+The Codex harness additionally delivers files **automatically** on the final answer: any local path the final message references (as a Markdown link or a bare absolute path under the workspace or `/tmp`) that exists and fits the size budget is embedded into the auto-relayed reply and uploaded by the channel pod. This is deterministic and does not require the agent to call `send-message` explicitly. The cumulative base64 size is bounded by `CHANNEL_ATTACHMENT_TOTAL_MAX_BYTES` so a large artifact can never exceed the event-bus message limit; anything over budget is skipped and the text reply is still delivered.
+
+### Large files: the artifact-server (reference-by-id)
+
+When `ARTIFACT_SERVER_URL` is set (the Helm chart sets it whenever `artifact.enabled=true`), the auto-attach path switches from inline base64 to **reference-by-id**, so bytes never travel over NATS:
+
+1. The harness uploads each referenced file to the central `artifact-server` over authenticated HTTP (`POST /v1/artifacts`, using the agent pod's ServiceAccount token) and receives an unguessable id.
+2. Only the tiny reference (`artifactId`, `filename`, `mimeType`, `size`) rides the completion event through NATS to the channel pod.
+3. The channel pod downloads the bytes by id (`GET /v1/artifacts/{id}`, authenticated with its own ServiceAccount token), uploads them to Slack, and best-effort deletes the artifact afterward.
+
+This raises the practical attachment ceiling to `ARTIFACT_MAX_BYTES` (default 25 MiB) without inflating the event bus. Reads and deletes are guarded by three gates: a valid TokenReview (else `401`), an unguessable 128-bit id (else `404`, so existence is never disclosed), and convention-based authorization (else `403`) — the owning agent (`<name>-agent`), its sibling channel pod (`<name>-channel`), an explicit reader allowlist, or an admin ServiceAccount. Artifacts expire after `ARTIFACT_TTL` (default 24h) via a background pruner. When `ARTIFACT_SERVER_URL` is unset the harness transparently falls back to inline base64 within `CHANNEL_ATTACHMENT_TOTAL_MAX_BYTES`.
+
+```json
+{
+    "channel": "slack",
+    "chatId": "C123456",
+    "text": "Chart attached",
+    "attachments": [
+        {
+            "type": "image",
+            "path": "/tmp/chart.png",
+            "filename": "chart.png",
+            "mimeType": "image/png"
+        }
+    ]
+}
+```
+
+Use `url` instead of `path` when the image is already publicly reachable over HTTPS.
+
+Codex harnesses use the shell wrapper:
+
+```bash
+sympozium-tool send-message --channel slack --text "Chart attached" --attachment-path /tmp/chart.png
+```
 
 ### `fetch_url`
 

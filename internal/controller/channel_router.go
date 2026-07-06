@@ -352,9 +352,10 @@ func (cr *ChannelRouter) handleInbound(ctx context.Context, event *eventbus.Even
 
 // agentResult matches the result structure emitted by the agent-runner.
 type agentResult struct {
-	Status   string `json:"status"`
-	Response string `json:"response,omitempty"`
-	Error    string `json:"error,omitempty"`
+	Status      string                  `json:"status"`
+	Response    string                  `json:"response,omitempty"`
+	Error       string                  `json:"error,omitempty"`
+	Attachments []channelpkg.Attachment `json:"attachments,omitempty"`
 }
 
 // handleCompleted processes a completed AgentRun and routes the response
@@ -434,12 +435,15 @@ func (cr *ChannelRouter) handleCompleted(ctx context.Context, event *eventbus.Ev
 		responseText = "(no response)"
 	}
 
-	// Publish outbound message to the channel.
+	// Publish outbound message to the channel. Attachments (e.g. a chart the
+	// agent generated) ride along so the auto-relayed reply can deliver files,
+	// not just text.
 	outMsg := channelpkg.OutboundMessage{
-		Channel:  replyChannel,
-		ChatID:   replyChatID,
-		ThreadID: replyThreadID,
-		Text:     responseText,
+		Channel:     replyChannel,
+		ChatID:      replyChatID,
+		ThreadID:    replyThreadID,
+		Text:        responseText,
+		Attachments: result.Attachments,
 	}
 	if replyMessageTS != "" {
 		outMsg.Metadata = map[string]string{"replyToTS": replyMessageTS}

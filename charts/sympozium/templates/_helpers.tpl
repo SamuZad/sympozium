@@ -165,6 +165,23 @@ MEMORY_SERVER_URL on agent pods.
 {{- end }}
 
 {{/*
+Artifact server image.
+*/}}
+{{- define "sympozium.artifactServerImage" -}}
+{{- $repo := .Values.artifact.image.repository | default (printf "%s/artifact-server" .Values.image.registry) }}
+{{- $tag := .Values.artifact.image.tag | default (include "sympozium.imageTag" .) }}
+{{- printf "%s:%s" $repo $tag }}
+{{- end }}
+
+{{/*
+Artifact server in-cluster URL — used by the controller to set
+ARTIFACT_SERVER_URL on agent and channel pods.
+*/}}
+{{- define "sympozium.artifactServerURL" -}}
+{{- printf "http://%s-artifact-server.%s.svc:%d" (include "sympozium.fullname" .) (include "sympozium.namespace" .) (int .Values.artifact.service.port) }}
+{{- end }}
+
+{{/*
 Bundled Postgres connection string. Only used when memory.postgres.enabled
 AND no database.url / database.urlSecret is set.
 */}}

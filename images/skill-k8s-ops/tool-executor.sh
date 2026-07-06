@@ -25,9 +25,17 @@ process_request() {
     local result_file="$TOOLS_DIR/exec-result-${id}.json"
 
     # Parse the JSON request using jq.
-    local command args workdir timeout_sec
+    local command workdir timeout_sec
     command=$(jq -r '.command // ""' "$req_file" 2>/dev/null) || return
-    args=$(jq -r '(.args // []) | join(" ")' "$req_file" 2>/dev/null) || return
+    # Read args into an array, preserving each element verbatim via a
+    # NUL-delimited stream so argument boundaries survive. This keeps a
+    # `bash -lc '<script>'` request intact as a single script argument
+    # instead of flattening + re-splitting it (which silently swallowed the
+    # first word after the script, e.g. turning `which psql` into `which`).
+    local -a args_arr=()
+    while IFS= read -r -d '' _arg; do
+        args_arr+=("$_arg")
+    done < <(jq -j '(.args // [])[] | (. + "\u0000")' "$req_file" 2>/dev/null)
     workdir=$(jq -r '.workDir // "/workspace"' "$req_file" 2>/dev/null) || return
     timeout_sec=$(jq -r '.timeout // 30' "$req_file" 2>/dev/null) || return
 
@@ -36,22 +44,34 @@ process_request() {
     if [[ "$timeout_sec" -gt 120 ]]; then timeout_sec=120; fi
 
     # Build the full command. If args are provided, append them.
-    local full_cmd="$command"
-    if [[ -n "$args" ]]; then
-        full_cmd="$command $args"
+    # Assemble argv. With args present, run the command directly with its
+    # arguments (no extra shell) so quoting/boundaries are preserved. With no
+    # args, fall back to `bash -c` on the bare command string so single-string
+    # commands using shell operators (pipes, redirects) keep working.
+    local -a run_argv
+    if [[ ${#args_arr[@]} -gt 0 ]]; then
+        run_argv=("$command" "${args_arr[@]}")
+    else
+        run_argv=(bash -c "$command")
     fi
 
-    echo "[tool-executor] exec [$id]: $full_cmd (timeout=${timeout_sec}s, workdir=${workdir})"
+    echo "[tool-executor] exec [$id]: $command ${args_arr[*]} (timeout=${timeout_sec}s, workdir=${workdir})"
 
     # Execute the command, capturing stdout/stderr and exit code.
     local stdout="" stderr="" exit_code=0 timed_out="false"
-    local tmp_stdout tmp_stderr
+    local tmp_stdout tmp_stderr tmp_stdin
     tmp_stdout=$(mktemp)
     tmp_stderr=$(mktemp)
+    # Materialize forwarded stdin verbatim (jq -j adds no trailing newline).
+    # An absent/empty `stdin` field yields an empty file — immediate EOF, i.e.
+    # unchanged behavior for commands that don't read stdin. This is what lets
+    # `... -- python - <<'PY' ... PY` work when dispatched into the sidecar.
+    tmp_stdin=$(mktemp)
+    jq -j '.stdin // ""' "$req_file" > "$tmp_stdin" 2>/dev/null || true
 
     cd "$workdir" 2>/dev/null || cd /
 
-    if timeout "$timeout_sec" bash -c "$full_cmd" >"$tmp_stdout" 2>"$tmp_stderr"; then
+    if timeout "$timeout_sec" "${run_argv[@]}" <"$tmp_stdin" >"$tmp_stdout" 2>"$tmp_stderr"; then
         exit_code=0
     else
         exit_code=$?
@@ -63,7 +83,7 @@ process_request() {
 
     stdout=$(cat "$tmp_stdout")
     stderr=$(cat "$tmp_stderr")
-    rm -f "$tmp_stdout" "$tmp_stderr"
+    rm -f "$tmp_stdout" "$tmp_stderr" "$tmp_stdin"
 
     # Truncate output if too large (50KB limit per field).
     if [[ ${#stdout} -gt 51200 ]]; then

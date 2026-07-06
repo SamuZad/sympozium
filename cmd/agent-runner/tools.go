@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -119,7 +121,8 @@ func defaultTools() []ToolDef {
 			Description: "Send a message to the user via a connected channel (e.g. WhatsApp, Telegram, Discord, Slack). " +
 				"Use this when the user asks you to notify them, send a summary, or deliver any text outside of the task result. " +
 				"If no chatId is provided the message is sent to the device owner (self-chat). " +
-				"Optionally pass threadId to post into a specific thread (Slack thread_ts, Discord thread id, etc.).",
+				"Optionally pass threadId to post into a specific thread (Slack thread_ts, Discord thread id, etc.). " +
+				"Slack supports image attachments via a public https URL or a local path under /workspace, /tmp, /skills, or /ipc.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -139,6 +142,36 @@ func defaultTools() []ToolDef {
 					"threadId": map[string]any{
 						"type":        "string",
 						"description": "Optional thread identifier to reply within an existing thread (Slack thread_ts, Discord thread id). Omit to post at the channel root.",
+					},
+					"attachments": map[string]any{
+						"type":        "array",
+						"description": "Optional media attachments. Slack supports image attachments from either a public https URL or a local file path.",
+						"items": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"type": map[string]any{
+									"type":        "string",
+									"description": "Attachment type. Use image for Slack image attachments.",
+									"enum":        []string{"image"},
+								},
+								"url": map[string]any{
+									"type":        "string",
+									"description": "Public https URL for the image. Use either url or path, not both.",
+								},
+								"path": map[string]any{
+									"type":        "string",
+									"description": "Local image path in the agent pod. Must be under /workspace, /tmp, /skills, or /ipc. Use either path or url, not both.",
+								},
+								"filename": map[string]any{
+									"type":        "string",
+									"description": "Optional display name or alt text for the image.",
+								},
+								"mimeType": map[string]any{
+									"type":        "string",
+									"description": "Optional MIME type hint, e.g. image/png.",
+								},
+							},
+						},
 					},
 				},
 				"required": []string{"channel", "text"},
@@ -411,6 +444,10 @@ func sendChannelMessageTool(args map[string]any) string {
 	text, _ := args["text"].(string)
 	chatID, _ := args["chatId"].(string)
 	threadID, _ := args["threadId"].(string)
+	attachments, attachmentsErr := parseChannelAttachments(args["attachments"])
+	if attachmentsErr != "" {
+		return attachmentsErr
+	}
 
 	if channel == "" {
 		return "Error: 'channel' is required (whatsapp, telegram, discord, slack)"
@@ -420,15 +457,17 @@ func sendChannelMessageTool(args map[string]any) string {
 	}
 
 	msg := struct {
-		Channel  string `json:"channel"`
-		ChatID   string `json:"chatId,omitempty"`
-		ThreadID string `json:"threadId,omitempty"`
-		Text     string `json:"text"`
+		Channel     string              `json:"channel"`
+		ChatID      string              `json:"chatId,omitempty"`
+		ThreadID    string              `json:"threadId,omitempty"`
+		Text        string              `json:"text"`
+		Attachments []channelAttachment `json:"attachments,omitempty"`
 	}{
-		Channel:  channel,
-		ChatID:   chatID,
-		ThreadID: threadID,
-		Text:     text,
+		Channel:     channel,
+		ChatID:      chatID,
+		ThreadID:    threadID,
+		Text:        text,
+		Attachments: attachments,
 	}
 
 	data, err := json.Marshal(msg)
@@ -445,15 +484,149 @@ func sendChannelMessageTool(args map[string]any) string {
 		return fmt.Sprintf("Error writing message file: %v", err)
 	}
 
-	log.Printf("Wrote channel message: channel=%s chatId=%s threadId=%s len=%d", channel, chatID, threadID, len(text))
+	log.Printf("Wrote channel message: channel=%s chatId=%s threadId=%s len=%d attachments=%d", channel, chatID, threadID, len(text), len(attachments))
 	target := chatID
 	if target == "" {
 		target = "owner (self)"
 	}
-	if threadID != "" {
-		return fmt.Sprintf("Message sent to %s channel (target: %s, thread: %s)", channel, target, threadID)
+	attachmentSuffix := ""
+	if len(attachments) > 0 {
+		attachmentSuffix = fmt.Sprintf(", attachments: %d", len(attachments))
 	}
-	return fmt.Sprintf("Message sent to %s channel (target: %s)", channel, target)
+	if threadID != "" {
+		return fmt.Sprintf("Message sent to %s channel (target: %s, thread: %s%s)", channel, target, threadID, attachmentSuffix)
+	}
+	return fmt.Sprintf("Message sent to %s channel (target: %s%s)", channel, target, attachmentSuffix)
+}
+
+type channelAttachment struct {
+	Type          string `json:"type"`
+	URL           string `json:"url,omitempty"`
+	ContentBase64 string `json:"contentBase64,omitempty"`
+	Filename      string `json:"filename,omitempty"`
+	MimeType      string `json:"mimeType,omitempty"`
+}
+
+const (
+	defaultChannelAttachmentMaxBytes = int64(750 * 1024)
+	channelAttachmentMaxBytesEnv     = "CHANNEL_ATTACHMENT_MAX_BYTES"
+)
+
+func parseChannelAttachments(raw any) ([]channelAttachment, string) {
+	if raw == nil {
+		return nil, ""
+	}
+	items, ok := raw.([]any)
+	if !ok {
+		return nil, "Error: 'attachments' must be an array"
+	}
+	if len(items) > 10 {
+		return nil, "Error: 'attachments' supports at most 10 items"
+	}
+	attachments := make([]channelAttachment, 0, len(items))
+	for i, item := range items {
+		obj, ok := item.(map[string]any)
+		if !ok {
+			return nil, fmt.Sprintf("Error: attachment %d must be an object", i)
+		}
+		attachmentType, _ := obj["type"].(string)
+		if attachmentType == "" {
+			attachmentType = "image"
+		}
+		url, _ := obj["url"].(string)
+		path, _ := obj["path"].(string)
+		if url == "" && path == "" {
+			return nil, fmt.Sprintf("Error: attachment %d requires either 'url' or 'path'", i)
+		}
+		if url != "" && path != "" {
+			return nil, fmt.Sprintf("Error: attachment %d must use either 'url' or 'path', not both", i)
+		}
+		filename, _ := obj["filename"].(string)
+		mimeType, _ := obj["mimeType"].(string)
+		if !strings.HasPrefix(url, "https://") {
+			if url != "" {
+				return nil, fmt.Sprintf("Error: attachment %d url must start with https://", i)
+			}
+		} else {
+			attachments = append(attachments, channelAttachment{
+				Type:     attachmentType,
+				URL:      url,
+				Filename: filename,
+				MimeType: mimeType,
+			})
+			continue
+		}
+		attachment, errText := readChannelAttachmentFile(i, path, attachmentType, filename, mimeType)
+		if errText != "" {
+			return nil, errText
+		}
+		attachments = append(attachments, attachment)
+	}
+	return attachments, ""
+}
+
+func readChannelAttachmentFile(index int, path, attachmentType, filename, mimeType string) (channelAttachment, string) {
+	cleanPath := filepath.Clean(path)
+	if !isAllowedChannelAttachmentPath(cleanPath) {
+		return channelAttachment{}, fmt.Sprintf("Error: attachment %d path access denied — path must be under /workspace, /skills, /tmp, or /ipc", index)
+	}
+	maxBytes, errText := configuredChannelAttachmentMaxBytes()
+	if errText != "" {
+		return channelAttachment{}, errText
+	}
+	info, err := os.Stat(cleanPath)
+	if err != nil {
+		return channelAttachment{}, fmt.Sprintf("Error: attachment %d path is not readable: %v", index, err)
+	}
+	if info.IsDir() {
+		return channelAttachment{}, fmt.Sprintf("Error: attachment %d path is a directory", index)
+	}
+	if info.Size() == 0 {
+		return channelAttachment{}, fmt.Sprintf("Error: attachment %d path is empty", index)
+	}
+	if info.Size() > maxBytes {
+		return channelAttachment{}, fmt.Sprintf("Error: attachment %d is %d bytes; max is %d bytes", index, info.Size(), maxBytes)
+	}
+	data, err := os.ReadFile(cleanPath)
+	if err != nil {
+		return channelAttachment{}, fmt.Sprintf("Error: attachment %d path is not readable: %v", index, err)
+	}
+	if int64(len(data)) > maxBytes {
+		return channelAttachment{}, fmt.Sprintf("Error: attachment %d is %d bytes; max is %d bytes", index, len(data), maxBytes)
+	}
+	if filename == "" {
+		filename = filepath.Base(cleanPath)
+	}
+	if mimeType == "" {
+		mimeType = http.DetectContentType(data)
+	}
+	return channelAttachment{
+		Type:          attachmentType,
+		ContentBase64: base64.StdEncoding.EncodeToString(data),
+		Filename:      filename,
+		MimeType:      mimeType,
+	}, ""
+}
+
+func configuredChannelAttachmentMaxBytes() (int64, string) {
+	raw := strings.TrimSpace(os.Getenv(channelAttachmentMaxBytesEnv))
+	if raw == "" {
+		return defaultChannelAttachmentMaxBytes, ""
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || value <= 0 {
+		return 0, fmt.Sprintf("Error: %s must be a positive integer byte count", channelAttachmentMaxBytesEnv)
+	}
+	return value, ""
+}
+
+func isAllowedChannelAttachmentPath(path string) bool {
+	for _, prefix := range []string{"/workspace", "/skills", "/tmp", "/ipc"} {
+		if path == prefix || strings.HasPrefix(path, prefix+string(os.PathSeparator)) {
+			return true
+		}
+	}
+	return false
 }
 
 // --- Delegate to persona tool (IPC-based) ---

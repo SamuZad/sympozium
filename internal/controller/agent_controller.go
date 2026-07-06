@@ -43,6 +43,11 @@ type AgentReconciler struct {
 	Scheme   *runtime.Scheme
 	Log      logr.Logger
 	ImageTag string // release tag for Sympozium images
+
+	// ArtifactServerURL is the base URL of the central artifact-server.
+	// When set, it is injected into channel pods so they can download
+	// agent-produced files by reference for delivery. Empty disables it.
+	ArtifactServerURL string
 }
 
 // +kubebuilder:rbac:groups=sympozium.ai,resources=agents,verbs=get;list;watch;create;update;patch;delete
@@ -298,6 +303,13 @@ func (r *AgentReconciler) buildChannelDeployment(
 				},
 			},
 		},
+	}
+
+	// Inject the artifact-server URL so the channel pod can download
+	// agent-produced files by reference and deliver them.
+	if r.ArtifactServerURL != "" {
+		c := &deploy.Spec.Template.Spec.Containers[0]
+		c.Env = append(c.Env, corev1.EnvVar{Name: "ARTIFACT_SERVER_URL", Value: r.ArtifactServerURL})
 	}
 
 	// Inject channel credentials from secret (if referenced)

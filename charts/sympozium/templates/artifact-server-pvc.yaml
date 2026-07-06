@@ -1,0 +1,21 @@
+{{- if and .Values.artifact.enabled .Values.artifact.persistence.enabled }}
+{{- $fullname := include "sympozium.fullname" . }}
+{{- $ns := include "sympozium.namespace" . }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $fullname }}-artifact-server
+  namespace: {{ $ns }}
+  labels:
+    {{- include "sympozium.labels" . | nindent 4 }}
+    app.kubernetes.io/component: artifact-server
+spec:
+  accessModes:
+    {{- toYaml .Values.artifact.persistence.accessModes | nindent 4 }}
+  resources:
+    requests:
+      storage: {{ .Values.artifact.persistence.size }}
+  {{- if .Values.artifact.persistence.storageClass }}
+  storageClassName: {{ .Values.artifact.persistence.storageClass | quote }}
+  {{- end }}
+{{- end }}
