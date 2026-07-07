@@ -361,6 +361,73 @@ func TestCallOpenAI_SamplingParamsInRequest(t *testing.T) {
 	}
 }
 
+// TestCallOpenAI_ReasoningEffortUnsupportedRetries asserts that when the
+// backend rejects reasoning_effort on /v1/chat/completions (as gpt-5.5 does
+// when it's combined with function tools), the provider transparently retries
+// without the field and the run still succeeds.
+func TestCallOpenAI_ReasoningEffortUnsupportedRetries(t *testing.T) {
+	var (
+		calls          int
+		sawReasoningOn []bool
+	)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		_, hasReasoning := body["reasoning_effort"]
+		sawReasoningOn = append(sawReasoningOn, hasReasoning)
+		calls++
+
+		if hasReasoning {
+			// Mirror the real gpt-5.5 error shape.
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]any{
+					"message": "Function tools with reasoning_effort are not supported for gpt-5.5 in /v1/chat/completions. Please use /v1/responses instead.",
+					"type":    "invalid_request_error",
+					"param":   "reasoning_effort",
+				},
+			})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"id":      "chatcmpl-x",
+			"object":  "chat.completion",
+			"created": 1,
+			"model":   "gpt-5.5",
+			"choices": []map[string]any{{
+				"index":         0,
+				"message":       map[string]string{"role": "assistant", "content": "done"},
+				"finish_reason": "stop",
+			}},
+			"usage": map[string]int{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+		})
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	t.Setenv("THINKING_MODE", "high")
+
+	tools := []ToolDef{{Name: "noop", Description: "no-op", Parameters: map[string]any{"type": "object"}}}
+	out, _, _, _, err := callOpenAI(t.Context(), "openai", "k", srv.URL, "gpt-5.5", "sys", "task", tools, nil)
+	if err != nil {
+		t.Fatalf("callOpenAI: %v", err)
+	}
+	if out != "done" {
+		t.Errorf("output = %q, want %q", out, "done")
+	}
+	if calls != 2 {
+		t.Fatalf("expected exactly 2 requests (rejected + retry), got %d", calls)
+	}
+	if !sawReasoningOn[0] {
+		t.Errorf("first request should have included reasoning_effort")
+	}
+	if sawReasoningOn[1] {
+		t.Errorf("retry should have omitted reasoning_effort")
+	}
+}
+
 // TestCallOpenAI_SamplingParamsOmittedWhenUnset asserts that the request
 // body contains no sampling fields when the env vars are absent, so the
 // provider's model-side defaults remain in effect.

@@ -29,6 +29,13 @@ type openaiProvider struct {
 	temperature     float64                // NaN = use provider default
 	messages        []openai.ChatCompletionMessageParamUnion
 	tools           []openai.ChatCompletionToolUnionParam
+
+	// reasoningEffortUnsupported latches true once the backend rejects
+	// reasoning_effort for this model on /v1/chat/completions (e.g. gpt-5.5,
+	// which only accepts reasoning_effort alongside function tools via
+	// /v1/responses). Subsequent turns then omit the field instead of
+	// re-triggering the same 400.
+	reasoningEffortUnsupported bool
 }
 
 // openaiReasoningEffort translates the Sympozium THINKING_MODE env var (off/low/
@@ -121,29 +128,19 @@ func (p *openaiProvider) Name() string  { return p.provider }
 func (p *openaiProvider) Model() string { return p.model }
 
 func (p *openaiProvider) Chat(ctx context.Context) (ChatResult, error) {
-	params := openai.ChatCompletionNewParams{
-		Model:    openai.ChatModel(p.model),
-		Messages: p.messages,
+	completion, err := p.client.Chat.Completions.New(ctx, p.buildParams())
+	if err != nil {
+		// gpt-5.5 (and peers) reject reasoning_effort alongside function
+		// tools on /v1/chat/completions, pointing callers at /v1/responses.
+		// We can't switch wire formats mid-flight, but reasoning_effort is a
+		// best-effort hint — drop it, latch the decision so later turns skip
+		// it too, and retry once so the run still completes.
+		if !p.reasoningEffortUnsupported && p.reasoningEffort != "" && isReasoningEffortUnsupportedErr(err) {
+			log.Printf("openai.Chat: model %q rejected reasoning_effort on /v1/chat/completions; retrying without it", p.model)
+			p.reasoningEffortUnsupported = true
+			completion, err = p.client.Chat.Completions.New(ctx, p.buildParams())
+		}
 	}
-	if len(p.tools) > 0 {
-		params.Tools = p.tools
-	}
-	if p.reasoningEffort != "" {
-		params.ReasoningEffort = p.reasoningEffort
-	}
-	if p.maxTokens > 0 {
-		// max_completion_tokens is the modern field (required by
-		// o-series/gpt-5); max_tokens is the legacy field still honored
-		// by most OpenAI-compatible local backends (Ollama, LM Studio,
-		// vLLM). Setting both keeps cloud and local providers happy.
-		params.MaxCompletionTokens = openai.Int(p.maxTokens)
-		params.MaxTokens = openai.Int(p.maxTokens)
-	}
-	if !math.IsNaN(p.temperature) {
-		params.Temperature = openai.Float(p.temperature)
-	}
-
-	completion, err := p.client.Chat.Completions.New(ctx, params)
 	if err != nil {
 		var apiErr *openai.Error
 		if errors.As(err, &apiErr) {
@@ -232,6 +229,50 @@ func (p *openaiProvider) Chat(ctx context.Context) (ChatResult, error) {
 	}
 
 	return result, nil
+}
+
+// buildParams assembles the chat-completion request from the provider's
+// current state. reasoning_effort is omitted once reasoningEffortUnsupported
+// latches (see Chat) so a model that rejects it never sees it again.
+func (p *openaiProvider) buildParams() openai.ChatCompletionNewParams {
+	params := openai.ChatCompletionNewParams{
+		Model:    openai.ChatModel(p.model),
+		Messages: p.messages,
+	}
+	if len(p.tools) > 0 {
+		params.Tools = p.tools
+	}
+	if p.reasoningEffort != "" && !p.reasoningEffortUnsupported {
+		params.ReasoningEffort = p.reasoningEffort
+	}
+	if p.maxTokens > 0 {
+		// max_completion_tokens is the modern field (required by
+		// o-series/gpt-5); max_tokens is the legacy field still honored
+		// by most OpenAI-compatible local backends (Ollama, LM Studio,
+		// vLLM). Setting both keeps cloud and local providers happy.
+		params.MaxCompletionTokens = openai.Int(p.maxTokens)
+		params.MaxTokens = openai.Int(p.maxTokens)
+	}
+	if !math.IsNaN(p.temperature) {
+		params.Temperature = openai.Float(p.temperature)
+	}
+	return params
+}
+
+// isReasoningEffortUnsupportedErr reports whether an OpenAI API error is the
+// "reasoning_effort not supported on /v1/chat/completions" 400 that newer
+// models (e.g. gpt-5.5) raise when reasoning_effort is combined with function
+// tools. Matching is defensive: it keys off the 400 status and the offending
+// parameter/message text rather than a specific model name, so it keeps
+// working as new models inherit the same constraint.
+func isReasoningEffortUnsupportedErr(err error) bool {
+	var apiErr *openai.Error
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != 400 {
+		return false
+	}
+	msg := strings.ToLower(apiErr.Error())
+	return strings.Contains(msg, "reasoning_effort") &&
+		(strings.Contains(msg, "not supported") || strings.Contains(msg, "/v1/responses"))
 }
 
 func (p *openaiProvider) AddToolResults(results []ToolResult) {
