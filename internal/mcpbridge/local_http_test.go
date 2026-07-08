@@ -40,6 +40,7 @@ func TestLocalMCPHTTPRoutesThroughBridgeClients(t *testing.T) {
 		t.Fatalf("discoverTools: %v", err)
 	}
 	bridge.manifest = manifest
+	bridge.markReady()
 
 	local := httptest.NewServer(http.HandlerFunc(bridge.handleLocalMCP))
 	defer local.Close()

@@ -244,6 +244,7 @@ func TestBridgeHandleRequest(t *testing.T) {
 	_ = client.initialize(context.Background())
 	bridge.clients["k8s-net"] = client
 	bridge.toolIndex["k8s_net_diagnose_gateway"] = "k8s-net"
+	bridge.markReady()
 
 	// Write a request file
 	req := MCPRequest{
@@ -300,6 +301,7 @@ func TestBridgeHandleRequestFilteredTool(t *testing.T) {
 	bridge := NewBridge(cfg, ipcDir, "", "test")
 	// Only register one tool in the index (simulating filtering)
 	bridge.toolIndex["k8s_net_get_pods"] = "k8s-net"
+	bridge.markReady()
 
 	// Try to call a tool that was filtered out
 	req := MCPRequest{ID: "filtered-1", Tool: "k8s_net_delete_pod", Arguments: json.RawMessage(`{}`)}
@@ -333,6 +335,7 @@ func TestBridgeHandleRequestServerNotFound(t *testing.T) {
 	ipcDir := t.TempDir()
 	cfg := &ServersConfig{Servers: []ServerConfig{}}
 	bridge := NewBridge(cfg, ipcDir, "", "test")
+	bridge.markReady()
 
 	req := MCPRequest{ID: "err-1", Tool: "nonexistent_tool", Arguments: json.RawMessage(`{}`)}
 	reqData, _ := json.Marshal(req)
@@ -399,6 +402,8 @@ func TestBridgeEndToEnd(t *testing.T) {
 	if err := WriteManifest(manifestPath, manifest); err != nil {
 		t.Fatalf("WriteManifest: %v", err)
 	}
+	bridge.manifest = manifest
+	bridge.markReady()
 
 	// Verify manifest
 	if len(manifest.Tools) != 1 || manifest.Tools[0].Name != "tst_ping" {

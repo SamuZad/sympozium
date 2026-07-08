@@ -42,6 +42,13 @@ type Bridge struct {
 	prefixIndex  map[string]string  // tools prefix -> server name
 	manifest     *MCPToolManifest
 	processed    sync.Map           // dedup fsnotify events
+
+	// ready is closed once tool discovery has completed and the manifest has
+	// been written. Handlers that read discovered state (clients, toolIndex,
+	// manifest) wait on it; closing the channel also establishes the
+	// happens-before relationship that makes those reads safe without a mutex.
+	ready     chan struct{}
+	readyOnce sync.Once
 }
 
 // NewBridge creates a new MCP bridge.
@@ -52,6 +59,7 @@ func NewBridge(cfg *ServersConfig, ipcPath, manifestPath, agentRunID string) *Br
 	}
 
 	return &Bridge{
+		ready: make(chan struct{}),
 		config:       cfg,
 		ipcPath:      ipcPath,
 		manifestPath: manifestPath,
@@ -62,33 +70,21 @@ func NewBridge(cfg *ServersConfig, ipcPath, manifestPath, agentRunID string) *Br
 	}
 }
 
-// Run starts the MCP bridge: discovers tools, writes manifest, then watches for requests.
+// Run starts the MCP bridge. The local MCP HTTP endpoint is bound *before*
+// tool discovery so harnesses can complete their initialize handshake
+// immediately: discovery can take tens of seconds when a remote MCP server is
+// slow to come up (up to 6 retries × 10s per server), and if the listener only
+// bound afterwards the harness would hit "connection refused" and fail the run.
+// Discovery then runs in the background; tools/list and tools/call block on
+// b.ready until it finishes, so callers still observe the full tool set.
 func (b *Bridge) Run(ctx context.Context) error {
 	ctx, span := bridgeTracer.Start(ctx, "mcp-bridge.run",
 		trace.WithAttributes(attribute.String("agent_run_id", b.agentRunID)),
 	)
 	defer span.End()
 
-	// Phase 1: Connect to MCP servers and discover tools
-	manifest, err := b.discoverTools(ctx)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "tool discovery failed")
-		return err
-	}
-
-	span.SetAttributes(attribute.Int("mcp.tools_discovered", len(manifest.Tools)))
-	b.manifest = manifest
-
-	// Phase 2: Write tool manifest for agent-runner
-	if err := WriteManifest(b.manifestPath, manifest); err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "manifest write failed")
-		return err
-	}
-
-	log.Printf("Wrote tool manifest with %d tools to %s", len(manifest.Tools), b.manifestPath)
-
+	// Phase 1: Bind and serve the local MCP endpoint up front so the harness
+	// handshake succeeds within its wait window.
 	localMCPAddr := strings.TrimSpace(os.Getenv("MCP_BRIDGE_LISTEN_ADDR"))
 	if localMCPAddr == "" {
 		localMCPAddr = DefaultLocalMCPAddr
@@ -105,8 +101,68 @@ func (b *Bridge) Run(ctx context.Context) error {
 		}
 	}
 
+	// Phase 2: Discover tools in the background, write the manifest, then signal
+	// readiness. Reads of clients/toolIndex/manifest are guarded by b.ready.
+	go func() {
+		defer b.markReady()
+		manifest, err := b.discoverTools(ctx)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "tool discovery failed")
+			log.Printf("MCP tool discovery failed, continuing with no tools: %v", err)
+			return
+		}
+		span.SetAttributes(attribute.Int("mcp.tools_discovered", len(manifest.Tools)))
+		b.manifest = manifest
+		if err := WriteManifest(b.manifestPath, manifest); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "manifest write failed")
+			log.Printf("Failed to write MCP tool manifest: %v", err)
+			return
+		}
+		log.Printf("Wrote tool manifest with %d tools to %s", len(manifest.Tools), b.manifestPath)
+	}()
+
 	// Phase 3: Watch for MCP requests and dispatch
 	return b.watchAndDispatch(ctx)
+}
+
+// markReady signals that tool discovery has completed. It is idempotent and
+// safe to call concurrently.
+func (b *Bridge) markReady() {
+	b.readyOnce.Do(func() { close(b.ready) })
+}
+
+// waitReady blocks until tool discovery has completed (b.ready closed), the
+// context is cancelled, or the timeout elapses. It returns true only when the
+// bridge became ready. A non-positive timeout waits until ready or ctx done.
+func (b *Bridge) waitReady(ctx context.Context, timeout time.Duration) bool {
+	if b.ready == nil {
+		return true
+	}
+	select {
+	case <-b.ready:
+		return true
+	default:
+	}
+	if timeout <= 0 {
+		select {
+		case <-b.ready:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+	t := time.NewTimer(timeout)
+	defer t.Stop()
+	select {
+	case <-b.ready:
+		return true
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return false
+	}
 }
 
 // watchAndDispatch watches the IPC tools directory for MCP request files
@@ -207,6 +263,11 @@ func extractIDFromFilename(path string) string {
 
 // handleRequest processes a single MCP request file.
 func (b *Bridge) handleRequest(ctx context.Context, path string) {
+	// Wait for background discovery to finish before touching clients/toolIndex.
+	if !b.waitReady(ctx, 0) {
+		return
+	}
+
 	// Small delay to ensure file write is complete
 	time.Sleep(50 * time.Millisecond)
 

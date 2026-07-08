@@ -93,8 +93,13 @@ func (b *Bridge) handleLocalMCP(w http.ResponseWriter, r *http.Request) {
 			},
 		}
 	case "tools/list":
+		// Discovery runs in the background after the listener binds, so block
+		// (bounded by the request context) until it completes; otherwise the
+		// caller could observe an empty tool set on a fast first request.
+		b.waitReady(r.Context(), 0)
 		resp.Result = map[string]any{"tools": b.localMCPTools()}
 	case "tools/call":
+		b.waitReady(r.Context(), 0)
 		result, rpcErr := b.handleLocalMCPToolCall(r.Context(), req)
 		resp.Result = result
 		resp.Error = rpcErr
