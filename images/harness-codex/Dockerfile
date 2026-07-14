@@ -24,7 +24,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -mod=mod -ldflags="-s -w" -o /sympozium-tool ./cmd/sympozium-tool
 
 FROM node:20-bookworm-slim
-ARG CODEX_VERSION=latest
+ARG CODEX_VERSION=0.144.3
 
 # Install codex CLI + minimal CA bundle. dumb-init isn't strictly required
 # since codex handles its own signals, but keeps PID 1 well-behaved.
