@@ -91,6 +91,31 @@ func TestBuildSendMessageAttachmentsReadsLocalPath(t *testing.T) {
 	}
 }
 
+func TestBuildSendMessageAttachmentsClassifiesTextAsFile(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("/tmp", "sympozium-tool-attachment-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	path := filepath.Join(tmpDir, "usage_audit_queries.sql")
+	if err := os.WriteFile(path, []byte("SELECT 1;\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	attachments, err := buildSendMessageAttachments([]string{path}, nil)
+	if err != nil {
+		t.Fatalf("buildSendMessageAttachments: %v", err)
+	}
+	if len(attachments) != 1 {
+		t.Fatalf("len(attachments) = %d, want 1", len(attachments))
+	}
+	attachment := attachments[0]
+	if attachment.Type != "file" || attachment.Filename != "usage_audit_queries.sql" || attachment.MimeType != "text/plain; charset=utf-8" {
+		t.Fatalf("attachment metadata = %+v", attachment)
+	}
+}
+
 func TestBuildSendMessageAttachmentsHonorsConfiguredMaxBytes(t *testing.T) {
 	t.Setenv(channelAttachmentMaxBytesEnv, "8")
 	tmpDir, err := os.MkdirTemp("/tmp", "sympozium-tool-attachment-*")
