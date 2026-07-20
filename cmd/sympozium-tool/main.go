@@ -203,11 +203,17 @@ func readSendMessageAttachmentFile(index int, path string) (sendMessageAttachmen
 	if int64(len(data)) > maxBytes {
 		return sendMessageAttachment{}, fmt.Errorf("attachment %d is %d bytes; max is %d bytes", index, len(data), maxBytes)
 	}
+	mimeType := http.DetectContentType(data)
+	attachmentType := "file"
+	if strings.HasPrefix(mimeType, "image/") {
+		attachmentType = "image"
+	}
+
 	return sendMessageAttachment{
-		Type:          "image",
+		Type:          attachmentType,
 		ContentBase64: base64.StdEncoding.EncodeToString(data),
 		Filename:      filepath.Base(cleanPath),
-		MimeType:      http.DetectContentType(data),
+		MimeType:      mimeType,
 	}, nil
 }
 

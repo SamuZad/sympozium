@@ -8,6 +8,8 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -265,29 +267,29 @@ func TestSendMessage_RejectsInsecureImageAttachmentURL(t *testing.T) {
 
 func TestSendMessage_WithEmbeddedImageUploadsSlackFile(t *testing.T) {
 	imageBytes := []byte("fake png bytes")
-	var uploadURLPayload map[string]interface{}
+	var uploadURLPayload url.Values
 	var uploadedBody []byte
 	var uploadedContentType string
-	var completePayload map[string]interface{}
+	var completePayload url.Values
 
 	sc := newTestSlackChannel(func(req *http.Request) (*http.Response, error) {
 		switch req.URL.String() {
 		case "https://slack.com/api/files.getUploadURLExternal":
-			body, _ := io.ReadAll(req.Body)
-			if err := json.Unmarshal(body, &uploadURLPayload); err != nil {
-				t.Fatalf("decode getUploadURLExternal payload: %v", err)
+			if err := req.ParseForm(); err != nil {
+				t.Fatalf("parse getUploadURLExternal form: %v", err)
 			}
+			uploadURLPayload = req.Form
 			return jsonResponse(`{"ok":true,"upload_url":"https://upload.slack.test/file","file_id":"F123"}`), nil
 		case "https://upload.slack.test/file":
 			uploadedContentType = req.Header.Get("Content-Type")
 			uploadedBody, _ = io.ReadAll(req.Body)
 			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("OK"))}, nil
 		case "https://slack.com/api/files.completeUploadExternal":
-			body, _ := io.ReadAll(req.Body)
-			if err := json.Unmarshal(body, &completePayload); err != nil {
-				t.Fatalf("decode completeUploadExternal payload: %v", err)
+			if err := req.ParseForm(); err != nil {
+				t.Fatalf("parse completeUploadExternal form: %v", err)
 			}
-			return jsonResponse(`{"ok":true}`), nil
+			completePayload = req.Form
+			return jsonResponse(`{"ok":true,"files":[{"id":"F123","name":"chart.png","title":"chart.png"}]}`), nil
 		default:
 			t.Fatalf("unexpected Slack request URL: %s", req.URL.String())
 			return nil, nil
@@ -311,21 +313,20 @@ func TestSendMessage_WithEmbeddedImageUploadsSlackFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sendMessage: %v", err)
 	}
-	if uploadURLPayload["filename"] != "chart.png" || uploadURLPayload["length"] != float64(len(imageBytes)) || uploadURLPayload["alt_txt"] != "chart.png" {
+	if uploadURLPayload.Get("filename") != "chart.png" || uploadURLPayload.Get("length") != strconv.Itoa(len(imageBytes)) || uploadURLPayload.Get("alt_txt") != "chart.png" {
 		t.Fatalf("getUploadURLExternal payload = %+v", uploadURLPayload)
 	}
-	if string(uploadedBody) != string(imageBytes) || uploadedContentType != "image/png" {
+	if string(uploadedBody) != string(imageBytes) || uploadedContentType != "application/octet-stream" {
 		t.Fatalf("uploaded body/content-type = %q/%q", string(uploadedBody), uploadedContentType)
 	}
-	if completePayload["channel_id"] != "C123" || completePayload["initial_comment"] != "chart attached" || completePayload["thread_ts"] != "1700.0001" {
+	if completePayload.Get("channel_id") != "C123" || completePayload.Get("initial_comment") != "chart attached" || completePayload.Get("thread_ts") != "1700.0001" {
 		t.Fatalf("completeUploadExternal payload = %+v", completePayload)
 	}
-	files, ok := completePayload["files"].([]interface{})
-	if !ok || len(files) != 1 {
-		t.Fatalf("files = %#v, want one file", completePayload["files"])
+	var completedFiles []map[string]string
+	if err := json.Unmarshal([]byte(completePayload.Get("files")), &completedFiles); err != nil {
+		t.Fatalf("decode completed files: %v", err)
 	}
-	file := files[0].(map[string]interface{})
-	if file["id"] != "F123" || file["title"] != "chart.png" {
-		t.Fatalf("completed file = %#v", file)
+	if len(completedFiles) != 1 || completedFiles[0]["id"] != "F123" || completedFiles[0]["title"] != "chart.png" {
+		t.Fatalf("completed files = %#v", completedFiles)
 	}
 }

@@ -502,6 +502,7 @@ func (sc *SlackChannel) handleSlackEvents(w http.ResponseWriter, r *http.Request
 func (sc *SlackChannel) handleOutbound(ctx context.Context) {
 	events, err := sc.SubscribeOutbound(ctx)
 	if err != nil {
+		sc.log.Error(err, "failed to subscribe to outbound messages")
 		return
 	}
 
@@ -509,25 +510,60 @@ func (sc *SlackChannel) handleOutbound(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case event := <-events:
-			var msg channel.OutboundMessage
-			if err := json.Unmarshal(event.Data, &msg); err != nil {
+
+		case event, ok := <-events:
+			if !ok {
+				sc.log.Info("outbound subscription closed")
+				return
+			}
+			if event == nil {
+				sc.log.Error(nil, "received nil outbound event")
 				continue
 			}
+
+			var msg channel.OutboundMessage
+			if err := json.Unmarshal(event.Data, &msg); err != nil {
+				sc.log.Error(err, "failed to decode outbound message",
+					"instance", sc.InstanceName,
+					"targetInstance", event.Metadata["instanceName"],
+					"payloadBytes", len(event.Data))
+				continue
+			}
+
+			sc.log.Info("received outbound message",
+				"instance", sc.InstanceName,
+				"targetInstance", event.Metadata["instanceName"],
+				"channel", msg.Channel,
+				"chatId", msg.ChatID,
+				"threadId", msg.ThreadID,
+				"attachments", len(msg.Attachments))
+
 			if msg.Channel != "slack" {
 				continue
 			}
+
 			if msg.Reaction != "" {
 				if err := sc.addReaction(ctx, msg); err != nil {
 					sc.log.Error(err, "failed to add Slack reaction",
-						"chatId", msg.ChatID, "targetMessageId", msg.TargetMessageID, "reaction", msg.Reaction)
+						"chatId", msg.ChatID,
+						"targetMessageId", msg.TargetMessageID,
+						"reaction", msg.Reaction)
 				}
 				continue
 			}
+
 			if err := sc.sendMessage(ctx, msg); err != nil {
 				sc.log.Error(err, "failed to send Slack message",
-					"chatId", msg.ChatID, "threadId", msg.ThreadID)
+					"chatId", msg.ChatID,
+					"threadId", msg.ThreadID,
+					"attachments", len(msg.Attachments))
+				continue
 			}
+
+			sc.log.Info("sent outbound Slack message",
+				"chatId", msg.ChatID,
+				"threadId", msg.ThreadID,
+				"attachments", len(msg.Attachments))
 		}
 	}
 }
@@ -747,16 +783,25 @@ func (sc *SlackChannel) uploadFileAttachments(ctx context.Context, msg channel.O
 		if err != nil {
 			return fmt.Errorf("build slack file upload request: %w", err)
 		}
-		req.Header.Set("Content-Type", mimeType)
+		req.Header.Set("Content-Type", "application/octet-stream")
 		resp, err := sc.client.Do(req)
 		if err != nil {
 			return fmt.Errorf("upload slack file %q: %w", filename, err)
 		}
 		respBody, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
+		uploadResult := strings.TrimSpace(string(respBody))
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return fmt.Errorf("slack file upload for %q returned HTTP %d: %s", filename, resp.StatusCode, strings.TrimSpace(string(respBody)))
+			return fmt.Errorf("slack file upload for %q returned HTTP %d: %s", filename, resp.StatusCode, uploadResult)
 		}
+		if !strings.HasPrefix(uploadResult, "OK") {
+			return fmt.Errorf("slack file upload for %q returned unexpected success body: %q", filename, uploadResult)
+		}
+		sc.log.Info("uploaded attachment bytes to Slack",
+			"filename", filename,
+			"bytes", len(data),
+			"fileId", uploadURLResp.FileID,
+			"response", uploadResult)
 
 		files = append(files, map[string]string{
 			"id":    uploadURLResp.FileID,
@@ -764,19 +809,60 @@ func (sc *SlackChannel) uploadFileAttachments(ctx context.Context, msg channel.O
 		})
 	}
 
-	completePayload := map[string]interface{}{
-		"channel_id": msg.ChatID,
-		"files":      files,
+	filesJSON, err := json.Marshal(files)
+	if err != nil {
+		return fmt.Errorf("marshal Slack completion files: %w", err)
 	}
+
+	completeForm := url.Values{}
+	completeForm.Set("files", string(filesJSON))
+	completeForm.Set("channel_id", msg.ChatID)
 	if msg.Text != "" {
-		completePayload["initial_comment"] = msg.Text
+		completeForm.Set("initial_comment", msg.Text)
 	}
 	if threadTS != "" {
-		completePayload["thread_ts"] = threadTS
+		completeForm.Set("thread_ts", threadTS)
 	}
-	if err := sc.callSlackAPI(ctx, "https://slack.com/api/files.completeUploadExternal", completePayload); err != nil {
+
+	var completeResp struct {
+		OK    bool `json:"ok"`
+		Files []struct {
+			ID    string `json:"id"`
+			Name  string `json:"name"`
+			Title string `json:"title"`
+		} `json:"files"`
+	}
+	if err := sc.callSlackAPIFormInto(
+		ctx,
+		"https://slack.com/api/files.completeUploadExternal",
+		completeForm,
+		&completeResp,
+	); err != nil {
 		return err
 	}
+	if len(completeResp.Files) != len(files) {
+		return fmt.Errorf(
+			"Slack completed upload without returning all files: requested=%d returned=%d",
+			len(files),
+			len(completeResp.Files),
+		)
+	}
+	for i := range files {
+		if completeResp.Files[i].ID != files[i]["id"] {
+			return fmt.Errorf(
+				"Slack completed upload with unexpected file id at index %d: requested=%q returned=%q",
+				i,
+				files[i]["id"],
+				completeResp.Files[i].ID,
+			)
+		}
+	}
+
+	sc.log.Info("completed Slack file upload",
+		"chatId", msg.ChatID,
+		"threadId", threadTS,
+		"files", len(completeResp.Files),
+		"fileId", completeResp.Files[0].ID)
 
 	// The file is now delivered to Slack; drop the artifact-server copies.
 	// Best-effort: a failure here only leaves an artifact to be swept at TTL.
