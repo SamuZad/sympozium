@@ -485,6 +485,16 @@ func (r *AgentRunReconciler) reconcilePending(ctx context.Context, log logr.Logg
 		log.Error(err, "Failed to mirror skill ConfigMaps, skills may be missing")
 	}
 
+	// Ensure the tool-executor script ConfigMap exists so skill sidecars can
+	// mount it — this is what lets any stock image act as a sidecar.
+	if len(sidecars) > 0 {
+		if err := r.ensureToolExecutorConfigMap(ctx, log, agentRun.Namespace); err != nil {
+			return ctrl.Result{}, r.failRun(ctx, agentRun,
+				fmt.Sprintf("failed to create tool-executor ConfigMap — skill sidecars would have no executor loop. "+
+					"Underlying error: %v", err))
+		}
+	}
+
 	// Create RBAC resources for skill sidecars that need them.
 	// This is fatal: without RBAC the agent pod will run but every kubectl/API
 	// call inside the skill sidecar will fail with "forbidden". Common causes:
@@ -2455,6 +2465,7 @@ func (r *AgentRunReconciler) buildContainers(
 		mounts := []corev1.VolumeMount{
 			{Name: "ipc", MountPath: "/ipc"},
 			{Name: "tmp", MountPath: "/tmp"},
+			{Name: toolExecutorVolumeName, MountPath: toolExecutorMountPath, ReadOnly: true},
 		}
 		if sc.sidecar.MountWorkspace {
 			mounts = append(mounts, corev1.VolumeMount{Name: "workspace", MountPath: "/workspace"})
@@ -2556,10 +2567,13 @@ func (r *AgentRunReconciler) buildContainers(
 				},
 			}
 		}
-		// Only set Command if the SkillPack specifies one; otherwise
-		// let the container image's default CMD (tool-executor) run.
+		// Use the SkillPack's command when specified; otherwise default to
+		// the mounted tool-executor script so any stock image (kubectl,
+		// postgres, etc.) works as a sidecar without a specialized image.
 		if len(cmd) > 0 {
 			container.Command = cmd
+		} else {
+			container.Command = []string{ToolExecutorScriptPath}
 		}
 
 		// Inject per-instance SKILL_<KEY> env vars from SkillRef.Params.
@@ -2993,6 +3007,20 @@ func (r *AgentRunReconciler) buildVolumes(agentRun *sympoziumv1alpha1.AgentRun, 
 		})
 	}
 
+	// Mount the embedded tool-executor script into skill sidecars.
+	if len(sidecars) > 0 {
+		execMode := int32(0o755)
+		volumes = append(volumes, corev1.Volume{
+			Name: toolExecutorVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: toolExecutorConfigMapName},
+					DefaultMode:          &execMode,
+				},
+			},
+		})
+	}
+
 	// Add Secret volumes for skill sidecars that require credentials.
 	for _, sc := range sidecars {
 		if sc.sidecar.SecretRef == "" {
@@ -3103,11 +3131,12 @@ func (r *AgentRunReconciler) buildVolumes(agentRun *sympoziumv1alpha1.AgentRun, 
 // on every agent pod. User-supplied volumes/mounts with these names are
 // silently skipped to prevent accidental clobbering of core functionality.
 var reservedVolumeNames = map[string]struct{}{
-	"workspace":  {},
-	"ipc":        {},
-	"skills":     {},
-	"tmp":        {},
-	"mcp-config": {},
+	"workspace":           {},
+	"ipc":                 {},
+	"skills":              {},
+	"tmp":                 {},
+	"mcp-config":          {},
+	toolExecutorVolumeName: {},
 }
 
 func isReservedVolumeName(name string) bool {

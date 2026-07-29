@@ -858,7 +858,9 @@ CMD ["/usr/local/bin/tool-executor.sh"]
 
 ### `images/skill-github-gitops/tool-executor.sh`
 
-The script is identical to `images/skill-k8s-ops/tool-executor.sh` with one
+The script is identical to the generic tool-executor (embedded in the
+controller at `internal/controller/assets/tool-executor.sh` and mounted into
+sidecars at `/sympozium/bin/tool-executor.sh`) with one
 addition at startup — it sources the token from the mounted secret before
 processing any request:
 

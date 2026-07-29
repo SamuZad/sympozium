@@ -141,6 +141,13 @@ func (r *AgentRunReconciler) reconcilePendingAgentSandbox(
 	if err := r.mirrorSkillConfigMaps(ctx, log, agentRun); err != nil {
 		log.Error(err, "Failed to mirror skill ConfigMaps")
 	}
+	if len(taskSidecars) > 0 {
+		if err := r.ensureToolExecutorConfigMap(ctx, log, agentRun.Namespace); err != nil {
+			return ctrl.Result{}, r.failRun(ctx, agentRun,
+				fmt.Sprintf("failed to create tool-executor ConfigMap — skill sidecars would have no executor loop. "+
+					"Underlying error: %v", err))
+		}
+	}
 	// RBAC creation is fatal: without it the agent sandbox will run but every
 	// kubectl/API call inside skill sidecars will fail with "forbidden".
 	// See reconcilePending in agentrun_controller.go for common causes.

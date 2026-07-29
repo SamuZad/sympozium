@@ -101,13 +101,31 @@ Key details:
 
 ---
 
+## Using a Stock Image
+
+You usually don't need a custom image at all. The controller ships the generic `tool-executor.sh` to the agent namespace as a ConfigMap (`sympozium-tool-executor`) and mounts it into **every** skill sidecar at `/sympozium/bin/tool-executor.sh` (mode 0755). When a SkillPack's `sidecar` does not specify a `command`, the sidecar runs the mounted script by default.
+
+That means any off-the-shelf image works as a sidecar, as long as it contains `bash`, `jq`, and coreutils' `timeout`:
+
+```yaml
+sidecar:
+  image: bitnami/kubectl:latest
+  mountWorkspace: true
+```
+
+No Dockerfile, no image build — the agent can immediately `execute_command` with `kubectl` inside that container.
+
+Build a custom image only when you need custom logic (your own binaries, a specialized executor loop, startup steps like loading credentials). In that case, set `command` in the SkillPack to your entrypoint — the mounted script is still available at `/sympozium/bin/tool-executor.sh` if you want to exec into it after setup.
+
+---
+
 ## Building a Sidecar Image
 
-A sidecar needs two things: your application logic, and `tool-executor.sh` to bridge the IPC protocol.
+A custom sidecar needs your application logic plus an executor loop bridging the IPC protocol.
 
 ### Step 1: The tool executor
 
-Copy the standard `tool-executor.sh` into your image. This script handles polling, request parsing, claiming, timeout enforcement, and response writing — you don't need to implement the IPC protocol yourself.
+Use the mounted `/sympozium/bin/tool-executor.sh` (default when no `command` is set), or ship your own variant when you need custom startup behavior. The script handles polling, request parsing, claiming, timeout enforcement, and response writing — you don't need to implement the IPC protocol yourself.
 
 Here's a minimal version:
 
@@ -210,12 +228,10 @@ WORKDIR /app
 COPY --from=build /app/dist/ dist/
 COPY --from=build /app/node_modules/ node_modules/
 COPY --from=build /app/package.json .
-COPY tool-executor.sh /usr/local/bin/tool-executor.sh
-RUN chmod +x /usr/local/bin/tool-executor.sh
 
 USER 1000
 WORKDIR /workspace
-CMD ["/usr/local/bin/tool-executor.sh"]
+CMD ["/sympozium/bin/tool-executor.sh"]
 ```
 
 !!! warning "Required packages"
@@ -273,7 +289,7 @@ spec:
 |-------|------|---------|-------------|
 | `image` | string | — | Container image reference (required) |
 | `imagePullPolicy` | string | — | Kubernetes pull policy |
-| `command` | string[] | — | Override container entrypoint |
+| `command` | string[] | `["/sympozium/bin/tool-executor.sh"]` | Override container entrypoint (defaults to the mounted tool-executor script) |
 | `env` | EnvVar[] | — | Additional environment variables |
 | `mountWorkspace` | bool | `false` | Mount the shared `/workspace` volume |
 | `resources.cpu` | string | — | CPU request/limit |
@@ -354,7 +370,7 @@ Comparison is **case-insensitive** and **whitespace-trimmed**. An empty `target`
 
 ## Working Example: Echo Sidecar
 
-A complete minimal sidecar that echoes commands back, useful as a starting template.
+A complete minimal sidecar that echoes commands back, useful as a starting template. No script is baked in — the container runs the ConfigMap-mounted tool-executor (the default command).
 
 ### Dockerfile
 
@@ -362,11 +378,8 @@ A complete minimal sidecar that echoes commands back, useful as a starting templ
 FROM alpine:3.20
 RUN apk add --no-cache bash jq coreutils \
     && adduser -D -u 1000 agent
-COPY tool-executor.sh /usr/local/bin/tool-executor.sh
-RUN chmod +x /usr/local/bin/tool-executor.sh
 USER 1000
 WORKDIR /workspace
-CMD ["/usr/local/bin/tool-executor.sh"]
 ```
 
 ### SkillPack

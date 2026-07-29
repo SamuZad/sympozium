@@ -710,10 +710,20 @@ func TestBuildContainers_SkillSidecarDefaultCommand(t *testing.T) {
 	}
 	cs, _ := r.buildContainers(newTestRun(), false, nil, sidecars, nil)
 	sc := cs[2]
-	// When no command is specified in the SkillPack, the container should
-	// have no Command override so the image's default CMD runs.
-	if len(sc.Command) != 0 {
-		t.Errorf("sidecar command = %v, want empty (use image CMD)", sc.Command)
+	// When no command is specified in the SkillPack, the container defaults
+	// to the mounted tool-executor script so any stock image works.
+	if len(sc.Command) != 1 || sc.Command[0] != ToolExecutorScriptPath {
+		t.Errorf("sidecar command = %v, want [%s]", sc.Command, ToolExecutorScriptPath)
+	}
+	// The tool-executor script must be mounted read-only.
+	var hasExecutorMount bool
+	for _, m := range sc.VolumeMounts {
+		if m.Name == toolExecutorVolumeName && m.MountPath == toolExecutorMountPath && m.ReadOnly {
+			hasExecutorMount = true
+		}
+	}
+	if !hasExecutorMount {
+		t.Errorf("sidecar should mount %s read-only", toolExecutorMountPath)
 	}
 	// Agent container should always have TOOLS_ENABLED.
 	var toolsEnabled bool
