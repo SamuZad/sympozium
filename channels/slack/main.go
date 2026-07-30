@@ -340,14 +340,15 @@ func (sc *SlackChannel) handleSocketEvent(ctx context.Context, payload json.RawM
 	var inner struct {
 		Type  string `json:"type"`
 		Event struct {
-			Type        string `json:"type"`
-			User        string `json:"user"`
-			Text        string `json:"text"`
-			Channel     string `json:"channel"`
-			ChannelType string `json:"channel_type"`
-			TS          string `json:"ts"`
-			ThreadTS    string `json:"thread_ts"`
-			BotID       string `json:"bot_id"`
+			Type        string      `json:"type"`
+			User        string      `json:"user"`
+			Text        string      `json:"text"`
+			Channel     string      `json:"channel"`
+			ChannelType string      `json:"channel_type"`
+			TS          string      `json:"ts"`
+			ThreadTS    string      `json:"thread_ts"`
+			BotID       string      `json:"bot_id"`
+			Files       []slackFile `json:"files"`
 		} `json:"event"`
 	}
 	if err := json.Unmarshal(payload, &inner); err != nil {
@@ -369,6 +370,7 @@ func (sc *SlackChannel) handleSocketEvent(ctx context.Context, payload json.RawM
 	if !ok {
 		return
 	}
+	msg.Attachments = sc.ingestInboundFiles(ctx, inner.Event.Files)
 
 	// Start the root span for the entire message processing trace.
 	ctx, span := slackTracer.Start(ctx, "slack.message.received",
@@ -441,14 +443,15 @@ func (sc *SlackChannel) handleSlackEvents(w http.ResponseWriter, r *http.Request
 		Type      string `json:"type"`
 		Challenge string `json:"challenge"`
 		Event     struct {
-			Type        string `json:"type"`
-			User        string `json:"user"`
-			Text        string `json:"text"`
-			Channel     string `json:"channel"`
-			ChannelType string `json:"channel_type"`
-			TS          string `json:"ts"`
-			ThreadTS    string `json:"thread_ts"`
-			BotID       string `json:"bot_id"`
+			Type        string      `json:"type"`
+			User        string      `json:"user"`
+			Text        string      `json:"text"`
+			Channel     string      `json:"channel"`
+			ChannelType string      `json:"channel_type"`
+			TS          string      `json:"ts"`
+			ThreadTS    string      `json:"thread_ts"`
+			BotID       string      `json:"bot_id"`
+			Files       []slackFile `json:"files"`
 		} `json:"event"`
 	}
 
@@ -485,6 +488,7 @@ func (sc *SlackChannel) handleSlackEvents(w http.ResponseWriter, r *http.Request
 			w.WriteHeader(http.StatusOK)
 			return
 		}
+		msg.Attachments = sc.ingestInboundFiles(r.Context(), envelope.Event.Files)
 
 		if err := sc.PublishInbound(r.Context(), msg); err != nil {
 			fmt.Fprintf(os.Stderr, "failed to publish inbound: %v\n", err)
@@ -959,6 +963,147 @@ func (sc *SlackChannel) deleteArtifact(ctx context.Context, id string) error {
 		return fmt.Errorf("artifact-server delete HTTP %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// slackFile is the subset of Slack's file object we need for inbound
+// attachment ingestion.
+type slackFile struct {
+	ID                 string `json:"id"`
+	Name               string `json:"name"`
+	Mimetype           string `json:"mimetype"`
+	Size               int64  `json:"size"`
+	URLPrivate         string `json:"url_private"`
+	URLPrivateDownload string `json:"url_private_download"`
+}
+
+// inboundAttachmentMaxBytes is the per-file cap for inbound attachment
+// ingestion. Configurable via ARTIFACT_ATTACHMENT_MAX_BYTES.
+func inboundAttachmentMaxBytes() int64 {
+	if v := strings.TrimSpace(os.Getenv("ARTIFACT_ATTACHMENT_MAX_BYTES")); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			return n
+		}
+	}
+	return int64(25 * 1024 * 1024)
+}
+
+// ingestInboundFiles downloads each Slack file with the bot token, uploads it
+// to the artifact-server, and returns artifact-referencing attachments so the
+// bytes never ride the event bus. Skips silently (returns nil) when no
+// artifact-server is configured; individual file failures are logged and
+// skipped so the message text still flows.
+func (sc *SlackChannel) ingestInboundFiles(ctx context.Context, files []slackFile) []channel.Attachment {
+	if len(files) == 0 {
+		return nil
+	}
+	if artifactServerBaseURL() == "" {
+		sc.log.V(1).Info("skipping inbound attachments: ARTIFACT_SERVER_URL not configured", "count", len(files))
+		return nil
+	}
+	maxBytes := inboundAttachmentMaxBytes()
+	var out []channel.Attachment
+	for _, f := range files {
+		if f.Size <= 0 || f.Size > maxBytes {
+			sc.log.Info("skipping inbound attachment: size out of bounds",
+				"file", f.Name, "size", f.Size, "max", maxBytes)
+			continue
+		}
+		dlURL := f.URLPrivateDownload
+		if dlURL == "" {
+			dlURL = f.URLPrivate
+		}
+		if dlURL == "" {
+			continue
+		}
+		data, err := sc.downloadSlackFile(ctx, dlURL, maxBytes)
+		if err != nil {
+			sc.log.Error(err, "failed to download inbound attachment from Slack", "file", f.Name)
+			continue
+		}
+		id, size, err := sc.uploadArtifact(ctx, f.Name, f.Mimetype, data)
+		if err != nil {
+			sc.log.Error(err, "failed to upload inbound attachment to artifact-server", "file", f.Name)
+			continue
+		}
+		attType := "file"
+		if strings.HasPrefix(f.Mimetype, "image/") {
+			attType = "image"
+		}
+		out = append(out, channel.Attachment{
+			Type:       attType,
+			ArtifactID: id,
+			Filename:   f.Name,
+			MimeType:   f.Mimetype,
+			Size:       size,
+		})
+		sc.log.Info("ingested inbound attachment", "file", f.Name, "artifactId", id, "size", size)
+	}
+	return out
+}
+
+// downloadSlackFile fetches a private Slack file URL using the bot token.
+func (sc *SlackChannel) downloadSlackFile(ctx context.Context, fileURL string, maxBytes int64) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fileURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+sc.BotToken)
+	resp, err := sc.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("slack file download HTTP %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("file exceeds %d bytes", maxBytes)
+	}
+	return data, nil
+}
+
+// uploadArtifact posts a file to the artifact-server and returns its id and
+// stored size.
+func (sc *SlackChannel) uploadArtifact(ctx context.Context, filename, mimeType string, data []byte) (string, int64, error) {
+	base := artifactServerBaseURL()
+	if base == "" {
+		return "", 0, fmt.Errorf("ARTIFACT_SERVER_URL is not configured")
+	}
+	token, err := readServiceAccountToken()
+	if err != nil {
+		return "", 0, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/v1/artifacts", bytes.NewReader(data))
+	if err != nil {
+		return "", 0, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", mimeType)
+	req.Header.Set("X-Artifact-Filename", filename)
+	resp, err := sc.client.Do(req)
+	if err != nil {
+		return "", 0, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	if resp.StatusCode != http.StatusCreated {
+		return "", 0, fmt.Errorf("artifact-server HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var ur struct {
+		ID   string `json:"id"`
+		Size int64  `json:"size"`
+	}
+	if err := json.Unmarshal(body, &ur); err != nil {
+		return "", 0, err
+	}
+	if ur.ID == "" {
+		return "", 0, fmt.Errorf("artifact-server returned empty id")
+	}
+	return ur.ID, ur.Size, nil
 }
 
 func slackBlocksForMessage(msg channel.OutboundMessage) ([]map[string]interface{}, error) {

@@ -327,6 +327,27 @@ func (cr *ChannelRouter) handleInbound(ctx context.Context, event *eventbus.Even
 		},
 	}
 
+	// Propagate artifact-backed attachments as metadata so the agent pod can
+	// download the bytes from the artifact-server (never via the event bus).
+	var attachmentRefs []channelpkg.Attachment
+	for _, a := range msg.Attachments {
+		if a.ArtifactID == "" {
+			continue
+		}
+		attachmentRefs = append(attachmentRefs, channelpkg.Attachment{
+			Type:       a.Type,
+			ArtifactID: a.ArtifactID,
+			Filename:   a.Filename,
+			MimeType:   a.MimeType,
+			Size:       a.Size,
+		})
+	}
+	if len(attachmentRefs) > 0 {
+		if data, err := json.Marshal(attachmentRefs); err == nil {
+			run.Annotations["sympozium.ai/inbound-attachments"] = string(data)
+		}
+	}
+
 	// Propagate trace context via annotation so the controller reconciler
 	// can link its span to this trace.
 	sc := trace.SpanFromContext(ctx).SpanContext()

@@ -2439,6 +2439,11 @@ func (r *AgentRunReconciler) buildContainers(
 			corev1.EnvVar{Name: "SOURCE_THREAD_ID", Value: tid},
 		)
 	}
+	if att := agentRun.Annotations["sympozium.ai/inbound-attachments"]; att != "" {
+		containers[0].Env = append(containers[0].Env,
+			corev1.EnvVar{Name: "INBOUND_ATTACHMENTS", Value: att},
+		)
+	}
 
 	// Inject per-instance OpenTelemetry configuration.
 	if observability != nil && observability.Enabled {

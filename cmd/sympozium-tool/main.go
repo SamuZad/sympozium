@@ -16,7 +16,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -46,6 +48,8 @@ func main() {
 		os.Exit(cmdMemoryStore(args))
 	case "memory-list":
 		os.Exit(cmdMemoryList(args))
+	case "get-attachment":
+		os.Exit(cmdGetAttachment(args))
 	case "-h", "--help", "help":
 		usage()
 		os.Exit(0)
@@ -68,6 +72,9 @@ Subcommands (memory):
   memory-search  Search persistent memory for past findings.
   memory-store   Persist a finding to memory for future runs.
   memory-list    List recent memory entries.
+
+Subcommands (attachments):
+  get-attachment Download a channel attachment from the artifact-server by ID.
 
 Run "sympozium-tool <subcommand> --help" for subcommand options.`)
 }
@@ -236,6 +243,96 @@ func isAllowedSendMessageAttachmentPath(path string) bool {
 		}
 	}
 	return false
+}
+
+// --- get-attachment ---------------------------------------------------------
+
+func cmdGetAttachment(argv []string) int {
+	fs := flag.NewFlagSet("get-attachment", flag.ContinueOnError)
+	id := fs.String("id", "", "Artifact ID (required)")
+	output := fs.String("output", "", "Output file path. Defaults to the artifact's original filename in the current directory.")
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, `Usage: sympozium-tool get-attachment --id ARTIFACT_ID [--output PATH]
+
+Downloads an attachment from the artifact-server using the pod's ServiceAccount
+token. Inbound channel attachments arrive as artifact IDs (see the
+INBOUND_ATTACHMENTS environment variable or the run's attachment listing).`)
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(argv); err != nil {
+		return 2
+	}
+	if *id == "" {
+		fmt.Fprintln(os.Stderr, "error: --id is required")
+		return 2
+	}
+	base := strings.TrimRight(strings.TrimSpace(os.Getenv("ARTIFACT_SERVER_URL")), "/")
+	if base == "" {
+		fmt.Fprintln(os.Stderr, "error: ARTIFACT_SERVER_URL is not configured")
+		return 1
+	}
+	tokenPath := os.Getenv("SA_TOKEN_PATH")
+	if tokenPath == "" {
+		tokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+	}
+	tokenBytes, err := os.ReadFile(tokenPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: read ServiceAccount token: %v\n", err)
+		return 1
+	}
+	token := strings.TrimSpace(string(tokenBytes))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/v1/artifacts/"+url.PathEscape(*id), nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 1
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 1
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+		fmt.Fprintf(os.Stderr, "error: artifact-server HTTP %d: %s\n", resp.StatusCode, strings.TrimSpace(string(body)))
+		return 1
+	}
+
+	path := *output
+	if path == "" {
+		filename := ""
+		if _, params, err := mime.ParseMediaType(resp.Header.Get("Content-Disposition")); err == nil {
+			filename = filepath.Base(strings.TrimSpace(params["filename"]))
+		}
+		if filename == "" || filename == "." || filename == string(os.PathSeparator) {
+			filename = *id
+		}
+		path = filename
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 1
+	}
+	n, err := io.Copy(f, resp.Body)
+	closeErr := f.Close()
+	if err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: write %s: %v\n", path, err)
+		return 1
+	}
+	abs, absErr := filepath.Abs(path)
+	if absErr != nil {
+		abs = path
+	}
+	fmt.Printf("saved %s (%d bytes)\n", abs, n)
+	return 0
 }
 
 // --- schedule ---------------------------------------------------------------

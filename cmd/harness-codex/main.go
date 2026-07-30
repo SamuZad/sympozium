@@ -18,12 +18,10 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	"mime"
 	"net/http"
 	"os"
@@ -36,6 +34,7 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 
+	"github.com/sympozium-ai/sympozium/internal/artifact"
 	"github.com/sympozium-ai/sympozium/internal/ipc"
 )
 
@@ -104,7 +103,7 @@ func run(ctx context.Context) error {
 		fmt.Fprintf(os.Stderr, "harness-codex: warning: failed to write auth.json: %v\n", err)
 	}
 
-	if err := writeAgentsMD(codexHome); err != nil {
+	if err := writeAgentsMD(codexHome, artifact.MaterializeInbound(ctx, envOr("WORKSPACE_DIR", "/workspace"))); err != nil {
 		err = fmt.Errorf("write AGENTS.md: %w", err)
 		markSpanError(runSpan, err)
 		o.recordRun(ctx, "error", instance, model, namespace, 0)
@@ -182,7 +181,7 @@ func linkHomeCodex(codexHome string) error {
 	return os.Symlink(codexHome, target)
 }
 
-func writeAgentsMD(codexHome string) error {
+func writeAgentsMD(codexHome string, inboundAttachmentPaths []string) error {
 	var b strings.Builder
 	skillsDir := envOr("SKILLS_DIR", "/skills")
 	// Agent-runner parity: skills live at /skills/<pack>/<skill>.md AND
@@ -217,6 +216,7 @@ func writeAgentsMD(codexHome string) error {
 		b.WriteString("\n")
 	}
 	writeChannelContextSection(&b)
+	writeInboundAttachmentsSection(&b, inboundAttachmentPaths)
 	writeSympoziumToolsSection(&b)
 	if b.Len() == 0 {
 		return nil
@@ -299,7 +299,26 @@ func writeSympoziumToolsSection(b *strings.Builder) {
 		"sympozium-tool schedule --name <name> --action create  --schedule \"0 9 * * 1-5\" --task \"...\"\n" +
 		"sympozium-tool schedule --name <name> --action update  [--schedule \"...\"] [--task \"...\"]\n" +
 		"sympozium-tool schedule --name <name> --action suspend|resume|delete\n" +
+		"```\n\n" +
+		"## get-attachment (download a channel attachment)\n\n" +
+		"Inbound channel attachments are normally pre-downloaded to /workspace/attachments/ (listed in the \"Inbound attachments\" section when present). To re-download one by artifact ID:\n\n" +
+		"```\n" +
+		"sympozium-tool get-attachment --id <artifactID> [--output /workspace/file.bin]\n" +
 		"```\n")
+}
+
+// writeInboundAttachmentsSection lists files from the triggering channel
+// message that were already materialised into the workspace, so codex knows
+// where to find them without any tool call.
+func writeInboundAttachmentsSection(b *strings.Builder, paths []string) {
+	if len(paths) == 0 {
+		return
+	}
+	b.WriteString("\n# Inbound attachments\n\n" +
+		"The triggering message included file attachments. They have already been downloaded for you:\n\n")
+	for _, p := range paths {
+		fmt.Fprintf(b, "- %s\n", p)
+	}
 }
 
 func writeConfigTOML(codexHome string) error {
@@ -560,7 +579,7 @@ func buildResponseAttachments(ctx context.Context, response, workspace string) [
 
 	const maxAttachments = 10
 
-	uploader := newArtifactUploader()
+	uploader := artifact.NewClientFromEnv()
 	perFileMax := resultAttachmentMaxBytes()
 	if uploader != nil {
 		perFileMax = artifactAttachmentMaxBytes()
@@ -602,7 +621,7 @@ func buildResponseAttachments(ctx context.Context, response, workspace string) [
 		filename := filepath.Base(abs)
 
 		if uploader != nil {
-			id, size, err := uploader.upload(ctx, filename, mimeType, data)
+			id, size, err := uploader.Upload(ctx, filename, mimeType, data)
 			if err != nil {
 				// Never fail the reply over a failed upload; drop the file and
 				// keep the text.
@@ -635,77 +654,6 @@ func buildResponseAttachments(ctx context.Context, response, workspace string) [
 		})
 	}
 	return out
-}
-
-// artifactUploader posts agent-produced files to the artifact-server so their
-// bytes never ride the event bus. It is nil when ARTIFACT_SERVER_URL is unset,
-// in which case the caller falls back to inline base64 embedding.
-type artifactUploader struct {
-	baseURL string
-	token   string
-	client  *http.Client
-}
-
-// newArtifactUploader returns a configured uploader, or nil if the
-// artifact-server is not configured or the pod has no ServiceAccount token.
-func newArtifactUploader() *artifactUploader {
-	base := strings.TrimRight(strings.TrimSpace(os.Getenv("ARTIFACT_SERVER_URL")), "/")
-	if base == "" {
-		return nil
-	}
-	token, err := readServiceAccountToken()
-	if err != nil || token == "" {
-		fmt.Fprintf(os.Stderr, "harness-codex: artifact upload disabled (no SA token): %v\n", err)
-		return nil
-	}
-	return &artifactUploader{
-		baseURL: base,
-		token:   token,
-		client:  &http.Client{Timeout: 60 * time.Second},
-	}
-}
-
-// upload posts a single file and returns the artifact id and stored size.
-func (u *artifactUploader) upload(ctx context.Context, filename, mimeType string, data []byte) (string, int64, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.baseURL+"/v1/artifacts", bytes.NewReader(data))
-	if err != nil {
-		return "", 0, err
-	}
-	req.Header.Set("Authorization", "Bearer "+u.token)
-	req.Header.Set("Content-Type", mimeType)
-	req.Header.Set("X-Artifact-Filename", filename)
-
-	resp, err := u.client.Do(req)
-	if err != nil {
-		return "", 0, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
-	if resp.StatusCode != http.StatusCreated {
-		return "", 0, fmt.Errorf("artifact-server HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-	var ur struct {
-		ID   string `json:"id"`
-		Size int64  `json:"size"`
-	}
-	if err := json.Unmarshal(body, &ur); err != nil {
-		return "", 0, err
-	}
-	if ur.ID == "" {
-		return "", 0, fmt.Errorf("artifact-server returned empty id")
-	}
-	return ur.ID, ur.Size, nil
-}
-
-// readServiceAccountToken reads the projected pod SA token used to authenticate
-// to the artifact-server. SA_TOKEN_PATH overrides the location (tests).
-func readServiceAccountToken() (string, error) {
-	path := envOr("SA_TOKEN_PATH", "/var/run/secrets/kubernetes.io/serviceaccount/token")
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(b)), nil
 }
 
 // artifactAttachmentMaxBytes is the per-file cap when uploading to the

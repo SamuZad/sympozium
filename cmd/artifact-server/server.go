@@ -195,6 +195,8 @@ func (s *server) handleDelete(w http.ResponseWriter, r *http.Request) {
 //   - sibling channel: same namespace, and the caller's SA is the owning
 //     agent's paired channel SA — i.e. stripping the channel suffix from the
 //     caller and the agent suffix from the owner yields the same base name.
+//   - sibling agent: the mirror of the above — the caller is the agent SA
+//     paired with the owning channel SA (inbound channel attachments).
 func authorizeRead(id identity, meta artifactMeta, cfg *Config) bool {
 	if id.IsAdmin {
 		return true
@@ -215,6 +217,16 @@ func authorizeRead(id identity, meta artifactMeta, cfg *Config) bool {
 		strings.HasSuffix(meta.OwnerSA, cfg.AgentSASuffix) {
 		readerBase := strings.TrimSuffix(id.ServiceAccountName, cfg.ChannelSASuffix)
 		ownerBase := strings.TrimSuffix(meta.OwnerSA, cfg.AgentSASuffix)
+		if readerBase != "" && readerBase == ownerBase {
+			return true
+		}
+	}
+	// Sibling agent pod of the owning channel (inbound attachments).
+	if id.Namespace == meta.OwnerNamespace &&
+		strings.HasSuffix(id.ServiceAccountName, cfg.AgentSASuffix) &&
+		strings.HasSuffix(meta.OwnerSA, cfg.ChannelSASuffix) {
+		readerBase := strings.TrimSuffix(id.ServiceAccountName, cfg.AgentSASuffix)
+		ownerBase := strings.TrimSuffix(meta.OwnerSA, cfg.ChannelSASuffix)
 		if readerBase != "" && readerBase == ownerBase {
 			return true
 		}

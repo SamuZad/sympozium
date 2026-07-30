@@ -115,6 +115,25 @@ func TestAuthorizeRead(t *testing.T) {
 			}
 		})
 	}
+
+	channelMeta := artifactMeta{OwnerNamespace: "team-x", OwnerSA: "analyst-channel"}
+	channelCases := []struct {
+		name string
+		id   identity
+		want bool
+	}{
+		{"sibling agent", identity{Namespace: "team-x", ServiceAccountName: "analyst-agent"}, true},
+		{"different channel agent", identity{Namespace: "team-x", ServiceAccountName: "other-agent"}, false},
+		{"agent wrong namespace", identity{Namespace: "team-y", ServiceAccountName: "analyst-agent"}, false},
+		{"other channel", identity{Namespace: "team-x", ServiceAccountName: "other-channel"}, false},
+	}
+	for _, c := range channelCases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := authorizeRead(c.id, channelMeta, cfg); got != c.want {
+				t.Fatalf("authorizeRead(%s) = %v, want %v", c.id, got, c.want)
+			}
+		})
+	}
 }
 
 func TestSanitizeFilename(t *testing.T) {

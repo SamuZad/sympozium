@@ -16,6 +16,8 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
 	oteltrace "go.opentelemetry.io/otel/trace"
+
+	"github.com/sympozium-ai/sympozium/internal/artifact"
 )
 
 // maxToolIterations is the maximum number of tool-call round-trips before
@@ -227,6 +229,19 @@ func main() {
 		}
 		systemPrompt += channelCtx
 		log.Printf("channel context injected: channel=%s chatId=%s threadId=%s", sourceChannel, sourceChatID, sourceThreadID)
+	}
+
+	// Materialize artifact-backed attachments from the triggering channel
+	// message so the agent can read them with its file tools.
+	if paths := artifact.MaterializeInbound(context.Background(), getEnv("WORKSPACE_DIR", "/workspace")); len(paths) > 0 {
+		var sb strings.Builder
+		sb.WriteString("\n\n## Inbound Attachments\n\n" +
+			"The triggering message included file attachments. They have already been downloaded for you:\n\n")
+		for _, p := range paths {
+			fmt.Fprintf(&sb, "- %s\n", p)
+		}
+		systemPrompt += sb.String()
+		log.Printf("inbound attachments materialized: %d file(s)", len(paths))
 	}
 
 	// If this agent is part of an ensemble with relationships, inject
