@@ -69,6 +69,15 @@ func NewNATSEventBus(url string) (*NATSEventBus, error) {
 		nats.RetryOnFailedConnect(true),
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(2*time.Second),
+		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
+			log.Printf("eventbus: NATS disconnected: %v", err)
+		}),
+		nats.ReconnectHandler(func(c *nats.Conn) {
+			log.Printf("eventbus: NATS reconnected to %s", c.ConnectedUrl())
+		}),
+		nats.ClosedHandler(func(_ *nats.Conn) {
+			log.Printf("eventbus: NATS connection closed")
+		}),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to NATS: %w", err)
@@ -86,25 +95,26 @@ func NewNATSEventBus(url string) (*NATSEventBus, error) {
 		createStream: js.CreateOrUpdateStream,
 	}
 
-	// Retry stream creation — NATS may not be fully ready yet.
+	// Best-effort initial stream bootstrap. NATS may not be ready yet —
+	// e.g. a node update recreated the NATS pod and this pod at the same
+	// time. On failure we still return a usable bus rather than giving
+	// up: Publish and Subscribe lazily resync the stream once NATS is
+	// reachable. Returning an error here would leave routing permanently
+	// disabled (routers never added) until the process is restarted.
 	cfg := streamConfig()
-	var stream jetstream.Stream
-	for attempt := 0; attempt < 10; attempt++ {
+	for attempt := 0; attempt < 5; attempt++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		stream, err = bus.createStream(ctx, cfg)
+		stream, serr := bus.createStream(ctx, cfg)
 		cancel()
-		if err == nil {
-			break
+		if serr == nil {
+			bus.stream = stream
+			bus.streamGen.Store(1)
+			return bus, nil
 		}
+		err = serr
 		time.Sleep(2 * time.Second)
 	}
-	if err != nil {
-		nc.Close()
-		return nil, fmt.Errorf("creating JetStream stream after retries: %w", err)
-	}
-	bus.stream = stream
-	bus.streamGen.Store(1)
-
+	log.Printf("eventbus: initial JetStream stream bootstrap failed (%v); bus will resync lazily once NATS is reachable", err)
 	return bus, nil
 }
 
@@ -218,9 +228,14 @@ func (n *NATSEventBus) Publish(ctx context.Context, topic string, event *Event) 
 func (n *NATSEventBus) Subscribe(ctx context.Context, topic string) (<-chan *Event, error) {
 	subject := topicToSubject(topic)
 
+	// Best-effort initial consumer creation. If NATS isn't ready yet
+	// (e.g. a node update recreated NATS alongside this pod) we still
+	// return a live channel and let the goroutine create the consumer
+	// once NATS is reachable, instead of hard-failing the caller's
+	// Start and taking down the router.
 	consumer, gen, err := n.createSubscribeConsumer(ctx, subject)
 	if err != nil {
-		return nil, fmt.Errorf("creating consumer for %s: %w", subject, err)
+		log.Printf("eventbus: initial consumer for %q not ready (%v); will retry until NATS is reachable", subject, err)
 	}
 
 	ch := make(chan *Event, 64)
@@ -228,7 +243,51 @@ func (n *NATSEventBus) Subscribe(ctx context.Context, topic string) (<-chan *Eve
 	go func() {
 		defer close(ch)
 		for {
+			// On a cold start (NATS not ready at Subscribe time) consumer
+			// is nil — create it here before fetching, backing off until
+			// NATS is reachable.
+			if consumer == nil {
+				newConsumer, cgen, cerr := n.createSubscribeConsumer(ctx, subject)
+				if cerr != nil {
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(time.Second):
+					}
+					continue
+				}
+				consumer = newConsumer
+				gen = cgen
+			}
+
 			msgs, err := consumer.Fetch(1, jetstream.FetchMaxWait(5*time.Second))
+			if err == nil {
+				for msg := range msgs.Messages() {
+					var event Event
+					if uerr := json.Unmarshal(msg.Data(), &event); uerr != nil {
+						msg.Nak()
+						continue
+					}
+
+					// Extract trace context from NATS message headers so consumers
+					// can continue the distributed trace started by the publisher.
+					event.Ctx = ExtractTraceContext(ctx, msg.Headers())
+
+					select {
+					case ch <- &event:
+						msg.Ack()
+					case <-ctx.Done():
+						return
+					}
+				}
+
+				// A batch-level error only surfaces after Messages() drains.
+				// When NATS is recreated mid-fetch the consumer/stream is gone
+				// server-side but Fetch itself returns nil, so without this the
+				// loop treats a dead consumer as an idle timeout and spins
+				// forever instead of triggering the recovery below.
+				err = msgs.Error()
+			}
 			if err != nil {
 				select {
 				case <-ctx.Done():
@@ -285,25 +344,6 @@ func (n *NATSEventBus) Subscribe(ctx context.Context, topic string) (<-chan *Eve
 				}
 				continue
 			}
-
-			for msg := range msgs.Messages() {
-				var event Event
-				if err := json.Unmarshal(msg.Data(), &event); err != nil {
-					msg.Nak()
-					continue
-				}
-
-				// Extract trace context from NATS message headers so consumers
-				// can continue the distributed trace started by the publisher.
-				event.Ctx = ExtractTraceContext(ctx, msg.Headers())
-
-				select {
-				case ch <- &event:
-					msg.Ack()
-				case <-ctx.Done():
-					return
-				}
-			}
 		}
 	}()
 
@@ -320,6 +360,15 @@ func (n *NATSEventBus) Subscribe(ctx context.Context, topic string) (<-chan *Eve
 // consumer alive even if Fetch stops for a few minutes.
 func (n *NATSEventBus) createSubscribeConsumer(ctx context.Context, subject string) (jetstream.Consumer, uint64, error) {
 	stream, gen := n.snapshotStream()
+	if stream == nil {
+		// Cold start: the initial bootstrap couldn't reach NATS, so we
+		// have no stream handle yet. Create it now before the consumer.
+		var err error
+		stream, gen, err = n.resyncStream(ctx, 0)
+		if err != nil {
+			return nil, gen, err
+		}
+	}
 	cons, err := stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
 		FilterSubject:     subject,
 		AckPolicy:         jetstream.AckExplicitPolicy,
