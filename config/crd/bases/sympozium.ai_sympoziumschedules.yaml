@@ -64,6 +64,11 @@ spec:
                 description: AgentRef is the name of the Agent this schedule belongs
                   to.
                 type: string
+              baseURL:
+                description: |-
+                  BaseURL overrides the provider's default API endpoint for runs created by
+                  this schedule.
+                type: string
               concurrencyPolicy:
                 default: Forbid
                 description: |-
@@ -80,6 +85,14 @@ spec:
                   IncludeMemory fetches the instance's persistent memory from the
                   central memory server and injects it as context for each run.
                 type: boolean
+              model:
+                description: Model overrides the Agent's default model for runs created
+                  by this schedule.
+                type: string
+              provider:
+                description: Provider overrides the Agent's provider for runs created
+                  by this schedule.
+                type: string
               schedule:
                 description: Schedule is a cron expression (e.g. "0 * * * *").
                 type: string

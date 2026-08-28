@@ -243,6 +243,18 @@ func defaultTools() []ToolDef {
 						"type":        "string",
 						"description": "The task description the agent will receive each time the schedule fires. Be specific and self-contained — each run is independent.",
 					},
+					"model": map[string]any{
+						"type":        "string",
+						"description": "Optional model override for runs created by this schedule. When omitted, the agent's default model is used.",
+					},
+					"provider": map[string]any{
+						"type":        "string",
+						"description": "Optional provider override for runs created by this schedule (e.g. 'openai', 'anthropic'). When omitted, the agent's default provider is used.",
+					},
+					"baseURL": map[string]any{
+						"type":        "string",
+						"description": "Optional provider API endpoint override for runs created by this schedule. When omitted, the agent's default endpoint is used.",
+					},
 					"action": map[string]any{
 						"type":        "string",
 						"description": "What to do: 'create' (new schedule), 'update' (change schedule/task), 'suspend' (pause), 'resume' (unpause), or 'delete' (remove).",
@@ -1281,6 +1293,9 @@ func scheduleTaskTool(args map[string]any) string {
 	action, _ := args["action"].(string)
 	schedule, _ := args["schedule"].(string)
 	task, _ := args["task"].(string)
+	model, _ := args["model"].(string)
+	provider, _ := args["provider"].(string)
+	baseURL, _ := args["baseURL"].(string)
 
 	if name == "" {
 		return "Error: 'name' is required — a short unique name for this schedule"
@@ -1313,11 +1328,17 @@ func scheduleTaskTool(args map[string]any) string {
 		Action   string `json:"action"`
 		Schedule string `json:"schedule,omitempty"`
 		Task     string `json:"task,omitempty"`
+		Model    string `json:"model,omitempty"`
+		Provider string `json:"provider,omitempty"`
+		BaseURL  string `json:"baseURL,omitempty"`
 	}{
 		Name:     name,
 		Action:   action,
 		Schedule: schedule,
 		Task:     task,
+		Model:    model,
+		Provider: provider,
+		BaseURL:  baseURL,
 	}
 
 	data, err := json.Marshal(req)

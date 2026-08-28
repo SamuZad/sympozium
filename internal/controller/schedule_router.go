@@ -32,6 +32,9 @@ type scheduleRequest struct {
 	Action   string `json:"action"` // create, update, suspend, resume, delete
 	Schedule string `json:"schedule,omitempty"`
 	Task     string `json:"task,omitempty"`
+	Model    string `json:"model,omitempty"`
+	Provider string `json:"provider,omitempty"`
+	BaseURL  string `json:"baseURL,omitempty"`
 }
 
 // Start begins listening for schedule upsert events. It blocks until ctx is cancelled.
@@ -127,6 +130,9 @@ func (sr *ScheduleRouter) createSchedule(ctx context.Context, namespace, name, i
 			Type:              "heartbeat",
 			ConcurrencyPolicy: "Forbid",
 			IncludeMemory:     true,
+			Model:             req.Model,
+			Provider:          req.Provider,
+			BaseURL:           req.BaseURL,
 		},
 	}
 
@@ -164,6 +170,15 @@ func (sr *ScheduleRouter) updateSchedule(ctx context.Context, namespace, name st
 	}
 	if req.Task != "" {
 		existing.Spec.Task = req.Task
+	}
+	if req.Model != "" {
+		existing.Spec.Model = req.Model
+	}
+	if req.Provider != "" {
+		existing.Spec.Provider = req.Provider
+	}
+	if req.BaseURL != "" {
+		existing.Spec.BaseURL = req.BaseURL
 	}
 	// Ensure it's not suspended when updating.
 	existing.Spec.Suspend = false

@@ -296,8 +296,8 @@ func writeSympoziumToolsSection(b *strings.Builder) {
 		"## schedule (recurring agent runs)\n\n" +
 		"Create/update/suspend/resume/delete a `SympoziumSchedule`. Each fire triggers a fresh agent run with the given task.\n\n" +
 		"```\n" +
-		"sympozium-tool schedule --name <name> --action create  --schedule \"0 9 * * 1-5\" --task \"...\"\n" +
-		"sympozium-tool schedule --name <name> --action update  [--schedule \"...\"] [--task \"...\"]\n" +
+		"sympozium-tool schedule --name <name> --action create  --schedule \"0 9 * * 1-5\" --task \"...\" [--model MODEL] [--provider PROVIDER] [--base-url URL]\n" +
+		"sympozium-tool schedule --name <name> --action update  [--schedule \"...\"] [--task \"...\"] [--model MODEL] [--provider PROVIDER] [--base-url URL]\n" +
 		"sympozium-tool schedule --name <name> --action suspend|resume|delete\n" +
 		"```\n\n" +
 		"## get-attachment (download a channel attachment)\n\n" +

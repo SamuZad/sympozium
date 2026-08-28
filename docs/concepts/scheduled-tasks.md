@@ -18,6 +18,24 @@ spec:
   concurrencyPolicy: Forbid     # skip if previous run still active
 ```
 
+## Model Overrides
+
+Runs created by a schedule inherit the Agent's model configuration. The optional
+`model`, `provider`, and `baseURL` fields override it per schedule — useful for
+running cheap heartbeats on an expensive agent, or vice versa:
+
+```yaml
+spec:
+  agentRef: alice
+  schedule: "*/30 * * * *"
+  task: "Quick cluster health check"
+  model: claude-haiku-4-5       # override just the model
+```
+
+Unset fields still inherit from the Agent (including auth, thinking, maxTokens,
+and temperature). Agents can pass the same overrides via the `schedule_task`
+tool or `sympozium-tool schedule --model/--provider/--base-url`.
+
 ## Concurrency Policies
 
 Concurrency policies work like `CronJob.spec.concurrencyPolicy` — a natural extension of Kubernetes semantics:

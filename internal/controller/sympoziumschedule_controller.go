@@ -255,6 +255,17 @@ func (r *SympoziumScheduleReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		agentRun.Spec.Model.ProviderHeadersSecretRef = instance.Spec.Agents.Default.ProviderHeadersSecretRef
 	}
 
+	// Apply per-schedule model overrides.
+	if schedule.Spec.Model != "" {
+		agentRun.Spec.Model.Model = schedule.Spec.Model
+	}
+	if schedule.Spec.Provider != "" {
+		agentRun.Spec.Model.Provider = schedule.Spec.Provider
+	}
+	if schedule.Spec.BaseURL != "" {
+		agentRun.Spec.Model.BaseURL = schedule.Spec.BaseURL
+	}
+
 	// Resolve auth secret from the instance.
 	agentRun.Spec.Model.AuthSecretRef = resolveAuthSecret(instance)
 

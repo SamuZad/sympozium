@@ -20,6 +20,19 @@ type SympoziumScheduleSpec struct {
 	// +kubebuilder:default="scheduled"
 	Type string `json:"type,omitempty"`
 
+	// Model overrides the Agent's default model for runs created by this schedule.
+	// +optional
+	Model string `json:"model,omitempty"`
+
+	// Provider overrides the Agent's provider for runs created by this schedule.
+	// +optional
+	Provider string `json:"provider,omitempty"`
+
+	// BaseURL overrides the provider's default API endpoint for runs created by
+	// this schedule.
+	// +optional
+	BaseURL string `json:"baseURL,omitempty"`
+
 	// Suspend pauses scheduling when true.
 	// +optional
 	Suspend bool `json:"suspend,omitempty"`
