@@ -1,4 +1,4 @@
-package main
+package harness
 
 import (
 	"context"
@@ -39,7 +39,7 @@ func TestBuildResponseAttachments_MarkdownAndBare(t *testing.T) {
 	// PNG referenced as a Markdown link (relative), CSV as a bare absolute path.
 	resp := "Here is the chart: [chart.png](chart.png)\nData: " + csvPath
 
-	atts := buildResponseAttachments(context.Background(), resp, ws)
+	atts := BuildResponseAttachments(context.Background(), "test", resp, ws)
 	if len(atts) != 2 {
 		t.Fatalf("expected 2 attachments, got %d: %+v", len(atts), atts)
 	}
@@ -62,7 +62,7 @@ func TestBuildResponseAttachments_MarkdownAndBare(t *testing.T) {
 func TestBuildResponseAttachments_IgnoresURLsAndDisallowedPaths(t *testing.T) {
 	ws := t.TempDir()
 	resp := "See [remote](https://example.com/x.png) and /etc/shadow and /var/secret.pem"
-	if atts := buildResponseAttachments(context.Background(), resp, ws); len(atts) != 0 {
+	if atts := BuildResponseAttachments(context.Background(), "test", resp, ws); len(atts) != 0 {
 		t.Fatalf("expected no attachments, got %d: %+v", len(atts), atts)
 	}
 }
@@ -74,7 +74,7 @@ func TestBuildResponseAttachments_Dedup(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp := "[a](chart.png) again [b](chart.png) and " + p
-	atts := buildResponseAttachments(context.Background(), resp, ws)
+	atts := BuildResponseAttachments(context.Background(), "test", resp, ws)
 	if len(atts) != 1 {
 		t.Fatalf("expected 1 deduped attachment, got %d", len(atts))
 	}
@@ -87,7 +87,7 @@ func TestBuildResponseAttachments_PerFileSizeCap(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("CHANNEL_ATTACHMENT_MAX_BYTES", "1000")
-	if atts := buildResponseAttachments(context.Background(), ws+"/big.bin", ws); len(atts) != 0 {
+	if atts := BuildResponseAttachments(context.Background(), "test", ws+"/big.bin", ws); len(atts) != 0 {
 		t.Fatalf("expected oversized file to be skipped, got %d", len(atts))
 	}
 }
@@ -103,7 +103,7 @@ func TestBuildResponseAttachments_TotalBudget(t *testing.T) {
 	one := (len(tinyPNG)+2)/3*4 + 4
 	t.Setenv("CHANNEL_ATTACHMENT_TOTAL_MAX_BYTES", strconv.Itoa(one))
 	resp := "[a](a.png) [b](b.png)"
-	atts := buildResponseAttachments(context.Background(), resp, ws)
+	atts := BuildResponseAttachments(context.Background(), "test", resp, ws)
 	if len(atts) != 1 {
 		t.Fatalf("expected budget to allow exactly 1 attachment, got %d", len(atts))
 	}
@@ -147,7 +147,7 @@ func TestBuildResponseAttachments_UploadsToArtifactServer(t *testing.T) {
 	t.Setenv("ARTIFACT_SERVER_URL", srv.URL)
 	t.Setenv("SA_TOKEN_PATH", tokFile)
 
-	atts := buildResponseAttachments(context.Background(), "chart at [c](chart.png)", ws)
+	atts := BuildResponseAttachments(context.Background(), "test", "chart at [c](chart.png)", ws)
 	if len(atts) != 1 {
 		t.Fatalf("expected 1 attachment, got %d", len(atts))
 	}

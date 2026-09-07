@@ -1,4 +1,4 @@
-package main
+package harness
 
 import (
 	"context"
@@ -18,11 +18,13 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// harnessObservability mirrors the agent-runner observability layer so codex
-// pods emit the same Sympozium-conventional metrics + spans. Tokens and
-// tool-call counters are stubs for now; populating them would require
-// parsing `codex exec --json` events (deferred).
-type harnessObservability struct {
+// Observability mirrors the agent-runner observability layer so harness pods
+// emit the same Sympozium-conventional metrics + spans, tagged with the
+// harness name. Token and tool-call counters are populated by each shim from
+// its CLI's own output where available; the wrapped CLI's native OTel
+// emissions (if any) are normalised by the collector's transform processor.
+type Observability struct {
+	name     string
 	enabled  bool
 	tracer   trace.Tracer
 	shutdown func(context.Context) error
@@ -31,37 +33,38 @@ type harnessObservability struct {
 	agentRunDurMs metric.Float64Histogram
 }
 
-var harnessObs = &harnessObservability{
-	tracer:   otel.Tracer("sympozium/harness-codex"),
-	shutdown: func(context.Context) error { return nil },
-}
-
-// initObservability bootstraps OTel via pkg/telemetry using the same
+// InitObservability bootstraps OTel via pkg/telemetry using the same
 // SYMPOZIUM_OTEL_* env vars the controller injects for agent-runner.
 // Returns a no-op observer when SYMPOZIUM_OTEL_ENABLED is unset/false or
-// when the configured OTLP endpoint is unreachable.
-func initObservability(ctx context.Context) *harnessObservability {
-	if !strings.EqualFold(os.Getenv("SYMPOZIUM_OTEL_ENABLED"), "true") {
-		return harnessObs
+// when the configured OTLP endpoint is unreachable — a harness must never
+// fail a run because telemetry is down.
+func InitObservability(ctx context.Context, name string) *Observability {
+	noop := &Observability{
+		name:     name,
+		tracer:   otel.Tracer("sympozium/harness-" + name),
+		shutdown: func(context.Context) error { return nil },
 	}
-	endpoint := firstNonEmpty(
+	if !strings.EqualFold(os.Getenv("SYMPOZIUM_OTEL_ENABLED"), "true") {
+		return noop
+	}
+	endpoint := FirstNonEmpty(
 		os.Getenv("SYMPOZIUM_OTEL_OTLP_ENDPOINT"),
 		os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
 	)
 	if endpoint == "" {
-		log.Println("harness-codex: SYMPOZIUM_OTEL_ENABLED=true but no OTLP endpoint set; skipping OTel bootstrap")
-		return harnessObs
+		log.Printf("harness-%s: SYMPOZIUM_OTEL_ENABLED=true but no OTLP endpoint set; skipping OTel bootstrap", name)
+		return noop
 	}
-	if !checkOTLPEndpoint(endpoint) {
-		log.Printf("harness-codex: OTLP endpoint %s unreachable; falling back to noop", endpoint)
-		return harnessObs
+	if !CheckOTLPEndpoint(endpoint) {
+		log.Printf("harness-%s: OTLP endpoint %s unreachable; falling back to noop", name, endpoint)
+		return noop
 	}
 	_ = os.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint)
 
-	serviceName := firstNonEmpty(
+	serviceName := FirstNonEmpty(
 		os.Getenv("SYMPOZIUM_OTEL_SERVICE_NAME"),
 		os.Getenv("OTEL_SERVICE_NAME"),
-		"sympozium-harness-codex",
+		"sympozium-harness-"+name,
 	)
 
 	tel, err := telemetry.Init(ctx, telemetry.Config{
@@ -70,17 +73,18 @@ func initObservability(ctx context.Context) *harnessObservability {
 		ShutdownTimeout: 3 * time.Second,
 	})
 	if err != nil {
-		log.Printf("harness-codex: failed to initialize OTel: %v", err)
-		return harnessObs
+		log.Printf("harness-%s: failed to initialize OTel: %v", name, err)
+		return noop
 	}
 
-	o := &harnessObservability{
+	o := &Observability{
+		name:     name,
 		enabled:  true,
 		tracer:   tel.Tracer(),
 		shutdown: tel.Shutdown,
 	}
 
-	meter := otel.Meter("sympozium/harness-codex")
+	meter := otel.Meter("sympozium/harness-" + name)
 	if c, err := meter.Int64Counter(
 		"sympozium.agent.runs",
 		metric.WithUnit("{run}"),
@@ -88,33 +92,45 @@ func initObservability(ctx context.Context) *harnessObservability {
 	); err == nil {
 		o.agentRuns = c
 	} else {
-		log.Printf("harness-codex: failed creating metric sympozium.agent.runs: %v", err)
+		log.Printf("harness-%s: failed creating metric sympozium.agent.runs: %v", name, err)
 	}
 	if h, err := meter.Float64Histogram("sympozium.agent.run.duration"); err == nil {
 		o.agentRunDurMs = h
 	} else {
-		log.Printf("harness-codex: failed creating metric sympozium.agent.run.duration: %v", err)
+		log.Printf("harness-%s: failed creating metric sympozium.agent.run.duration: %v", name, err)
 	}
-
-	harnessObs = o
 	return o
 }
 
-func (o *harnessObservability) startRunSpan(ctx context.Context, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
+// Shutdown flushes and tears down the OTel providers (no-op when disabled).
+func (o *Observability) Shutdown(ctx context.Context) error {
+	if o == nil || o.shutdown == nil {
+		return nil
+	}
+	return o.shutdown(ctx)
+}
+
+// StartRunSpan opens the top-level "sympozium.agent.run" span.
+func (o *Observability) StartRunSpan(ctx context.Context, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
 	if o == nil {
 		return ctx, trace.SpanFromContext(ctx)
 	}
 	return o.tracer.Start(ctx, "sympozium.agent.run", trace.WithAttributes(attrs...))
 }
 
-func (o *harnessObservability) startCodexSpan(ctx context.Context, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
+// StartExecSpan opens the child span covering the wrapped CLI's execution,
+// named "sympozium.harness.<name>.exec".
+func (o *Observability) StartExecSpan(ctx context.Context, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
 	if o == nil {
 		return ctx, trace.SpanFromContext(ctx)
 	}
-	return o.tracer.Start(ctx, "sympozium.harness.codex.exec", trace.WithAttributes(attrs...))
+	return o.tracer.Start(ctx, "sympozium.harness."+o.name+".exec", trace.WithAttributes(attrs...))
 }
 
-func (o *harnessObservability) recordRun(
+// RecordRun increments the run counter and records the duration histogram
+// with the standard attribute set (instance, status, namespace, model,
+// harness).
+func (o *Observability) RecordRun(
 	ctx context.Context,
 	status, instance, model, namespace string,
 	durationMs int64,
@@ -127,7 +143,7 @@ func (o *harnessObservability) recordRun(
 		attribute.String("status", status),
 		attribute.String("namespace", namespace),
 		attribute.String("model", model),
-		attribute.String("harness", "codex"),
+		attribute.String("harness", o.name),
 	)
 	if o.agentRuns != nil {
 		o.agentRuns.Add(ctx, 1, attrs)
@@ -137,7 +153,8 @@ func (o *harnessObservability) recordRun(
 	}
 }
 
-func markSpanError(span trace.Span, err error) {
+// MarkSpanError records err on span and sets the span status to Error.
+func MarkSpanError(span trace.Span, err error) {
 	if span == nil || err == nil {
 		return
 	}
@@ -145,10 +162,10 @@ func markSpanError(span trace.Span, err error) {
 	span.SetStatus(codes.Error, err.Error())
 }
 
-// writeTraceContext drops a trace-context.json next to the workspace marker
+// WriteTraceContext drops a trace-context.json next to the workspace marker
 // so downstream tooling (and re-entrant runs on a session-scoped PVC) can
 // correlate logs without re-parsing OTel state.
-func writeTraceContext(ctx context.Context) {
+func WriteTraceContext(ctx context.Context, name string) {
 	sc := trace.SpanContextFromContext(ctx)
 	if !sc.IsValid() {
 		return
@@ -161,13 +178,13 @@ func writeTraceContext(ctx context.Context) {
 		"instance_name": os.Getenv("INSTANCE_NAME"),
 		"namespace":     os.Getenv("AGENT_NAMESPACE"),
 		"model":         os.Getenv("MODEL_NAME"),
-		"harness":       "codex",
+		"harness":       name,
 	}
 	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		return
 	}
-	path := "/workspace/.sympozium/trace-context.json"
+	path := filepath.Join(EnvOr("WORKSPACE_DIR", "/workspace"), ".sympozium", "trace-context.json")
 	_ = os.MkdirAll(filepath.Dir(path), 0o755)
 	_ = os.WriteFile(path, data, 0o644)
 }
@@ -183,7 +200,10 @@ func formatTraceparent(sc trace.SpanContext) string {
 	return "00-" + sc.TraceID().String() + "-" + sc.SpanID().String() + "-" + flags
 }
 
-func checkOTLPEndpoint(endpoint string) bool {
+// CheckOTLPEndpoint returns true when a TCP connection to the OTLP endpoint
+// succeeds within 2s. Used to degrade to no-op telemetry instead of blocking
+// a run behind an unreachable collector.
+func CheckOTLPEndpoint(endpoint string) bool {
 	addr := strings.TrimPrefix(strings.TrimPrefix(endpoint, "https://"), "http://")
 	if addr == "" {
 		return false
@@ -194,13 +214,4 @@ func checkOTLPEndpoint(endpoint string) bool {
 	}
 	_ = conn.Close()
 	return true
-}
-
-func firstNonEmpty(vals ...string) string {
-	for _, v := range vals {
-		if v != "" {
-			return v
-		}
-	}
-	return ""
 }

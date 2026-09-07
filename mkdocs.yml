@@ -94,6 +94,7 @@ nav:
     - Unsloth: guides/unsloth.md
     - AWS Bedrock: guides/aws-bedrock.md
     - Serving Mode: guides/serving-mode.md
+    - Harnesses (Codex, Claude Code): guides/harnesses.md
     - Writing Ensembles: guides/writing-ensembles.md
     - Prompt Engineering: guides/prompt-engineering.md
     - Writing Skills: guides/writing-skills.md

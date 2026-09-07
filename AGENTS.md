@@ -19,7 +19,10 @@ Sympozium is a **Kubernetes-native agent orchestration platform** written in Go.
 ```
 api/v1alpha1/           # CRD type definitions (Agent, AgentRun, SympoziumPolicy, SkillPack, SympoziumSchedule, Ensemble)
 cmd/
-  agent-runner/         # Agent container — LLM loop + tool execution
+  agent-runner/         # Agent container — LLM loop + tool execution (default harness)
+  harness-codex/        # Agent container shim wrapping OpenAI's `codex` CLI (harness: codex)
+  harness-claude-code/  # Agent container shim wrapping Anthropic's Claude Code CLI (harness: claude-code)
+  sympozium-tool/       # Shell CLI exposing Sympozium tools (send-message, exec, memory-*) to CLI harnesses
   apiserver/            # HTTP + WebSocket API server
   controller/           # Controller manager (all reconcilers + routers)
   ipc-bridge/           # IPC bridge sidecar (fsnotify → NATS)
@@ -47,6 +50,7 @@ internal/
   channel/              # Channel types
   controller/           # Reconcilers (AgentRun, Agent, SympoziumPolicy, SympoziumSchedule, SkillPack, Ensemble) + routers (Channel, Schedule)
   eventbus/             # NATS JetStream client + topic constants
+  harness/              # Shared plumbing for CLI harness shims (context assembly, MCP bridge, attachments, OTel)
   ipc/                  # IPC bridge (fsnotify watcher, protocol, file handlers)
   orchestrator/         # Pod builder + spawner for agent Jobs
   session/              # Session store
@@ -173,6 +177,7 @@ TEST_MODEL=gpt-5.2 TEST_TIMEOUT=180 ./test/integration/test-write-file.sh
 |------|-------------------|
 | `test-write-file.sh` | `write_file` tool — agent writes a file, script verifies content |
 | `test-anthropic-write-file.sh` | `write_file` tool using Anthropic provider — validates provider parity |
+| `test-claude-code-harness.sh` | `harness: claude-code` — Claude Code CLI runs an AgentRun end-to-end (needs the `harness-claude-code` image loaded + `ANTHROPIC_API_KEY`) |
 | `test-k8s-ops-nodes.sh` | `k8s-ops` skill — agent runs kubectl via sidecar |
 | `test-llmfit-cluster-fit.sh` | `llmfit` skill — agent runs node-level llmfit placement probe workflow |
 | `test-telegram-channel.sh` | Telegram channel deployment + message flow |

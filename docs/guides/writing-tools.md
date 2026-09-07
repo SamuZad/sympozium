@@ -523,7 +523,7 @@ If `chatId` is empty, the message goes to the device owner (self-chat for WhatsA
 
 Slack supports image attachments from a local agent-pod file path or a public `https://` URL. Local files are read by the agent runner or `sympozium-tool`, embedded in the outbound IPC message, and uploaded by the Slack channel pod through Slack's external file upload API. Keep local files reasonably small; attachments default to a 768000-byte cap to avoid oversized event-bus payloads. Set `CHANNEL_ATTACHMENT_MAX_BYTES` on the Agent/AgentRun to adjust it.
 
-The Codex harness additionally delivers files **automatically** on the final answer: any local path the final message references (as a Markdown link or a bare absolute path under the workspace or `/tmp`) that exists and fits the size budget is embedded into the auto-relayed reply and uploaded by the channel pod. This is deterministic and does not require the agent to call `send-message` explicitly. The cumulative base64 size is bounded by `CHANNEL_ATTACHMENT_TOTAL_MAX_BYTES` so a large artifact can never exceed the event-bus message limit; anything over budget is skipped and the text reply is still delivered.
+The Codex and Claude Code harnesses additionally deliver files **automatically** on the final answer: any local path the final message references (as a Markdown link or a bare absolute path under the workspace or `/tmp`) that exists and fits the size budget is embedded into the auto-relayed reply and uploaded by the channel pod. This is deterministic and does not require the agent to call `send-message` explicitly. The cumulative base64 size is bounded by `CHANNEL_ATTACHMENT_TOTAL_MAX_BYTES` so a large artifact can never exceed the event-bus message limit; anything over budget is skipped and the text reply is still delivered.
 
 ### Large files: the artifact-server (reference-by-id)
 
@@ -553,7 +553,7 @@ This raises the practical attachment ceiling to `ARTIFACT_MAX_BYTES` (default 25
 
 Use `url` instead of `path` when the image is already publicly reachable over HTTPS.
 
-Codex harnesses use the shell wrapper:
+CLI harnesses (Codex, Claude Code — see [Harnesses](harnesses.md)) use the shell wrapper:
 
 ```bash
 sympozium-tool send-message --channel slack --text "Chart attached" --attachment-path /tmp/chart.png

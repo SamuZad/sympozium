@@ -19,10 +19,12 @@ data:
 
     processors:
       batch: {}
-      # Normalize harness-specific metric names emitted by codex (and future
-      # CLI-wrapping harnesses) to the sympozium-canonical names emitted by
-      # the agent-runner. Dashboards can then query a single metric/attribute
-      # set regardless of which harness produced the data point.
+      # Normalize harness-specific metric names emitted by codex and Claude
+      # Code (and future CLI-wrapping harnesses) to the sympozium-canonical
+      # names emitted by the agent-runner. Dashboards can then query a single
+      # metric/attribute set regardless of which harness produced the data
+      # point. Every data point already carries `harness=<name>` via
+      # OTEL_RESOURCE_ATTRIBUTES for splitting.
       transform/harness_normalize:
         error_mode: ignore
         metric_statements:
@@ -33,11 +35,20 @@ data:
               - set(name, "sympozium.skill.duration") where name == "codex.tool.call.duration_ms"
               # codex token usage → OTel GenAI semconv (matches agent-runner)
               - set(name, "gen_ai.client.token.usage") where name == "turn.token_usage"
+              # Claude Code token usage → OTel GenAI semconv. (Claude Code
+              # reports tool calls as log events, not metrics, so there is
+              # no tool-invocation counter to rename.)
+              - set(name, "gen_ai.client.token.usage") where name == "claude_code.token.usage"
           - context: datapoint
             statements:
               # codex uses `token_type`; semconv is `gen_ai.token.type`.
               - set(attributes["gen_ai.token.type"], attributes["token_type"]) where attributes["token_type"] != nil
               - delete_key(attributes, "token_type")
+              # Claude Code uses `type` (input|output|cacheRead|cacheCreation);
+              # only touch it on the token-usage metric so other metrics'
+              # `type` attributes are left alone.
+              - set(attributes["gen_ai.token.type"], attributes["type"]) where metric.name == "gen_ai.client.token.usage" and attributes["type"] != nil
+              - delete_key(attributes, "type") where metric.name == "gen_ai.client.token.usage" and attributes["gen_ai.token.type"] != nil
               # codex uses `tool`; agent-runner uses `tool_name`.
               - set(attributes["tool_name"], attributes["tool"]) where attributes["tool"] != nil
               - delete_key(attributes, "tool")

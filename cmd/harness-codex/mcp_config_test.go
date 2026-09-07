@@ -1,15 +1,10 @@
 package main
 
 import (
-	"context"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
-	"time"
 )
 
 func TestWriteConfigTOMLUsesLocalMCPBridgeAdapter(t *testing.T) {
@@ -49,25 +44,34 @@ func TestWriteConfigTOMLUsesLocalMCPBridgeAdapter(t *testing.T) {
 	}
 }
 
-func TestWaitForMCPBridgeRetriesUntilReady(t *testing.T) {
-	var attempts atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			t.Fatalf("method = %s, want POST", r.Method)
-		}
-		if attempts.Add(1) < 3 {
-			http.Error(w, "not ready", http.StatusServiceUnavailable)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}`))
-	}))
-	defer server.Close()
-
-	if err := waitForMCPBridge(context.Background(), server.URL, time.Second); err != nil {
-		t.Fatalf("waitForMCPBridge: %v", err)
+func TestWriteAgentsMDComposesSharedSections(t *testing.T) {
+	codexHome := t.TempDir()
+	skills := t.TempDir()
+	if err := os.WriteFile(filepath.Join(skills, "ops.md"), []byte("# Ops skill\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	if got := attempts.Load(); got != 3 {
-		t.Fatalf("attempts = %d, want 3", got)
+	t.Setenv("SKILLS_DIR", skills)
+	t.Setenv("SYSTEM_PROMPT", "You are the codex persona.")
+	t.Setenv("SOURCE_CHANNEL", "slack")
+	t.Setenv("SOURCE_CHAT_ID", "C1")
+	t.Setenv("SOURCE_THREAD_ID", "")
+
+	if err := writeAgentsMD(codexHome, []string{"/workspace/attachments/in.csv"}); err != nil {
+		t.Fatalf("writeAgentsMD: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(codexHome, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	got := string(data)
+	// Order matters: skills, then system prompt, then channel frame, then attachments.
+	idx := func(s string) int { return strings.Index(got, s) }
+	if !(idx("# Ops skill") < idx("# Agent system prompt") &&
+		idx("# Agent system prompt") < idx("# Channel context") &&
+		idx("# Channel context") < idx("# Inbound attachments")) {
+		t.Fatalf("sections out of order or missing:\n%s", got)
+	}
+	if !strings.Contains(got, "/workspace/attachments/in.csv") {
+		t.Fatalf("missing inbound attachment listing:\n%s", got)
 	}
 }

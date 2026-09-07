@@ -14,9 +14,15 @@
 | `MEMORY_POSTGRES_URL` | Memory Server | PostgreSQL+pgvector connection string for memory rows. |
 | `MEMORY_EMBEDDING_URL` / `MEMORY_EMBEDDING_MODEL` / `MEMORY_EMBEDDING_API_KEY` | Memory Server | OpenAI-compatible embedding endpoint, model name, and key. |
 | `MAX_TOOL_ITERATIONS` | Agent Runner | Maximum tool-call iterations (default: 50). Can also be set per-run via `spec.env` in AgentRun CR. |
-| `CHANNEL_ATTACHMENT_MAX_BYTES` | Agent Runner / Codex harness | Maximum local attachment size embedded into outbound channel messages (default: 768000 bytes). |
-| `CHANNEL_ATTACHMENT_TOTAL_MAX_BYTES` | Codex harness | Cumulative base64 budget for files auto-attached to the final answer, kept under the event-bus max message size (default: 900000 base64 bytes). Files beyond the budget are skipped, leaving the text reply intact. |
-| `ARTIFACT_SERVER_URL` | Agent Runner / Codex harness / Slack channel / Controller | Base URL of the central artifact-server (e.g. `http://sympozium-artifact-server.sympozium-system.svc:8080`). When set, agent-produced files are uploaded by reference (id) and downloaded by channel pods for delivery, so bytes never travel over NATS. When unset, the harness falls back to inline base64 attachments. |
+| `CHANNEL_ATTACHMENT_MAX_BYTES` | Agent Runner / Codex + Claude Code harnesses | Maximum local attachment size embedded into outbound channel messages (default: 768000 bytes). |
+| `CHANNEL_ATTACHMENT_TOTAL_MAX_BYTES` | Codex + Claude Code harnesses | Cumulative base64 budget for files auto-attached to the final answer, kept under the event-bus max message size (default: 900000 base64 bytes). Files beyond the budget are skipped, leaving the text reply intact. |
+| `ARTIFACT_SERVER_URL` | Agent Runner / Codex + Claude Code harnesses / Slack channel / Controller | Base URL of the central artifact-server (e.g. `http://sympozium-artifact-server.sympozium-system.svc:8080`). When set, agent-produced files are uploaded by reference (id) and downloaded by channel pods for delivery, so bytes never travel over NATS. When unset, the harness falls back to inline base64 attachments. |
+| `CODEX_HOME` | Codex harness | Where codex stores `config.toml`, `auth.json`, `AGENTS.md` and session state (default `/workspace/.codex`, so it persists on a per-session workspace PVC). |
+| `CLAUDE_CONFIG_DIR` | Claude Code harness | Where Claude Code stores settings, `CLAUDE.md`, and session transcripts (default `/workspace/.claude`, so it persists on a per-session workspace PVC). |
+| `CLAUDE_CODE_CONTINUE` | Claude Code harness | `true`/`false` forces or forbids resuming the previous Claude Code conversation (`--continue`). Default: resume for conversational session keys (channels, web, MCP) when a transcript exists; never for `sched:*`. |
+| `CLAUDE_CODE_MAX_BUDGET_USD` | Claude Code harness | Per-run API spend cap in dollars, passed to `claude` as `--max-budget-usd`. |
+| `HARNESS_CLAUDE_EXTRA_ARGS` | Claude Code harness | Space-separated extra flags appended to the `claude` invocation (e.g. `--fallback-model claude-sonnet-5`). |
+| `MCP_BRIDGE_URL` | Codex + Claude Code harnesses | Loopback MCP endpoint served by the mcp-bridge sidecar (default `http://127.0.0.1:8765/mcp`); only used when the sidecar's manifest (`MCP_MANIFEST_PATH`) lists tools. |
 | `ARTIFACT_LISTEN` | Artifact Server | Listen address (default `:8080`). |
 | `ARTIFACT_DATA_DIR` | Artifact Server | Directory (PVC mount) where blobs + metadata are stored (default `/data`). |
 | `ARTIFACT_MAX_BYTES` | Artifact Server | Maximum accepted upload size in bytes (default `26214400` = 25 MiB). Larger uploads are rejected with HTTP 413. |
