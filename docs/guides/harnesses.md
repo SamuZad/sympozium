@@ -71,11 +71,12 @@ built on `internal/harness`. On start they:
    `/workspace/attachments/`.
 2. **Expose Sympozium tools as a shell CLI.** The CLI agent's general-purpose
    tool is a shell, so the image ships `sympozium-tool` and the context
-   documents its subcommands: `send-message`, `schedule`, `exec --target
-   <skillpack> -- <cmd>` (runs in a SkillPack sidecar with its RBAC),
-   `memory-search|store|list`, `get-attachment`. They write the same
-   `/ipc/**` files the agent-runner does, so the IPC bridge treats them
-   identically.
+   documents its subcommands: `send-message`, `schedule` (create/update/
+   suspend/resume/delete plus `status`/`list`, each returning the state the
+   controller applied), `exec --target <skillpack> -- <cmd>` (runs in a
+   SkillPack sidecar with its RBAC), `memory-search|store|list`,
+   `get-attachment`. They write the same `/ipc/**` files the agent-runner
+   does, so the IPC bridge treats them identically.
 3. **Wire MCP through the bridge.** When the `mcp-bridge` sidecar has
    discovered tools it publishes a manifest; the shim then points the CLI at
    the single loopback endpoint `http://127.0.0.1:8765/mcp` and waits for it to

@@ -39,7 +39,7 @@ Every agent pod has these tools available out of the box (no skill sidecar requi
 | `list_directory` | Native | List directory contents with type, size, and name |
 | `fetch_url` | Native | Fetch web pages or API endpoints. HTML is converted to readable plain text |
 | `send_channel_message` | IPC (bridge) | Send a message through a connected channel |
-| `schedule_task` | IPC (bridge) | Create, update, suspend, resume, or delete recurring `SympoziumSchedule` tasks |
+| `schedule_task` | IPC (bridge) | Create, update, suspend, resume, delete, or inspect (`status`/`list`) recurring `SympoziumSchedule` tasks; replies with the state the controller applied |
 
 !!! note
     **Native** tools run directly in the agent container. **IPC** tools communicate with sidecars or the IPC bridge via the shared `/ipc` volume. See the [Tool Authoring Guide](../guides/writing-tools.md) for how to add your own, or the [Sidecar Authoring Guide](../guides/writing-sidecars.md) to build a custom sidecar that processes IPC calls.

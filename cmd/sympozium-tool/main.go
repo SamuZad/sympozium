@@ -65,7 +65,7 @@ func usage() {
 
 Subcommands (IPC):
   send-message   Send a message to a connected channel (Telegram/Slack/Discord/WhatsApp).
-  schedule       Create, update, suspend, resume, or delete a recurring schedule.
+  schedule       Create, update, suspend, resume, delete, or inspect (status/list) recurring schedules.
   exec           Run a command in a SkillPack sidecar (with the sidecar's RBAC).
 
 Subcommands (memory):
@@ -337,71 +337,8 @@ INBOUND_ATTACHMENTS environment variable or the run's attachment listing).`)
 
 // --- schedule ---------------------------------------------------------------
 
-func cmdSchedule(argv []string) int {
-	fs := flag.NewFlagSet("schedule", flag.ContinueOnError)
-	name := fs.String("name", "", "Schedule name (required)")
-	action := fs.String("action", "", "create | update | suspend | resume | delete (required)")
-	schedule := fs.String("schedule", "", "Cron expression (required for create; optional for update)")
-	task := fs.String("task", "", "Task description fired on each run (required for create)")
-	model := fs.String("model", "", "Optional model override for runs created by this schedule")
-	provider := fs.String("provider", "", "Optional provider override for runs created by this schedule")
-	baseURL := fs.String("base-url", "", "Optional provider API endpoint override for runs created by this schedule")
-	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, `Usage: sympozium-tool schedule --name NAME --action <create|update|suspend|resume|delete> [--schedule CRON] [--task "..."] [--model MODEL] [--provider PROVIDER] [--base-url URL]
-
-Writes /ipc/schedules/schedule-<ts>.json. The IPC bridge relays it to the controller,
-which creates/updates the corresponding SympoziumSchedule. Model, provider, and
-base URL default to the agent's own configuration when omitted.
-
-Examples:
-  sympozium-tool schedule --name daily-report --action create --schedule "0 9 * * 1-5" --task "Summarise yesterday's incidents"
-  sympozium-tool schedule --name daily-report --action update --model claude-haiku-4-5
-  sympozium-tool schedule --name daily-report --action suspend`)
-		fs.PrintDefaults()
-	}
-	if err := fs.Parse(argv); err != nil {
-		return 2
-	}
-	if *name == "" {
-		fmt.Fprintln(os.Stderr, "error: --name is required")
-		return 2
-	}
-	switch *action {
-	case "":
-		fmt.Fprintln(os.Stderr, "error: --action is required (create|update|suspend|resume|delete)")
-		return 2
-	case "create":
-		if *schedule == "" {
-			fmt.Fprintln(os.Stderr, "error: --schedule is required for create")
-			return 2
-		}
-		if *task == "" {
-			fmt.Fprintln(os.Stderr, "error: --task is required for create")
-			return 2
-		}
-	case "update":
-		if *schedule == "" && *task == "" {
-			fmt.Fprintln(os.Stderr, "error: --schedule and/or --task is required for update")
-			return 2
-		}
-	case "suspend", "resume", "delete":
-		// name + action only.
-	default:
-		fmt.Fprintf(os.Stderr, "error: unknown --action %q (use create|update|suspend|resume|delete)\n", *action)
-		return 2
-	}
-
-	req := struct {
-		Name     string `json:"name"`
-		Action   string `json:"action"`
-		Schedule string `json:"schedule,omitempty"`
-		Task     string `json:"task,omitempty"`
-		Model    string `json:"model,omitempty"`
-		Provider string `json:"provider,omitempty"`
-		BaseURL  string `json:"baseURL,omitempty"`
-	}{Name: *name, Action: *action, Schedule: *schedule, Task: *task, Model: *model, Provider: *provider, BaseURL: *baseURL}
-	return writeIPC("/ipc/schedules", "schedule", req, fmt.Sprintf("Schedule %q %s", *name, *action))
-}
+// cmdSchedule lives in schedule.go: it relays the request through the IPC
+// bridge and blocks for the controller's reply.
 
 // --- exec -------------------------------------------------------------------
 

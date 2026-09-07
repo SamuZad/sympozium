@@ -59,6 +59,7 @@ const (
 	TopicAgentSubagentRequest = "agent.subagent.request"
 	TopicAgentSubagentResult  = "agent.subagent.result" // per-run: agent.subagent.result.{parentRunID}
 	TopicScheduleUpsert       = "schedule.upsert"
+	TopicScheduleResult       = "schedule.result" // per-run: schedule.result.{agentRunID}
 	TopicStimulusDelivered    = "ensemble.stimulus.delivered"
 
 	// Density telemetry (from llmfit DaemonSet via FitnessCache)

@@ -209,7 +209,7 @@ The agent-runner has 7 built-in tools defined in `cmd/agent-runner/tools.go`:
 | `list_directory` | Native | List directory contents |
 | `send_channel_message` | IPC (bridge) | Send messages to Telegram/Slack/Discord/WhatsApp |
 | `fetch_url` | Native | HTTP GET a URL and return the body |
-| `schedule_task` | IPC (bridge) | Create/update/suspend/resume/delete SympoziumSchedule CRDs |
+| `schedule_task` | IPC (bridge, round-trip) | Create/update/suspend/resume/delete/status/list SympoziumSchedule CRDs; blocks for the controller's reply (`schedule.result.<runID>`) so the agent sees the applied state |
 
 See `docs/writing-tools.md` for the full guide on adding new tools.
 

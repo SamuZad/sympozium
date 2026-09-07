@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -354,9 +355,46 @@ func (b *Bridge) watchSchedules(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case fe := <-events:
+			// The bridge writes controller replies into the same directory
+			// (result-<id>.json); never relay those back as requests.
+			if !isScheduleRequestFile(filepath.Base(fe.Path)) {
+				continue
+			}
 			b.handleScheduleRequest(ctx, fe)
 		}
 	}
+}
+
+// isScheduleRequestFile reports whether a file under /ipc/schedules/ is an
+// agent request (anything that is not a controller reply). Requests are
+// accepted regardless of prefix so older clients keep working.
+func isScheduleRequestFile(name string) bool {
+	return !strings.HasPrefix(name, ScheduleResultPrefix) && strings.HasSuffix(name, ".json")
+}
+
+// writeScheduleResult drops a controller reply at
+// /ipc/schedules/result-<id>.json for the blocking schedule tool to pick up.
+// Written atomically (tmp + rename) so a poller never sees a partial file.
+func (b *Bridge) writeScheduleResult(data []byte) {
+	var parsed struct {
+		ID string `json:"id"`
+	}
+	if json.Unmarshal(data, &parsed) != nil || parsed.ID == "" {
+		b.Log.Info("Ignoring schedule result without id")
+		return
+	}
+	dir := filepath.Join(b.BasePath, DirSchedules)
+	path := filepath.Join(dir, ScheduleResultPrefix+parsed.ID+".json")
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0640); err != nil {
+		b.Log.Error(err, "failed to write schedule result", "id", parsed.ID)
+		return
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		b.Log.Error(err, "failed to publish schedule result", "id", parsed.ID)
+		return
+	}
+	b.Log.Info("Wrote schedule result", "id", parsed.ID)
 }
 
 // handleScheduleRequest processes a schedule request file.
@@ -415,10 +453,20 @@ func (b *Bridge) subscribeToInbound(ctx context.Context) {
 		b.Log.Error(err, "failed to subscribe to subagent result events")
 	}
 
+	// Subscribe to schedule results (the blocking schedule_task tool /
+	// `sympozium-tool schedule` poll for these files)
+	scheduleResultCh, err := b.EventBus.Subscribe(ctx, fmt.Sprintf("%s.%s", eventbus.TopicScheduleResult, b.AgentRunID))
+	if err != nil {
+		b.Log.Error(err, "failed to subscribe to schedule result events")
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
+
+		case event := <-scheduleResultCh:
+			b.writeScheduleResult(event.Data)
 
 		case event := <-followupCh:
 			// Write follow-up message to /ipc/input/

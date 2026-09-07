@@ -144,12 +144,16 @@ func SympoziumToolsSection() string {
 		"```\n\n" +
 		"Slack image attachments can use `--attachment-path` for a local generated PNG or `--attachment-url` for a public HTTPS image. Local files are capped by CHANNEL_ATTACHMENT_MAX_BYTES (default 768000).\n\n" +
 		"## schedule (recurring agent runs)\n\n" +
-		"Create/update/suspend/resume/delete a `SympoziumSchedule`. Each fire triggers a fresh agent run with the given task.\n\n" +
+		"Create/update/suspend/resume/delete a `SympoziumSchedule`, or inspect your schedules. Each fire triggers a fresh agent run with the given task. " +
+		"Every command prints the state the controller actually applied (final CR name, cron, suspend flag, run counts, last run outcome) and exits non-zero on errors such as \"not found\" — check it rather than assuming success.\n\n" +
 		"```\n" +
+		"sympozium-tool schedule --action list                      # every schedule targeting you\n" +
+		"sympozium-tool schedule --name <name> --action status       # one schedule + its last run's outcome/failure reason\n" +
 		"sympozium-tool schedule --name <name> --action create  --schedule \"0 9 * * 1-5\" --task \"...\" [--model MODEL] [--provider PROVIDER] [--base-url URL]\n" +
 		"sympozium-tool schedule --name <name> --action update  [--schedule \"...\"] [--task \"...\"] [--model MODEL] [--provider PROVIDER] [--base-url URL]\n" +
 		"sympozium-tool schedule --name <name> --action suspend|resume|delete\n" +
 		"```\n\n" +
+		"Add `--json` for the raw reply.\n\n" +
 		"## get-attachment (download a channel attachment)\n\n" +
 		"Inbound channel attachments are normally pre-downloaded to /workspace/attachments/ (listed in the \"Inbound attachments\" section when present). To re-download one by artifact ID:\n\n" +
 		"```\n" +

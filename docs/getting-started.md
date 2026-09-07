@@ -244,7 +244,7 @@ Every agent pod ships with these seven tools:
 | `list_directory` | List directory contents |
 | `send_channel_message` | Send a message to Telegram / Slack / Discord / WhatsApp |
 | `fetch_url` | HTTP GET a URL and return the body |
-| `schedule_task` | Create, update, suspend, or delete SympoziumSchedule CRDs |
+| `schedule_task` | Create, update, suspend, resume, delete, or inspect (`status`/`list`) SympoziumSchedule CRDs |
 
 Tools are governed by the **SympoziumPolicy** you selected during onboarding. The
 default policy lets read-only tools run freely and asks for approval before

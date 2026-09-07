@@ -224,10 +224,14 @@ func defaultTools() []ToolDef {
 		},
 		{
 			Name: ToolScheduleTask,
-			Description: "Create, update, or delete a recurring scheduled task. " +
+			Description: "Create, update, inspect, or delete a recurring scheduled task. " +
 				"Use this to set up heartbeats, periodic checks, or any repeating work. " +
 				"The schedule fires automatically and creates a new AgentRun each time. " +
-				"You can adjust the interval, update the task description, pause, or delete a schedule.",
+				"You can adjust the interval, update the task description, pause, or delete a schedule. " +
+				"Use action 'list' to see every schedule targeting you (agent- and operator-created), and " +
+				"action 'status' to read one schedule's applied cron, suspend state, run counts, next/last " +
+				"run time, and the last run's outcome or failure reason. Every action returns the state the " +
+				"controller actually applied — check it rather than assuming success.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -257,11 +261,11 @@ func defaultTools() []ToolDef {
 					},
 					"action": map[string]any{
 						"type":        "string",
-						"description": "What to do: 'create' (new schedule), 'update' (change schedule/task), 'suspend' (pause), 'resume' (unpause), or 'delete' (remove).",
-						"enum":        []string{"create", "update", "suspend", "resume", "delete"},
+						"description": "What to do: 'create' (new schedule), 'update' (change schedule/task/model), 'suspend' (pause), 'resume' (unpause), 'delete' (remove), 'status' (read one schedule's applied state and last run), or 'list' (all schedules targeting this agent; 'name' not needed).",
+						"enum":        []string{"create", "update", "suspend", "resume", "delete", "status", "list"},
 					},
 				},
-				"required": []string{"name", "action"},
+				"required": []string{"action"},
 			},
 		},
 		{
@@ -1285,97 +1289,6 @@ func truncateStr(s string, n int) string {
 }
 
 // --- Schedule task tool ---
-
-// scheduleTaskTool writes a schedule request to /ipc/schedules/ for the
-// IPC bridge to relay to the controller, which creates/updates a SympoziumSchedule.
-func scheduleTaskTool(args map[string]any) string {
-	name, _ := args["name"].(string)
-	action, _ := args["action"].(string)
-	schedule, _ := args["schedule"].(string)
-	task, _ := args["task"].(string)
-	model, _ := args["model"].(string)
-	provider, _ := args["provider"].(string)
-	baseURL, _ := args["baseURL"].(string)
-
-	if name == "" {
-		return "Error: 'name' is required — a short unique name for this schedule"
-	}
-	if action == "" {
-		return "Error: 'action' is required (create, update, suspend, resume, delete)"
-	}
-
-	// Validate required fields per action.
-	switch action {
-	case "create":
-		if schedule == "" {
-			return "Error: 'schedule' is required for create (cron expression, e.g. '0 */3 * * *')"
-		}
-		if task == "" {
-			return "Error: 'task' is required for create — what should the agent do each time?"
-		}
-	case "update":
-		if schedule == "" && task == "" {
-			return "Error: 'schedule' and/or 'task' required for update — provide what you want to change"
-		}
-	case "suspend", "resume", "delete":
-		// Only name + action needed.
-	default:
-		return fmt.Sprintf("Error: unknown action '%s' — use create, update, suspend, resume, or delete", action)
-	}
-
-	req := struct {
-		Name     string `json:"name"`
-		Action   string `json:"action"`
-		Schedule string `json:"schedule,omitempty"`
-		Task     string `json:"task,omitempty"`
-		Model    string `json:"model,omitempty"`
-		Provider string `json:"provider,omitempty"`
-		BaseURL  string `json:"baseURL,omitempty"`
-	}{
-		Name:     name,
-		Action:   action,
-		Schedule: schedule,
-		Task:     task,
-		Model:    model,
-		Provider: provider,
-		BaseURL:  baseURL,
-	}
-
-	data, err := json.Marshal(req)
-	if err != nil {
-		return fmt.Sprintf("Error marshalling schedule request: %v", err)
-	}
-
-	dir := "/ipc/schedules"
-	_ = os.MkdirAll(dir, 0o755)
-	id := fmt.Sprintf("%d", time.Now().UnixNano())
-	path := filepath.Join(dir, fmt.Sprintf("schedule-%s.json", id))
-
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		return fmt.Sprintf("Error writing schedule file: %v", err)
-	}
-
-	log.Printf("Wrote schedule request: name=%s action=%s schedule=%s", name, action, schedule)
-
-	switch action {
-	case "create":
-		return fmt.Sprintf("Schedule '%s' created with cron '%s'. The task will run automatically on this interval.", name, schedule)
-	case "update":
-		parts := []string{}
-		if schedule != "" {
-			parts = append(parts, fmt.Sprintf("schedule='%s'", schedule))
-		}
-		if task != "" {
-			parts = append(parts, "task updated")
-		}
-		return fmt.Sprintf("Schedule '%s' updated: %s", name, strings.Join(parts, ", "))
-	case "suspend":
-		return fmt.Sprintf("Schedule '%s' suspended. It will not fire until resumed.", name)
-	case "resume":
-		return fmt.Sprintf("Schedule '%s' resumed. Next run will fire according to the cron expression.", name)
-	case "delete":
-		return fmt.Sprintf("Schedule '%s' deleted.", name)
-	default:
-		return fmt.Sprintf("Schedule '%s' action '%s' submitted.", name, action)
-	}
-}
+//
+// scheduleTaskTool lives in schedule_tool.go: it writes the request to
+// /ipc/schedules/ and blocks for the controller's reply.
