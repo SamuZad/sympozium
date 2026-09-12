@@ -117,19 +117,10 @@ func testGatewayTenantCredentialIsolation(t *testing.T, live, process bool) {
 		}
 		t.Log("live Kubernetes authority test: caller uses configured kubeconfig; this is not tenant RBAC isolation proof")
 	}
-	g, err := New(Config{AuthorityReady: probe, ClusterID: "cluster", RegistrationToken: cap.NewToken("issuer-transport-canary"), AllowPrivateOrigins: map[string]bool{provider.URL: true}}, verifier, k8s, budget, authorities)
+	providerRoots := provider.Client().Transport.(*http.Transport).TLSClientConfig.RootCAs
+	g, err := New(Config{AuthorityReady: probe, ClusterID: "cluster", RegistrationToken: cap.NewToken("issuer-transport-canary"), AllowPrivateOrigins: map[string]bool{provider.URL: true}, ProviderRootCAs: providerRoots}, verifier, k8s, budget, authorities)
 	if err != nil {
 		t.Fatal(err)
-	}
-	// Trust only the recorder's generated CA; keep production destination
-	// validation and certificate verification enabled (never InsecureSkipVerify).
-	g.newClient = func(endpoint string, private bool, timeout time.Duration) (*http.Client, error) {
-		out, err := clientForEndpoint(endpoint, private, timeout)
-		if err != nil {
-			return nil, err
-		}
-		out.Transport.(*http.Transport).TLSClientConfig.RootCAs = provider.Client().Transport.(*http.Transport).TLSClientConfig.RootCAs
-		return out, nil
 	}
 	if err = g.Ready(ctx); err != nil {
 		t.Fatal(err)

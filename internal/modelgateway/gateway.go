@@ -3,6 +3,7 @@ package modelgateway
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"net/http"
@@ -25,12 +26,15 @@ type Gateway struct {
 	budgets     BudgetStore
 	authorities AuthorityStore
 	sem         chan struct{}
-	newClient   func(string, bool, time.Duration) (*http.Client, error)
+	newClient   func(string, bool, time.Duration, *x509.CertPool) (*http.Client, error)
 }
 
 func New(config Config, verifier *cellncapability.Verifier, k8s client.Reader, budgets BudgetStore, authorities AuthorityStore) (*Gateway, error) {
 	if err := config.defaults(); err != nil {
 		return nil, err
+	}
+	if config.ProviderRootCAs != nil {
+		config.ProviderRootCAs = config.ProviderRootCAs.Clone()
 	}
 	if verifier == nil || k8s == nil || budgets == nil || authorities == nil {
 		return nil, fmt.Errorf("verifier, Kubernetes reader, durable budget store and authority store are required")
@@ -211,7 +215,7 @@ func (g *Gateway) Invoke(ctx context.Context, token cellncapability.Token, in In
 	}
 	defer stopWatching()
 	allowPrivate := authority.AllowInsecure && privateOriginAllowed(authority.Endpoint, g.config.AllowPrivateOrigins)
-	httpClient, err := g.newClient(authority.Endpoint, allowPrivate, g.config.MaxProviderDuration)
+	httpClient, err := g.newClient(authority.Endpoint, allowPrivate, g.config.MaxProviderDuration, g.config.ProviderRootCAs)
 	if err != nil {
 		return InvokeResponse{}, err
 	}

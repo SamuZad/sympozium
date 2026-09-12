@@ -114,6 +114,44 @@ func newPlatformFixture(t *testing.T, namespace string, model bool) platformFixt
 	return platformFixture{resolver: PlatformResolver{Reader: spy}, client: c, spy: spy, runKey: client.ObjectKeyFromObject(run), now: time.Unix(1790000000, 0).UTC()}
 }
 
+func TestPlatformResolverAllowsExplicitPrivateTLSCredentialRoute(t *testing.T) {
+	f := newPlatformFixture(t, "private-tls-route", true)
+	ctx := context.Background()
+	var connection api.ModelConnection
+	if err := f.client.Get(ctx, types.NamespacedName{Namespace: f.runKey.Namespace, Name: "model"}, &connection); err != nil {
+		t.Fatal(err)
+	}
+	connection.Spec.Endpoint = "https://127.0.0.1:9443/v1/chat/completions"
+	connection.Spec.AllowInsecure = true
+	if err := f.client.Update(ctx, &connection); err != nil {
+		t.Fatal(err)
+	}
+	var policies api.CellnExecutionPolicyList
+	if err := f.client.List(ctx, &policies); err != nil || len(policies.Items) != 2 {
+		t.Fatalf("policy list: count=%d err=%v", len(policies.Items), err)
+	}
+	for i := range policies.Items {
+		policies.Items[i].Spec.Routes[0].EndpointOrigins = []string{"https://127.0.0.1:9443"}
+		if err := f.client.Update(ctx, &policies.Items[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	resolved, err := f.resolver.Resolve(ctx, f.runKey, PlatformResolveRequest{ClusterID: "cluster", Now: f.now, AdmissionWindow: time.Minute, Operation: "execution.start"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Decision.Route.EndpointOrigin != "https://127.0.0.1:9443" || resolved.Decision.Route.Auth != "secret" {
+		t.Fatalf("unexpected private TLS route: %#v", resolved.Decision.Route)
+	}
+	connection.Spec.Endpoint = "http://127.0.0.1:9443/v1/chat/completions"
+	if err := f.client.Update(ctx, &connection); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.resolver.Resolve(ctx, f.runKey, PlatformResolveRequest{ClusterID: "cluster", Now: f.now, AdmissionWindow: time.Minute, Operation: "execution.start"}); PlatformReason(err) != ReasonRouteMismatch {
+		t.Fatalf("credential-bearing HTTP route was not refused: %v", err)
+	}
+}
+
 func platformRequest(f platformFixture) PlatformResolveRequest {
 	return PlatformResolveRequest{ClusterID: "cluster-test", Now: f.now, AdmissionWindow: 60 * time.Second}
 }
