@@ -269,7 +269,7 @@ type managedProcess struct {
 }
 
 func startCelln(ctx context.Context, o options, address, jwks, gateway, gatewayCA, parentTemplate string) (*managedProcess, error) {
-	args := []string{"--root", o.cellnRoot, "dispatcher", "--listen", address, "--token-file", o.cellnTokenFile, "--scoped-operator-token-file", o.scopedOperatorTokenFile, "--scoped-jwks-file", jwks, "--scoped-issuer", issuerName, "--scoped-gateway-origin", gateway, "--scoped-gateway-ca", gatewayCA, "--scoped-parent-request-file", parentTemplate}
+	args := []string{"--root", o.cellnRoot, "dispatcher", "--mote-store", filepath.Join(o.cellnRoot, "motes"), "--tool-store", filepath.Join(o.cellnRoot, "tools"), "--max-cells", "6", "--memory-bytes", "536870912", "--egress-slots", "4", "--listen", address, "--token-file", o.cellnTokenFile, "--scoped-operator-token-file", o.scopedOperatorTokenFile, "--scoped-jwks-file", jwks, "--scoped-issuer", issuerName, "--scoped-gateway-origin", gateway, "--scoped-gateway-ca", gatewayCA, "--scoped-parent-request-file", parentTemplate}
 	cmd := exec.CommandContext(ctx, o.cellnBinary, args...)
 	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

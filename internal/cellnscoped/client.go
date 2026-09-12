@@ -108,6 +108,9 @@ func (c *hostClient) post(ctx context.Context, path string, body any, headers ma
 		reason := "HOST_REQUEST_REFUSED"
 		var failure struct {
 			Reason string `json:"reason"`
+			// Native responses include a generic error label. Never expose it:
+			// only the separately validated public refusal code leaves custody.
+			Error string `json:"error,omitempty"`
 		}
 		if len(data) != 0 && cap.StrictDecode(data, &failure) == nil && publicReasonPattern.MatchString(failure.Reason) {
 			reason = failure.Reason

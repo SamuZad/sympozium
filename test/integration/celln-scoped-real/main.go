@@ -33,7 +33,7 @@ import (
 )
 
 const (
-	issuerName  = "sympozium-celln-scoped-live"
+	issuerName  = "sympozium-control-plane"
 	issuerKeyID = "scoped-live-v1"
 )
 
@@ -81,6 +81,9 @@ type providerRecorder struct {
 }
 
 func main() {
+	// controller-runtime registers its own global kubeconfig flag; this harness
+	// owns an explicit client configuration and must not share that flag set.
+	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 	var o options
 	flag.StringVar(&o.repoRoot, "repo", "", "absolute Sympozium repository root")
 	flag.StringVar(&o.kubeconfig, "kubeconfig", "", "absolute private kubeconfig")
@@ -134,7 +137,13 @@ func run(ctx context.Context, o options) (retErr error) {
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(work)
+	defer func() {
+		if retErr == nil {
+			_ = os.RemoveAll(work)
+		} else {
+			fmt.Fprintf(os.Stderr, "Private recovery material retained at %s; do not remove until native cleanup is confirmed\n", work)
+		}
+	}()
 	if err := os.Chmod(work, 0700); err != nil {
 		return err
 	}
@@ -259,8 +268,12 @@ func run(ctx context.Context, o options) (retErr error) {
 				cleanupFailures = append(cleanupFailures, cleanupErr.Error())
 			}
 		}
-		if cleanupErr := cleanupCreated(cleanupCtx, k8sClient, objects); cleanupErr != nil {
-			cleanupFailures = append(cleanupFailures, cleanupErr.Error())
+		// Preserve protected identity and all recovery dependencies whenever any
+		// native cleanup is uncertain. UID-scoped deletion alone is not enough.
+		if len(cleanupFailures) == 0 {
+			if cleanupErr := cleanupCreated(cleanupCtx, k8sClient, objects); cleanupErr != nil {
+				cleanupFailures = append(cleanupFailures, cleanupErr.Error())
+			}
 		}
 		if len(cleanupFailures) != 0 {
 			retErr = fmt.Errorf("%v; failure cleanup: %s", retErr, strings.Join(cleanupFailures, "; "))
