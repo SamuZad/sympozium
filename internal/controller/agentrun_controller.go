@@ -160,6 +160,8 @@ type AgentRunReconciler struct {
 	// ScopedDispatcher is the explicit operator-configured shared-catalogue
 	// one-shot/enduring path. Nil is disabled and never falls back to legacy.
 	ScopedDispatcher *cellnscoped.Dispatcher
+	// ScopedOnly ignores non-catalogue runs before finalizers or legacy side effects.
+	ScopedOnly bool
 	// ParentConfigPath explicitly enables experimental enduring-parent startup.
 	// Empty refuses new enduring runs; existing cleanup remains fail-closed.
 	ParentConfigPath string
@@ -297,6 +299,15 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 	if r.ParentOnly && !parentOnlyRun(agentRun) {
 		return ctrl.Result{}, nil
+	}
+	if r.ScopedOnly {
+		selected, err := r.sharedCatalogueSelected(ctx, agentRun)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if !selected {
+			return ctrl.Result{}, nil
+		}
 	}
 
 	// If the AgentRun carries a traceparent annotation (set by channel router),
@@ -6494,7 +6505,7 @@ func (r *AgentRunReconciler) cleanupWorkspacePVC(ctx context.Context, log logr.L
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *AgentRunReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	if r.ParentOnly {
+	if r.ParentOnly || r.ScopedOnly {
 		return ctrl.NewControllerManagedBy(mgr).For(&sympoziumv1alpha1.AgentRun{}).Complete(r)
 	}
 	return ctrl.NewControllerManagedBy(mgr).
