@@ -482,6 +482,9 @@ func deleteRunThroughController(ctx context.Context, reconciler *controller.Agen
 	} else if err != nil {
 		return err
 	}
+	if current.UID != original.UID {
+		return errors.New("refusing cleanup of a replacement run UID")
+	}
 	uid := current.UID
 	if err := c.Delete(ctx, &current, &client.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}}); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("request failed-run deletion: %w", err)

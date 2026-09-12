@@ -264,6 +264,12 @@ func run(ctx context.Context, o options) (retErr error) {
 		defer cancel()
 		var cleanupFailures []string
 		for _, run := range objects.runs {
+			var current api.AgentRun
+			if run != nil && k8sClient.Get(cleanupCtx, client.ObjectKeyFromObject(run), &current) == nil && current.UID == run.UID && current.Status.CellnScoped != nil {
+				if err := rememberProtected(cleanupCtx, k8sClient, objects, o.preparationNamespace, current.Status.CellnScoped); err != nil {
+					cleanupFailures = append(cleanupFailures, "protected recovery identity could not be retained")
+				}
+			}
 			if cleanupErr := deleteRunThroughController(cleanupCtx, reconciler, k8sClient, run); cleanupErr != nil {
 				cleanupFailures = append(cleanupFailures, cleanupErr.Error())
 			}
