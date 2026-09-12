@@ -85,7 +85,7 @@ tool_name="uppercase-review-$review"
 
 # Derive exactly the same bounded wrapper as the live helper, using only the
 # package's actual parent artifact fields. No descriptor is synthesized.
-parent_template=$(jq -c '{apiVersion:"celln.scoped-parent-template/v1",request:{apiVersion:"celln.dev/v1alpha1",id:"$parent",workload:{id:"$parent",caller:"$principal"},mote:.artifact.mote,tools:[{alias:.artifact.entryPoint,hash:.artifact.executable.hash,closure:.artifact.closure}],invocation:{alias:.artifact.entryPoint,args:[]},capabilities:{workspace:.limits.workspace,egress:.limits.egress,timeoutMs:120000,memoryBytes:.limits.memoryBytes,outputBytes:65536},execution:{lane:.artifact.lane,requireHardwareIsolation:true}},reservedMemoryBytes:(.limits.memoryBytes*4)}' "$package/parent-request.json")
+parent_template=$(jq -c '{apiVersion:"celln.scoped-parent-template/v1",request:{apiVersion:"celln.dev/v1alpha1",id:"$parent",workload:{id:"$parent",caller:"$principal"},mote:.artifact.mote,tools:[{alias:.artifact.entryPoint,hash:.artifact.executable.hash,closure:.artifact.closure}],invocation:{alias:.artifact.entryPoint,args:[]},capabilities:{workspace:.limits.workspace,egress:.limits.egress,timeoutMs:120000,memoryBytes:.limits.memoryBytes,outputBytes:65536},execution:{lane:.artifact.lane,requireHardwareIsolation:true}},reservedMemoryBytes:(.limits.memoryBytes*4+67108864)}' "$package/parent-request.json")
 
 random_token() { openssl rand -hex 32; }
 make_ca() {

@@ -302,7 +302,7 @@ func (r *AgentRunReconciler) applyScopedStatus(ctx context.Context, log logr.Log
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	active := []string{"Prepared", "Admitting", "Admitted", "Running", "Cancelling"}
+	active := []string{"Prepared", "Admitting", "Admitted", "Running", "Cancelling", "Uncertain"}
 	terminal := []string{"Succeeded", "Failed", "Refused", "Cancelled"}
 	if !slices.Contains(active, observed.Phase) && !slices.Contains(terminal, observed.Phase) {
 		return ctrl.Result{}, errors.New("scoped receiver returned an unknown phase")
@@ -333,6 +333,9 @@ func (r *AgentRunReconciler) applyScopedStatus(ctx context.Context, log logr.Log
 		return nil
 	}); err != nil {
 		return ctrl.Result{}, err
+	}
+	if observed.Phase == "Uncertain" {
+		return r.scopedUncertain(ctx, run, "NativeOwnerUncertain", errors.New("original native owner context is unavailable; no replacement execution is permitted"))
 	}
 	if slices.Contains(active, observed.Phase) {
 		if err := r.updateStatusWithRetry(ctx, run, func(current *api.AgentRun) {

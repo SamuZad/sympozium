@@ -269,7 +269,7 @@ type managedProcess struct {
 }
 
 func startCelln(ctx context.Context, o options, address, jwks, gateway, gatewayCA, parentTemplate string) (*managedProcess, error) {
-	args := []string{"--root", o.cellnRoot, "dispatcher", "--mote-store", filepath.Join(o.cellnRoot, "motes"), "--tool-store", filepath.Join(o.cellnRoot, "tools"), "--max-cells", "6", "--memory-bytes", "536870912", "--egress-slots", "4", "--listen", address, "--token-file", o.cellnTokenFile, "--scoped-operator-token-file", o.scopedOperatorTokenFile, "--scoped-jwks-file", jwks, "--scoped-issuer", issuerName, "--scoped-gateway-origin", gateway, "--scoped-gateway-ca", gatewayCA, "--scoped-parent-request-file", parentTemplate}
+	args := []string{"--root", o.cellnRoot, "dispatcher", "--mote-store", filepath.Join(o.cellnRoot, "motes"), "--tool-store", filepath.Join(o.cellnRoot, "tools"), "--max-cells", "6", "--memory-bytes", "1073741824", "--egress-slots", "4", "--listen", address, "--token-file", o.cellnTokenFile, "--scoped-operator-token-file", o.scopedOperatorTokenFile, "--scoped-jwks-file", jwks, "--scoped-issuer", issuerName, "--scoped-gateway-origin", gateway, "--scoped-gateway-ca", gatewayCA, "--scoped-parent-request-file", parentTemplate}
 	cmd := exec.CommandContext(ctx, o.cellnBinary, args...)
 	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -297,7 +297,7 @@ func writeParentTemplate(path string, pkg nativePackage) error {
 	}
 	// The receiver requires retained parent/child substrate overhead beyond two
 	// parent-sized guests. This is capacity, not a new executable artifact.
-	reserved := uint64(pkg.Parent.Limits.MemoryBytes) * 4
+	reserved := (uint64(pkg.Parent.Limits.MemoryBytes)+uint64(pkg.Enduring.Spec.Limits.MemoryBytes))*2 + (64 << 20)
 	raw, err := json.Marshal(map[string]any{"apiVersion": "celln.scoped-parent-template/v1", "request": request, "reservedMemoryBytes": reserved})
 	if err != nil {
 		return err

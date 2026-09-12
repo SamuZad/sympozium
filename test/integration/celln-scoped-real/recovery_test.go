@@ -2,11 +2,18 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
+	"github.com/jackc/pgx/v5/pgxpool"
 	api "github.com/sympozium-ai/sympozium/api/v1alpha1"
 	"github.com/sympozium-ai/sympozium/internal/cellnauthority"
+	cap "github.com/sympozium-ai/sympozium/internal/cellncapability"
 	"github.com/sympozium-ai/sympozium/internal/cellnscoped"
 	"github.com/sympozium-ai/sympozium/internal/controller"
+	"github.com/sympozium-ai/sympozium/internal/modelbudget"
+	"github.com/sympozium-ai/sympozium/internal/modelgateway"
 	"io"
 	"k8s.io/apimachinery/pkg/types"
 	"log"
@@ -71,7 +78,62 @@ func TestRecoverScopedReview(t *testing.T) {
 	}
 	cfg.Issuer.Name = issuerName // Contract issuer; the original key and work scope are unchanged.
 	cfg.Receiver.URL, cfg.Receiver.CAFile = server.URL, ca
-	cfg.Gateway = nil // Recovery below refuses any credential-bearing model route.
+	if database := os.Getenv("CELLN_REVIEW_RECOVERY_DATABASE"); database != "" {
+		pool, err := pgxpool.New(ctx, database)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer pool.Close()
+		budgets, err := modelbudget.New(pool)
+		if err != nil {
+			t.Fatal(err)
+		}
+		authorities, err := modelgateway.NewPostgresAuthorityStore(pool)
+		if err != nil {
+			t.Fatal(err)
+		}
+		private, err := os.ReadFile(cfg.Issuer.PrivateKeyFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		block, _ := pem.Decode(private)
+		if block == nil {
+			t.Fatal("missing original issuer key")
+		}
+		parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		key, ok := parsed.(ed25519.PrivateKey)
+		if !ok {
+			t.Fatal("invalid original issuer key")
+		}
+		verifier, err := cap.NewVerifier(issuerName, []cap.VerificationKey{{KeyID: cfg.Issuer.KeyID, PublicKey: key.Public().(ed25519.PublicKey)}}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		secret, err := os.ReadFile(cfg.Gateway.TokenFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gateway, err := modelgateway.New(modelgateway.Config{ClusterID: cfg.ClusterID, RegistrationToken: cap.NewToken(strings.TrimSpace(string(secret))), AuthorityReady: func(context.Context) error { return nil }}, verifier, c, budgets, authorities)
+		if err != nil {
+			t.Fatal(err)
+		}
+		server := newTLSServer(gateway.Handler())
+		defer server.Close()
+		_, public, err := serverTrust(server)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(directory, "gateway-ca.pem")
+		if err := os.WriteFile(path, public, 0600); err != nil {
+			t.Fatal(err)
+		}
+		cfg.Gateway.URL, cfg.Gateway.CAFile = server.URL, path
+	} else {
+		cfg.Gateway = nil
+	}
 	raw, err = json.Marshal(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -84,7 +146,17 @@ func TestRecoverScopedReview(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	key := types.NamespacedName{Namespace: "celln-review-a-495", Name: "direct-uppercase"}
+	namespace, name := os.Getenv("CELLN_REVIEW_RECOVER_NAMESPACE"), os.Getenv("CELLN_REVIEW_RECOVER_NAME")
+	if namespace == "" {
+		namespace = "celln-review-a-495"
+	}
+	if name == "" {
+		name = "direct-uppercase"
+	}
+	if namespace != "celln-review-a-495" && namespace != "celln-review-b-495" {
+		t.Fatal("not an isolated review namespace")
+	}
+	key := types.NamespacedName{Namespace: namespace, Name: name}
 	var run api.AgentRun
 	if err := c.Get(ctx, key, &run); err != nil {
 		t.Fatal(err)
@@ -122,10 +194,10 @@ func TestRecoverScopedReview(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if final.Decision.Route.Provider != "none" || s.GatewayRegistrationAttempted {
-		t.Fatal("recovery fixture requires the original model-free operation")
+	if final.Decision.Route.Provider != "none" && cfg.Gateway == nil {
+		t.Fatal("original model allowance requires the existing recovery database")
 	}
-	observed, err := d.Cleanup(ctx, s.ReceiverID, final, false)
+	observed, err := d.Cleanup(ctx, s.ReceiverID, final, s.GatewayRegistrationAttempted)
 	if err != nil {
 		t.Fatal(err)
 	}
