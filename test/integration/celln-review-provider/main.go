@@ -10,6 +10,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -20,7 +22,39 @@ func main() {
 	cert := flag.String("cert", "", "public TLS certificate")
 	key := flag.String("key", "", "private TLS key file")
 	tokenFile := flag.String("token-file", "", "private fixture credential file")
+	proxyReceiver := flag.Bool("proxy-receiver", false, "TLS-only scoped receiver frontend to fixed loopback port 8091; no model fixture")
 	flag.Parse()
+	if *proxyReceiver {
+		target, _ := url.Parse("http://127.0.0.1:8091")
+		proxy := httputil.NewSingleHostReverseProxy(target)
+		proxy.Transport = &http.Transport{Proxy: nil, DisableKeepAlives: true, ResponseHeaderTimeout: 30 * time.Second}
+		proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, _ error) {
+			http.Error(w, "receiver unavailable", http.StatusBadGateway)
+		}
+		handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/healthz" {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			if r.Method != "POST" || r.URL.RawQuery != "" {
+				http.NotFound(w, r)
+				return
+			}
+			switch r.URL.Path {
+			case "/v1/scoped/prepare", "/v1/scoped/start", "/v1/scoped/read", "/v1/scoped/cleanup":
+			default:
+				http.NotFound(w, r)
+				return
+			}
+			r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+			proxy.ServeHTTP(w, r)
+		})
+		server := &http.Server{Addr: *listen, Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 45 * time.Second, MaxHeaderBytes: 65536, TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12}}
+		if server.ListenAndServeTLS(*cert, *key) != nil {
+			log.Fatal("scoped TLS frontend stopped")
+		}
+		return
+	}
 	token, err := os.ReadFile(*tokenFile)
 	if err != nil {
 		log.Fatal("cannot read fixture credential")
