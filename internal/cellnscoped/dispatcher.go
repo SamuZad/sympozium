@@ -77,6 +77,19 @@ func CapabilityDecision(decision cellnauthority.PlatformDecision) (cap.Decision,
 	return out, nil
 }
 
+// RevalidateAdmission checks current policy/catalogue identity without moving
+// the frozen clock or granting a replacement allowance. Recovery/cleanup must
+// not call this: historical owner authority survives policy withdrawal.
+func (d *Dispatcher) RevalidateAdmission(ctx context.Context, prepared *cellnauthority.StoredPreparation) error {
+	if d == nil || d.Store.Reader == nil || prepared == nil {
+		return errors.New("scoped admission reader is unavailable")
+	}
+	frozen := prepared.Operation.Resolution
+	frozen.Request = prepared.Operation.ResolveRequest
+	return (cellnauthority.PlatformResolver{Reader: d.Store.Reader}).Revalidate(ctx,
+		types.NamespacedName{Namespace: frozen.Decision.Run.Namespace, Name: frozen.Decision.Run.Name}, frozen)
+}
+
 func (d *Dispatcher) Enroll(ctx context.Context, prepared *cellnauthority.StoredPreparation, final *cellnauthority.FinalizedPreparation) (PrepareResponse, error) {
 	decision, err := CapabilityDecision(final.Decision)
 	if err != nil {

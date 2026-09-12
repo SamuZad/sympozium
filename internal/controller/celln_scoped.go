@@ -108,6 +108,12 @@ func (r *AgentRunReconciler) reconcilePendingScoped(ctx context.Context, log log
 		return ctrl.Result{}, err
 	}
 
+	if !run.Status.CellnScoped.StartAttempted {
+		if err := r.ScopedDispatcher.RevalidateAdmission(ctx, prepared); err != nil {
+			return ctrl.Result{}, r.failRun(ctx, run, "Scoped authority changed before admission; no replacement execution was submitted")
+		}
+	}
+
 	if run.Status.CellnScoped.ReceiverID == "" {
 		enrolled, err := r.ScopedDispatcher.Enroll(ctx, prepared, final)
 		if err != nil {
