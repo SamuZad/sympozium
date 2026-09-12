@@ -26,7 +26,6 @@ import (
 	"github.com/sympozium-ai/sympozium/internal/cellnscoped"
 	"github.com/sympozium-ai/sympozium/internal/controller"
 	"github.com/sympozium-ai/sympozium/internal/modelgateway"
-	"github.com/zeebo/blake3"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -34,58 +33,51 @@ import (
 )
 
 const (
-	inputVersion = "sympozium.ai/celln-scoped-live-input-v1"
-	issuerName   = "sympozium-celln-scoped-live"
-	issuerKeyID  = "scoped-live-v1"
+	issuerName  = "sympozium-celln-scoped-live"
+	issuerKeyID = "scoped-live-v1"
 )
 
 type options struct {
-	repoRoot                                              string
-	kubeconfig, contextName, namespace, excludedNamespace string
-	preparationNamespace, postgresURL, postgresConfirm    string
-	cellnBinary, cellnRoot, cellnRuntimeDir               string
-	cellnTokenFile, scopedOperatorTokenFile               string
-	gatewayOperatorTokenFile                              string
-	packagePath, metadataPath                             string
-	timeout                                               time.Duration
+	repoRoot                                                                                   string
+	kubeconfig, contextName, namespace, enduringNamespace, deniedNamespace, excludedNamespaces string
+	preparationNamespace, postgresURL, postgresConfirm                                         string
+	reviewOwnership                                                                            string
+	cellnBinary, cellnRoot, cellnRuntimeDir                                                    string
+	cellnTokenFile, scopedOperatorTokenFile                                                    string
+	gatewayOperatorTokenFile                                                                   string
+	packagePath                                                                                string
+	timeout                                                                                    time.Duration
 }
 
-type liveInput struct {
-	APIVersion string `json:"apiVersion"`
-	// PackageHash is BLAKE3 over artifactPackage/package.json. The receiver
-	// remains responsible for verifying every signed member in Celln's stores.
-	PackageHash  string                      `json:"packageHash"`
-	Runtime      api.CellnRuntimeProfileSpec `json:"runtime"`
-	Task         string                      `json:"task"`
-	SystemPrompt string                      `json:"systemPrompt"`
-	Model        struct {
-		Provider string `json:"provider"`
-		Protocol string `json:"protocol"`
-		Name     string `json:"name"`
-	} `json:"model"`
-	Expected struct {
-		Output               string `json:"output"`
-		ProviderCalls        int64  `json:"providerCalls"`
-		ObservedOutputTokens int64  `json:"observedOutputTokens"`
-		ReservedOutputTokens int64  `json:"reservedOutputTokens"`
-	} `json:"expected"`
-}
+const (
+	modelProvider        = "scoped-fixture"
+	modelProtocol        = "openai-chat"
+	modelName            = "uppercase-fixture"
+	modelTask            = "Call uppercase with text celln. Wait for its result, then answer only the returned text."
+	directArguments      = `{"text":"celln"}`
+	directOutput         = `{"text":"CELLN"}`
+	uppercaseOutput      = "CELLN"
+	requestReservation   = int64(512)
+	observedPerExecution = int64(3)
+)
 
 type createdObjects struct {
-	evaluation, preparation *corev1.Namespace
-	profile                 *api.CellnRuntimeProfile
-	policy                  *api.CellnExecutionPolicy
-	secret                  *corev1.Secret
-	run                     *api.AgentRun
+	preparationNamespace string
+	namespaces           []*corev1.Namespace
+	profiles             []*api.CellnRuntimeProfile
+	tool                 *api.ClusterCellnTool
+	policy               *api.CellnExecutionPolicy
+	namespaced           []client.Object
+	protected            []client.Object
+	runs                 []*api.AgentRun
 }
 
 type providerRecorder struct {
-	secret   string
-	input    liveInput
-	attempts atomic.Int64
-	valid    atomic.Int64
-	mu       sync.Mutex
-	failure  string
+	oneShotSecret, enduringSecret string
+	attempts                      atomic.Int64
+	valid                         atomic.Int64
+	mu                            sync.Mutex
+	failure                       string
 }
 
 func main() {
@@ -93,9 +85,12 @@ func main() {
 	flag.StringVar(&o.repoRoot, "repo", "", "absolute Sympozium repository root")
 	flag.StringVar(&o.kubeconfig, "kubeconfig", "", "absolute private kubeconfig")
 	flag.StringVar(&o.contextName, "context", "", "explicit kubeconfig context")
-	flag.StringVar(&o.namespace, "namespace", "", "new caller-owned evaluation namespace")
-	flag.StringVar(&o.excludedNamespace, "global-controller-excludes-namespace", "", "must exactly repeat --namespace after the coordinator excludes it from every existing controller")
-	flag.StringVar(&o.preparationNamespace, "preparation-namespace", "", "new protected preparation namespace")
+	flag.StringVar(&o.namespace, "namespace", "", "isolated direct/one-shot evaluation namespace")
+	flag.StringVar(&o.enduringNamespace, "enduring-namespace", "", "isolated enduring evaluation namespace")
+	flag.StringVar(&o.deniedNamespace, "denied-namespace", "", "isolated namespace without tenant enablement")
+	flag.StringVar(&o.excludedNamespaces, "global-controller-excludes-namespaces", "", "comma-separated exact evaluation, enduring, denied, and preparation namespaces excluded from the global manager")
+	flag.StringVar(&o.preparationNamespace, "preparation-namespace", "", "protected preparation namespace")
+	flag.StringVar(&o.reviewOwnership, "existing-review-ownership", "", "opt in to empty pre-created namespaces carrying sympozium.ai/celln-review=<value>")
 	flag.StringVar(&o.postgresURL, "postgres-url", "", "disposable, initially empty PostgreSQL database URL")
 	flag.StringVar(&o.postgresConfirm, "disposable-postgres-confirmation", "", "must exactly repeat --namespace")
 	flag.StringVar(&o.cellnBinary, "celln-binary", "", "absolute current Celln binary")
@@ -105,8 +100,7 @@ func main() {
 	flag.StringVar(&o.scopedOperatorTokenFile, "scoped-operator-token-file", "", "existing CLI scoped operator transport credential file")
 	flag.StringVar(&o.gatewayOperatorTokenFile, "gateway-operator-token-file", "", "existing private gateway operator transport credential file")
 	flag.StringVar(&o.packagePath, "artifact-package", "", "absolute genuine signed runtime package directory")
-	flag.StringVar(&o.metadataPath, "package-metadata", "", "absolute public harness metadata JSON")
-	flag.DurationVar(&o.timeout, "timeout", 3*time.Minute, "complete harness deadline")
+	flag.DurationVar(&o.timeout, "timeout", 10*time.Minute, "complete harness deadline")
 	flag.Parse()
 
 	ctx, cancel := context.WithTimeout(context.Background(), o.timeout)
@@ -118,7 +112,7 @@ func main() {
 }
 
 func run(ctx context.Context, o options) (retErr error) {
-	input, err := validateInputs(o)
+	pkg, err := validateInputs(o)
 	if err != nil {
 		return err
 	}
@@ -126,7 +120,7 @@ func run(ctx context.Context, o options) (retErr error) {
 	if err != nil {
 		return fmt.Errorf("live Kubernetes client: %w", err)
 	}
-	if err := requireAbsent(ctx, k8sClient, o); err != nil {
+	if err := requireAbsent(ctx, k8sClient, o, pkg); err != nil {
 		return err
 	}
 
@@ -162,11 +156,15 @@ func run(ctx context.Context, o options) (retErr error) {
 		return errors.New("gateway operator credential is malformed")
 	}
 
-	providerSecret, err := randomBearer()
+	oneShotProviderSecret, err := randomBearer()
 	if err != nil {
 		return err
 	}
-	recorder := &providerRecorder{secret: providerSecret, input: input}
+	enduringProviderSecret, err := randomBearer()
+	if err != nil {
+		return err
+	}
+	recorder := &providerRecorder{oneShotSecret: oneShotProviderSecret, enduringSecret: enduringProviderSecret}
 	provider := newTLSServer(recorder)
 	defer provider.Close()
 	providerRoots, _, err := serverTrust(provider)
@@ -201,7 +199,11 @@ func run(ctx context.Context, o options) (retErr error) {
 	if err != nil {
 		return err
 	}
-	cellnCmd, err := startCelln(ctx, o, dispatchAddress, jwksFile, gatewayServer.URL, gatewayCAFile)
+	parentTemplate := filepath.Join(work, "scoped-parent-template.json")
+	if err := writeParentTemplate(parentTemplate, pkg); err != nil {
+		return err
+	}
+	cellnCmd, err := startCelln(ctx, o, dispatchAddress, jwksFile, gatewayServer.URL, gatewayCAFile, parentTemplate)
 	if err != nil {
 		return err
 	}
@@ -233,7 +235,7 @@ func run(ctx context.Context, o options) (retErr error) {
 		return fmt.Errorf("load concrete scoped dispatcher: %w", err)
 	}
 
-	objects, err := createAuthorityAndRun(ctx, k8sClient, o, input, provider.URL, providerSecret)
+	objects, runs, err := createAuthorityAndRuns(ctx, k8sClient, o, pkg, provider.URL, oneShotProviderSecret, enduringProviderSecret)
 	if err != nil {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -243,6 +245,7 @@ func run(ctx context.Context, o options) (retErr error) {
 		return err
 	}
 	reconciler := &controller.AgentRunReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: scheme, Log: logr.Discard(), ScopedDispatcher: dispatcher, RunHistoryLimit: 1000}
+	turnReconciler := &controller.AgentRunTurnReconciler{Client: k8sClient, APIReader: k8sClient, ScopedDispatcher: dispatcher}
 	cleanupNeeded := true
 	defer func() {
 		if !cleanupNeeded {
@@ -251,8 +254,10 @@ func run(ctx context.Context, o options) (retErr error) {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		var cleanupFailures []string
-		if cleanupErr := deleteRunThroughController(cleanupCtx, reconciler, k8sClient, objects.run); cleanupErr != nil {
-			cleanupFailures = append(cleanupFailures, cleanupErr.Error())
+		for _, run := range objects.runs {
+			if cleanupErr := deleteRunThroughController(cleanupCtx, reconciler, k8sClient, run); cleanupErr != nil {
+				cleanupFailures = append(cleanupFailures, cleanupErr.Error())
+			}
 		}
 		if cleanupErr := cleanupCreated(cleanupCtx, k8sClient, objects); cleanupErr != nil {
 			cleanupFailures = append(cleanupFailures, cleanupErr.Error())
@@ -262,47 +267,154 @@ func run(ctx context.Context, o options) (retErr error) {
 		}
 	}()
 
-	terminal, duplicate, final, err := driveToTerminal(ctx, reconciler, dispatcher, k8sClient, objects.run)
+	if err := assertDeniedNamespace(ctx, k8sClient, o, runs.denied); err != nil {
+		return err
+	}
+	direct, _, directFinal, err := driveToTerminal(ctx, reconciler, dispatcher, k8sClient, runs.direct)
 	if err != nil {
 		return err
 	}
-	if terminal.Status.Result != input.Expected.Output || duplicate.Output != terminal.Status.Result || duplicate.ReceiptDigest != terminal.Status.CellnScoped.ReceiptDigest {
-		return fmt.Errorf("result/duplicate mismatch: phase=%s resultMatch=%t duplicateMatch=%t", terminal.Status.Phase, terminal.Status.Result == input.Expected.Output, duplicate.Output == terminal.Status.Result)
+	if direct.Status.Result != directOutput || recorder.attempts.Load() != 0 || directFinal.Decision.Route.Provider != "none" {
+		return errors.New("model-free direct uppercase execution did not return the real tool output without provider use")
 	}
-	if recorder.attempts.Load() != input.Expected.ProviderCalls || recorder.valid.Load() != input.Expected.ProviderCalls {
-		return fmt.Errorf("provider calls mismatch: attempts=%d valid=%d expected=%d diagnostic=%s", recorder.attempts.Load(), recorder.valid.Load(), input.Expected.ProviderCalls, recorder.failureMessage())
+	if err := assertNativeProvenance(direct.Status.CellnScoped, false); err != nil {
+		return fmt.Errorf("direct provenance: %w", err)
 	}
-	decision, err := cellnscoped.CapabilityDecision(final.Decision)
+	if err := rememberProtected(ctx, k8sClient, objects, o.preparationNamespace, direct.Status.CellnScoped); err != nil {
+		return err
+	}
+	if _, err = driveCleanup(ctx, reconciler, k8sClient, runs.direct); err != nil {
+		return err
+	}
+
+	oneShot, duplicate, oneFinal, err := driveToTerminal(ctx, reconciler, dispatcher, k8sClient, runs.oneShot)
 	if err != nil {
 		return err
 	}
-	if decision.Route.CredentialSource == nil || decision.Route.CredentialSource.SecretUID != string(objects.secret.UID) || decision.Route.CredentialSource.SecretName != objects.secret.Name || decision.Route.CredentialSource.SecretKey != "OPENAI_API_KEY" {
-		return errors.New("final route did not pin the namespace-specific test Secret identity")
+	if oneShot.Status.Result != uppercaseOutput || duplicate.Output != uppercaseOutput || duplicate.ReceiptDigest != oneShot.Status.CellnScoped.ReceiptDigest || recorder.valid.Load() != 2 {
+		return fmt.Errorf("composed one-shot uppercase mismatch: result=%q calls=%d diagnostic=%s", oneShot.Status.Result, recorder.valid.Load(), recorder.failureMessage())
 	}
-	if err := assertProtectedRecords(ctx, k8sClient, o.preparationNamespace, terminal, providerSecret); err != nil {
-		return err
+	if err := assertNativeProvenance(oneShot.Status.CellnScoped, false); err != nil {
+		return fmt.Errorf("one-shot provenance: %w", err)
 	}
-	usage, err := budgets.Inspect(ctx, decision.Budget.BudgetID, decision.Run.UID)
-	if err != nil {
-		return fmt.Errorf("inspect PostgreSQL budget before cleanup: %w", err)
-	}
-	if usage.RunReservedRequests != input.Expected.ProviderCalls || usage.TurnReservedRequests != input.Expected.ProviderCalls || usage.RunObservedOutputTokens != input.Expected.ObservedOutputTokens || usage.TurnObservedOutputTokens != input.Expected.ObservedOutputTokens || usage.RunReservedOutputTokens != input.Expected.ReservedOutputTokens || usage.TurnReservedOutputTokens != input.Expected.ReservedOutputTokens || usage.RunClosed || usage.TurnClosed {
-		return fmt.Errorf("unexpected PostgreSQL budget before cleanup: %+v", usage)
-	}
-	cleaned, err := driveCleanup(ctx, reconciler, k8sClient, objects.run)
+	oneDecision, err := cellnscoped.CapabilityDecision(oneFinal.Decision)
 	if err != nil {
 		return err
 	}
-	usage, err = budgets.Inspect(ctx, decision.Budget.BudgetID, decision.Run.UID)
+	oneSecret := runs.oneShotSecret
+	if oneDecision.Route.CredentialSource == nil || oneDecision.Route.CredentialSource.SecretUID != string(oneSecret.UID) || oneDecision.Route.CredentialSource.SecretName != oneSecret.Name || oneDecision.Route.CredentialSource.SecretKey != "OPENAI_API_KEY" {
+		return errors.New("one-shot route did not pin its namespace Secret UID")
+	}
+	if err := assertProtectedRecords(ctx, k8sClient, o.preparationNamespace, oneShot, oneShotProviderSecret, enduringProviderSecret); err != nil {
+		return err
+	}
+	if err := rememberProtected(ctx, k8sClient, objects, o.preparationNamespace, oneShot.Status.CellnScoped); err != nil {
+		return err
+	}
+	oneUsage, err := budgets.Inspect(ctx, oneDecision.Budget.BudgetID, oneDecision.Run.UID)
 	if err != nil {
-		return fmt.Errorf("inspect PostgreSQL budget after cleanup: %w", err)
+		return err
 	}
-	if !cleaned.Status.CellnScoped.CleanupConfirmed || containsFinalizer(cleaned.Finalizers) || !usage.RunClosed || !usage.TurnClosed {
-		return fmt.Errorf("cleanup not confirmed: native=%t finalizer=%t runBudgetClosed=%t turnBudgetClosed=%t", cleaned.Status.CellnScoped.CleanupConfirmed, containsFinalizer(cleaned.Finalizers), usage.RunClosed, usage.TurnClosed)
+	if err := exactUsage(oneUsage, 2, 1024, observedPerExecution, 2, 1024, observedPerExecution, false, false); err != nil {
+		return fmt.Errorf("one-shot accounting: %w", err)
 	}
-	var jobs batchv1.JobList
-	if err := k8sClient.List(ctx, &jobs, client.InNamespace(o.namespace)); err != nil || len(jobs.Items) != 0 {
-		return fmt.Errorf("scoped path created Kubernetes jobs: count=%d error=%v", len(jobs.Items), err)
+	oneCleaned, err := driveCleanup(ctx, reconciler, k8sClient, runs.oneShot)
+	if err != nil {
+		return err
+	}
+	oneUsage, err = budgets.Inspect(ctx, oneDecision.Budget.BudgetID, oneDecision.Run.UID)
+	if err != nil {
+		return err
+	}
+	if err := exactUsage(oneUsage, 2, 1024, observedPerExecution, 2, 1024, observedPerExecution, true, true); err != nil {
+		return fmt.Errorf("one-shot closed accounting: %w", err)
+	}
+
+	enduring, enduringFinal, err := driveEnduringReady(ctx, reconciler, dispatcher, k8sClient, runs.enduring)
+	if err != nil {
+		return err
+	}
+	if enduring.Status.Result != uppercaseOutput || recorder.valid.Load() != 4 {
+		return fmt.Errorf("enduring initial uppercase mismatch: result=%q calls=%d", enduring.Status.Result, recorder.valid.Load())
+	}
+	if err := assertNativeProvenance(enduring.Status.CellnScoped, true); err != nil {
+		return fmt.Errorf("enduring root provenance: %w", err)
+	}
+	if err := assertProtectedRecords(ctx, k8sClient, o.preparationNamespace, enduring, oneShotProviderSecret, enduringProviderSecret); err != nil {
+		return err
+	}
+	if err := rememberProtected(ctx, k8sClient, objects, o.preparationNamespace, enduring.Status.CellnScoped); err != nil {
+		return err
+	}
+	turn, err := createAndDriveTurn(ctx, turnReconciler, k8sClient, &enduring, "turn-one", "Call uppercase with text violet and answer only the returned text.")
+	if err != nil {
+		return err
+	}
+	objects.namespaced = append(objects.namespaced, turn.DeepCopy())
+	if turn.Status.Execution == nil || turn.Status.Execution.Result == nil || !turn.Status.Execution.Result.Succeeded || turn.Status.Execution.Result.Answer != "VIOLET" || recorder.valid.Load() != 6 {
+		return fmt.Errorf("enduring turn output/accounting mismatch: calls=%d", recorder.valid.Load())
+	}
+	if err := assertNativeProvenance(turn.Status.CellnScoped, true); err != nil {
+		return fmt.Errorf("enduring turn provenance: %w", err)
+	}
+	if err := rememberProtected(ctx, k8sClient, objects, o.preparationNamespace, turn.Status.CellnScoped); err != nil {
+		return err
+	}
+	endDecision, err := cellnscoped.CapabilityDecision(enduringFinal.Decision)
+	if err != nil {
+		return err
+	}
+	endSecret := runs.enduringSecret
+	if endDecision.Route.CredentialSource == nil || endDecision.Route.CredentialSource.SecretUID != string(endSecret.UID) || endDecision.Route.CredentialSource.SecretName != endSecret.Name || endDecision.Route.CredentialSource.SecretKey != "OPENAI_API_KEY" || endDecision.Route.CredentialSource.SecretUID == oneDecision.Route.CredentialSource.SecretUID {
+		return errors.New("enduring route did not pin its isolated namespace Secret UID")
+	}
+	rootUsage, err := budgets.Inspect(ctx, endDecision.Budget.BudgetID, endDecision.Run.UID)
+	if err != nil {
+		return err
+	}
+	if err := exactUsage(rootUsage, 4, 2048, 2*observedPerExecution, 2, 1024, observedPerExecution, false, false); err != nil {
+		return fmt.Errorf("shared enduring root accounting: %w", err)
+	}
+	turnUsage, err := budgets.Inspect(ctx, endDecision.Budget.BudgetID, string(turn.UID))
+	if err != nil {
+		return err
+	}
+	if err := exactUsage(turnUsage, 4, 2048, 2*observedPerExecution, 2, 1024, observedPerExecution, false, true); err != nil {
+		return fmt.Errorf("enduring turn accounting: %w", err)
+	}
+	exhausted, err := createAndProveExhaustedTurn(ctx, turnReconciler, k8sClient, &enduring, recorder)
+	if err != nil {
+		return err
+	}
+	objects.namespaced = append(objects.namespaced, exhausted.DeepCopy())
+	if err := rememberProtected(ctx, k8sClient, objects, o.preparationNamespace, exhausted.Status.CellnScoped); err != nil {
+		return err
+	}
+	endCleaned, err := beginEnduringCleanup(ctx, reconciler, k8sClient, runs.enduring)
+	if err != nil {
+		return err
+	}
+	if err := finishTurnAfterRootCleanup(ctx, turnReconciler, k8sClient, exhausted); err != nil {
+		return err
+	}
+	if err := deleteRunThroughController(ctx, reconciler, k8sClient, runs.enduring); err != nil {
+		return err
+	}
+	rootUsage, err = budgets.Inspect(ctx, endDecision.Budget.BudgetID, endDecision.Run.UID)
+	if err != nil {
+		return err
+	}
+	if err := exactUsage(rootUsage, 4, 2048, 2*observedPerExecution, 2, 1024, observedPerExecution, true, true); err != nil {
+		return fmt.Errorf("enduring closed accounting: %w", err)
+	}
+	if endCleaned.Status.CellnScoped == nil || !endCleaned.Status.CellnScoped.CleanupConfirmed || oneCleaned.Status.CellnScoped == nil || !oneCleaned.Status.CellnScoped.CleanupConfirmed || containsFinalizer(oneCleaned.Finalizers) {
+		return errors.New("native cleanup/finalizer confirmation missing")
+	}
+	for _, namespace := range []string{o.namespace, o.enduringNamespace, o.deniedNamespace} {
+		var jobs batchv1.JobList
+		if err := k8sClient.List(ctx, &jobs, client.InNamespace(namespace)); err != nil || len(jobs.Items) != 0 {
+			return fmt.Errorf("scoped path created Kubernetes jobs in %s: count=%d error=%v", namespace, len(jobs.Items), err)
+		}
 	}
 	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	if err := cleanupCreated(cleanupCtx, k8sClient, objects); err != nil {
@@ -311,77 +423,75 @@ func run(ctx context.Context, o options) (retErr error) {
 	}
 	cleanupCancel()
 	cleanupNeeded = false
+	if o.reviewOwnership != "" {
+		for _, namespace := range []string{o.namespace, o.enduringNamespace, o.deniedNamespace, o.preparationNamespace} {
+			if err := requireReviewNamespaceEmpty(ctx, k8sClient, namespace); err != nil {
+				return fmt.Errorf("post-cleanup inventory: %w", err)
+			}
+		}
+	}
 
 	summary := map[string]any{
 		"suite": "controller-native-celln-tls-gateway-postgresql", "status": "passed",
-		"namespace": o.namespace, "runUid": string(cleaned.UID), "receiverId": cleaned.Status.CellnScoped.ReceiverID,
-		"owner": cleaned.Status.CellnScoped.Owner, "receiptDigest": cleaned.Status.CellnScoped.ReceiptDigest,
-		"providerCalls": recorder.valid.Load(), "reservedOutputTokens": usage.RunReservedOutputTokens,
-		"observedOutputTokens": usage.RunObservedOutputTokens, "nativeCleanupConfirmed": true,
-		"gatewayBudgetClosed": true, "duplicateSuppressed": true, "packageHash": input.PackageHash,
+		"namespaces": []string{o.namespace, o.enduringNamespace, o.deniedNamespace, o.preparationNamespace}, "oneShotRunUid": string(oneCleaned.UID), "enduringRunUid": string(endCleaned.UID),
+		"providerCalls": recorder.valid.Load(), "enduringReservedOutputTokens": rootUsage.RunReservedOutputTokens,
+		"enduringObservedOutputTokens": rootUsage.RunObservedOutputTokens, "nativeCleanupConfirmed": true,
+		"gatewayBudgetClosed": true, "duplicateSuppressed": true, "budgetExhaustionProved": true, "packageHash": pkg.Hash,
 	}
 	encoded, _ := json.Marshal(summary)
 	fmt.Println(string(encoded))
 	return nil
 }
 
-func validateInputs(o options) (liveInput, error) {
-	var in liveInput
-	if o.excludedNamespace == "" || o.excludedNamespace != o.namespace {
-		return in, errors.New("refusing to create AgentRuns: --global-controller-excludes-namespace must exactly equal --namespace after coordinator isolation")
+func validateInputs(o options) (nativePackage, error) {
+	var pkg nativePackage
+	wantExcluded := strings.Join([]string{o.namespace, o.enduringNamespace, o.deniedNamespace, o.preparationNamespace}, ",")
+	if o.excludedNamespaces == "" || o.excludedNamespaces != wantExcluded {
+		return pkg, fmt.Errorf("refusing AgentRuns: --global-controller-excludes-namespaces must exactly equal %q", wantExcluded)
 	}
 	if o.postgresConfirm == "" || o.postgresConfirm != o.namespace {
-		return in, errors.New("--disposable-postgres-confirmation must exactly equal --namespace")
+		return pkg, errors.New("--disposable-postgres-confirmation must exactly equal --namespace")
 	}
-	if len(validation.IsDNS1123Label(o.namespace)) != 0 || len(o.namespace) > 48 || len(validation.IsDNS1123Label(o.preparationNamespace)) != 0 || o.preparationNamespace == o.namespace {
-		return in, errors.New("distinct DNS-label evaluation/preparation namespaces are required (evaluation max 48 bytes)")
+	namespaces := []string{o.namespace, o.enduringNamespace, o.deniedNamespace, o.preparationNamespace}
+	seen := map[string]bool{}
+	for _, name := range namespaces {
+		if len(validation.IsDNS1123Label(name)) != 0 || len(name) > 48 || seen[name] {
+			return pkg, errors.New("four distinct DNS-label namespaces of at most 48 bytes are required")
+		}
+		seen[name] = true
 	}
-	for name, value := range map[string]string{"repo": o.repoRoot, "kubeconfig": o.kubeconfig, "celln-binary": o.cellnBinary, "celln-root": o.cellnRoot, "celln-token-file": o.cellnTokenFile, "scoped-operator-token-file": o.scopedOperatorTokenFile, "gateway-operator-token-file": o.gatewayOperatorTokenFile, "artifact-package": o.packagePath, "package-metadata": o.metadataPath} {
+	for name, value := range map[string]string{"repo": o.repoRoot, "kubeconfig": o.kubeconfig, "celln-binary": o.cellnBinary, "celln-root": o.cellnRoot, "celln-token-file": o.cellnTokenFile, "scoped-operator-token-file": o.scopedOperatorTokenFile, "gateway-operator-token-file": o.gatewayOperatorTokenFile, "artifact-package": o.packagePath} {
 		if !filepath.IsAbs(value) {
-			return in, fmt.Errorf("--%s must be absolute", name)
+			return pkg, fmt.Errorf("--%s must be absolute", name)
 		}
 	}
 	if o.contextName == "" || o.postgresURL == "" || o.timeout < 30*time.Second || o.timeout > 15*time.Minute {
-		return in, errors.New("explicit context/PostgreSQL URL and a 30s-15m timeout are required")
+		return pkg, errors.New("explicit context/PostgreSQL URL and a 30s-15m timeout are required")
 	}
 	if o.cellnRuntimeDir != "" && !filepath.IsAbs(o.cellnRuntimeDir) {
-		return in, errors.New("--celln-runtime-dir must be absolute")
+		return pkg, errors.New("--celln-runtime-dir must be absolute")
 	}
 	if err := privateRegular(o.kubeconfig); err != nil {
-		return in, fmt.Errorf("private kubeconfig: %w", err)
+		return pkg, fmt.Errorf("private kubeconfig: %w", err)
 	}
 	for _, path := range []string{o.cellnTokenFile, o.scopedOperatorTokenFile, o.gatewayOperatorTokenFile} {
 		if err := privateRegular(path); err != nil {
-			return in, fmt.Errorf("private operator credential file: %w", err)
+			return pkg, fmt.Errorf("private operator credential file: %w", err)
 		}
 	}
 	info, err := os.Stat(o.cellnBinary)
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&0111 == 0 {
-		return in, errors.New("celln binary must be an executable regular file")
+		return pkg, errors.New("celln binary must be an executable regular file")
 	}
 	if info, err = os.Stat(o.cellnRoot); err != nil || !info.IsDir() {
-		return in, errors.New("celln root must be an existing directory")
+		return pkg, errors.New("celln root must be an existing directory")
 	}
 	if _, err := os.Stat(filepath.Join(o.cellnRoot, "scoped")); !os.IsNotExist(err) {
-		return in, errors.New("celln root already contains scoped receiver state; a fresh caller-owned root is required")
+		return pkg, errors.New("celln root already contains scoped receiver state; a fresh caller-owned root is required")
 	}
-	raw, err := readBounded(o.metadataPath, 256<<10)
+	pkg, err = loadNativePackage(o.packagePath)
 	if err != nil {
-		return in, err
+		return pkg, fmt.Errorf("verify actual framework package: %w", err)
 	}
-	if err := cellncapability.StrictDecode(raw, &in); err != nil {
-		return in, fmt.Errorf("invalid package metadata: %w", err)
-	}
-	manifest, err := readBounded(filepath.Join(o.packagePath, "package.json"), 256<<10)
-	if err != nil {
-		return in, fmt.Errorf("read signed package manifest: %w", err)
-	}
-	actual := fmt.Sprintf("blake3:%x", blake3.Sum256(manifest))
-	if in.APIVersion != inputVersion || in.PackageHash != actual {
-		return in, fmt.Errorf("metadata/package mismatch: apiVersion=%q hashMatch=%t", in.APIVersion, in.PackageHash == actual)
-	}
-	if in.Runtime.ContractVersion != "celln.json-tools/v1" || in.Runtime.JSON == nil || len(in.Runtime.Lifecycles) == 0 || in.Task == "" || len(in.Task) > 2048 || in.Expected.Output == "" || in.Expected.ProviderCalls != 1 || in.Expected.ObservedOutputTokens < 0 || in.Expected.ReservedOutputTokens != 512 || in.Expected.ReservedOutputTokens < in.Expected.ObservedOutputTokens || in.Model.Protocol != "openai-chat" || in.Model.Provider == "" || in.Model.Name == "" {
-		return in, errors.New("metadata must describe one bounded model-only openai-chat JSON runtime call and exact expected accounting")
-	}
-	return in, nil
+	return pkg, nil
 }

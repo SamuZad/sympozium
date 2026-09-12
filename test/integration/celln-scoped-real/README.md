@@ -1,96 +1,73 @@
-# Real scoped Celln integration harness
+# Real scoped Celln framework-package harness
 
-This is an opt-in executable, not a normal `go test` case. It creates a new
-caller-named namespace and drives one real `AgentRun` by repeatedly invoking the
-production `AgentRunReconciler` with the concrete `cellnscoped.Dispatcher`.
-There is no mocked native execution and there is no skip-to-pass path.
+This opt-in executable drives production reconcilers and the concrete scoped
+receiver. It loads the public `celln.framework-native-package/v1`
+`package.json`, `resources.yaml`, `parent-request.json`, and the exact
+`MANIFEST.blake3` file set. It does not accept bespoke runtime metadata.
 
-The harness starts these local processes/listeners:
+The bounded suite proves:
 
-- the caller-supplied Celln binary and its `/v1/scoped/*` receiver;
-- a TLS reverse proxy in front of Celln's loopback HTTP listener;
-- the real in-process `modelgateway.Gateway`, backed by the caller's disposable
-  PostgreSQL database and live Kubernetes reads;
-- a bounded TLS OpenAI-compatible provider that accepts exactly one scoped
-  request and returns the configured deterministic result.
+- model-free `celln.json-direct/v1` execution of the package's `uppercase`
+  tool, with exact output `{"text":"CELLN"}` and zero provider calls;
+- composed one-shot `celln.json-tools/v1` execution where the TLS fake provider
+  first requests the selected `uppercase` function and only then returns the
+  actual native tool result `CELLN`;
+- an enduring native parent, initial result, real `AgentRunTurn` returning
+  `VIOLET`, a third turn rejected by the original shared PostgreSQL allowance,
+  and parent/child cleanup;
+- exact reserved/observed request and token counts, Secret UID pinning, TLS CA
+  verification, receiver owner/receipt/native provenance, duplicate suppression,
+  namespace-policy denial, absence of Kubernetes Jobs, and cleanup of every
+  object and protected record created by the runner.
 
-It asserts protected preparation/final-decision persistence, the actual model
-credential Secret UID pin, native owner/result provenance, PostgreSQL reserved
-and observed usage, duplicate-start suppression, receiver cleanup, gateway
-budget fencing, finalizer removal, absence of Kubernetes Jobs, and deletion of
-every Kubernetes object it created. The PostgreSQL database must initially lack
-the Celln budget tables; the runner refuses an existing schema.
-The live self-subject review reports the supplied kubeconfig's real credential
-custody permissions; this admin-style harness makes no tenant-RBAC isolation
-claim.
+`--artifact-package` must already have been independently admitted into the
+fresh caller-owned Celln root. The runner never installs trust. It derives the
+receiver's complete `celln.scoped-parent-template/v1` wrapper from the
+package's actual `parent-request.json`, including an explicit logical
+`reservedMemoryBytes` value; it does not invent an executable, closure, mote,
+publisher, tool, or schema.
 
-## Mandatory isolation
+The PostgreSQL database must initially lack the Celln accounting tables. The
+runner applies only migrations 002 and 003 and refuses an existing schema.
 
-Before invoking the runner, the coordinator must configure **every existing
-framework controller to exclude the evaluation namespace** and confirm that
-the exclusion is active. The runner refuses to create either namespace unless
-`--global-controller-excludes-namespace` exactly repeats `--namespace`. This
-flag records the coordinator's prerequisite; it cannot prove an external
-controller's selector from inside the process.
+## Isolated review namespaces
 
-Use an absolute, mode-0600 kubeconfig and name its context explicitly. Both
-namespaces and the derived cluster-scoped profile/policy must not exist. The
-Celln root must be caller-owned and fresh with respect to `root/scoped`, while
-already containing the independently admitted signed package members and
-publisher policy required by the receiver. The runner never installs trust.
+With `--existing-review-ownership 495`, all four namespaces must already carry
+`sympozium.ai/celln-review=495`. The first two must additionally carry
+`sympozium.ai/celln-review-tenant=enabled`; the denied and preparation
+namespaces must not. The runner inventories them before use, permitting only
+the Kubernetes-generated `default` ServiceAccount and `kube-root-ca.crt`
+ConfigMap. It never deletes pre-existing namespaces and deletes only resources
+whose UIDs it created or recorded. Without this flag, all four namespaces must
+be absent and the runner creates and later deletes them.
 
-## Package metadata
+Every global controller must already exclude the four namespaces in the exact
+order passed to `--global-controller-excludes-namespaces`.
 
-`--artifact-package` names the genuine signed package directory.
-`--package-metadata` is public JSON emitted alongside that package:
-
-```json
-{
-  "apiVersion": "sympozium.ai/celln-scoped-live-input-v1",
-  "packageHash": "blake3:<BLAKE3 of artifact-package/package.json>",
-  "runtime": { "the exact CellnRuntimeProfileSpec": "from the package builder" },
-  "task": "the exact bounded task",
-  "systemPrompt": "the exact bounded system prompt",
-  "model": { "provider": "fixture", "protocol": "openai-chat", "name": "fixture-model" },
-  "expected": {
-    "output": "the exact assistant output",
-    "providerCalls": 1,
-    "observedOutputTokens": 7,
-    "reservedOutputTokens": 512
-  }
-}
-```
-
-The initial contract is deliberately model-only: the runtime is the real
-`celln.json-tools/v1` signed JSON runtime but no borrowed tool is selected.
-Executable, closure, mote, publisher, and resource values come verbatim from
-the package metadata. Celln independently checks those bytes at admission.
-
-## Invocation
+## Exact invocation for review 495
 
 ```bash
 GOCACHE=/tmp/sympozium-go-cache go run ./test/integration/celln-scoped-real \
-  --repo /absolute/path/to/sympozium \
-  --kubeconfig /private/isolated.kubeconfig \
+  --repo /tmp/sympozium-framework-live \
+  --kubeconfig /absolute/private/isolated.kubeconfig \
   --context isolated-context \
-  --namespace celln-eval-unique \
-  --global-controller-excludes-namespace celln-eval-unique \
-  --preparation-namespace celln-eval-unique-authority \
-  --postgres-url 'postgres://.../disposable_database' \
-  --disposable-postgres-confirmation celln-eval-unique \
-  --celln-binary /absolute/path/to/celln \
-  --celln-root /absolute/path/to/fresh-prepared-celln-root \
+  --namespace celln-review-a-495 \
+  --enduring-namespace celln-review-b-495 \
+  --denied-namespace celln-review-denied-495 \
+  --preparation-namespace celln-review-system-495 \
+  --existing-review-ownership 495 \
+  --global-controller-excludes-namespaces celln-review-a-495,celln-review-b-495,celln-review-denied-495,celln-review-system-495 \
+  --postgres-url 'postgres://.../initially_empty_disposable_database' \
+  --disposable-postgres-confirmation celln-review-a-495 \
+  --celln-binary /absolute/path/to/current/celln \
+  --celln-root /absolute/path/to/fresh/prepared-celln-root \
   --celln-runtime-dir /absolute/path/to/celln/runtime \
-  --celln-token-file /existing/private/celln-dispatcher-token \
-  --scoped-operator-token-file /existing/private/celln-scoped-operator-token \
-  --gateway-operator-token-file /existing/private/model-gateway-operator-token \
-  --artifact-package /absolute/path/to/signed-package \
-  --package-metadata /absolute/path/to/scoped-live-metadata.json \
-  --timeout 3m
+  --celln-token-file /absolute/private/celln-dispatcher-token \
+  --scoped-operator-token-file /absolute/private/celln-scoped-operator-token \
+  --gateway-operator-token-file /absolute/private/model-gateway-operator-token \
+  --artifact-package /tmp/celln-framework-package/target/framework-native-package \
+  --timeout 10m
 ```
 
-Only the final secret-free evidence JSON is written to stdout. Celln process
-output and HTTP server error logs are discarded so scoped/model permits and
-model credential bytes cannot enter harness logs or artifacts. Failures report
-the controller condition, public native phase, accounting values, and invariant
-that failed, but never request bodies or credential material.
+Only a secret-free final evidence object is written to stdout. Celln and HTTP
+server logs are discarded so permits and model credentials cannot enter output.
