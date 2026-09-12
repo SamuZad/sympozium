@@ -318,7 +318,7 @@ func TestPlatformResolverTurnRetainsOriginalIdentityAndDeadlines(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resolvedTurn.Decision.Budget.BudgetID != initial.Decision.Budget.BudgetID || resolvedTurn.Decision.Budget.RunCap != initial.Decision.Budget.RunCap || resolvedTurn.Decision.Budget.ParentDeadlineUnix != initial.Decision.Budget.ParentDeadlineUnix || resolvedTurn.Decision.Budget.TurnDeadlineUnix > initial.Decision.Budget.ParentDeadlineUnix || resolvedTurn.Decision.Parent == nil || resolvedTurn.Decision.Parent.TurnID == nil || *resolvedTurn.Decision.Parent.TurnID != "turn-uid" {
+	if resolvedTurn.Decision.Budget.BudgetID != initial.Decision.Budget.BudgetID || resolvedTurn.Decision.Budget.RunCap != initial.Decision.Budget.RunCap || resolvedTurn.Decision.Budget.ParentDeadlineUnix != initial.Decision.Budget.ParentDeadlineUnix || resolvedTurn.Decision.Budget.TurnDeadlineUnix > initial.Decision.Budget.ParentDeadlineUnix || resolvedTurn.Decision.Parent == nil || resolvedTurn.Decision.Parent.TurnID == nil || *resolvedTurn.Decision.Parent.TurnID != "turn-uid" || resolvedTurn.Execution == nil || resolvedTurn.Execution.TurnUID != "turn-uid" {
 		t.Fatalf("turn widened or lost original authority: initial=%+v turn=%+v", initial.Decision.Budget, resolvedTurn.Decision)
 	}
 }

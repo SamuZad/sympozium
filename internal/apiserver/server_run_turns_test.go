@@ -189,6 +189,27 @@ func TestRunTurnAPIIsBoundedIdempotentAndScoped(t *testing.T) {
 	}
 }
 
+func TestRunTurnAPIAcceptsReadyScopedEnduringParent(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := api.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	incarnation := "blake3:" + strings.Repeat("c", 64)
+	run := &api.AgentRun{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "scoped-parent", UID: "scoped-parent-uid", Generation: 3}, Spec: api.AgentRunSpec{Backend: "celln", AgentRef: "agent", Task: api.NewStringTask("initial"), ExecutionLifecycle: "enduring", CellnSelection: &api.CellnCatalogueSelection{}, Enduring: &api.EnduringRunSpec{LeaseSeconds: 60, MaxTurns: 3, MaxModelRequests: 6, MaxOutputTokens: 3072}}, Status: api.AgentRunStatus{Phase: api.AgentRunPhaseRunning, CellnScoped: &api.CellnScopedStatus{PreparationName: "celln-op-" + strings.Repeat("a", 64), PreparationUID: "p", DecisionName: "celln-final-" + strings.Repeat("b", 64), DecisionUID: "d", ReceiverID: "operation", Owner: "owner", ParentIncarnation: incarnation, StartAttempted: true, NativePhase: "Running", ReceiptDigest: "sha256:" + strings.Repeat("d", 64), Output: "initial answer"}, Conditions: []metav1.Condition{{Type: "CellnScopedExecution", Status: metav1.ConditionTrue, Reason: "EnduringParentReady", ObservedGeneration: 3}}}}
+	store := fake.NewClientBuilder().WithScheme(scheme).WithObjects(run).Build()
+	handler := NewServer(store, nil, nil, logr.Discard()).Handler(nil)
+	response := httptest.NewRecorder()
+	body := `{"runUID":"scoped-parent-uid","requestId":"followup","message":"continue"}`
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/v1/runs/scoped-parent/turns", strings.NewReader(body)))
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("scoped turn submission returned %d: %s", response.Code, response.Body.String())
+	}
+	var turn api.AgentRunTurn
+	if err := json.Unmarshal(response.Body.Bytes(), &turn); err != nil || len(turn.OwnerReferences) != 1 || turn.OwnerReferences[0].UID != run.UID || turn.Status.CellnScoped != nil {
+		t.Fatalf("submission minted authority or lost root ownership: turn=%+v err=%v", turn, err)
+	}
+}
+
 type unavailableTurnStore struct{ client.Client }
 
 func (unavailableTurnStore) Get(context.Context, client.ObjectKey, client.Object, ...client.GetOption) error {

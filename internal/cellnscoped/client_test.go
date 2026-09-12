@@ -68,8 +68,11 @@ func TestNativeStartSeparatesOperatorAndCapabilityCredentials(t *testing.T) {
 		return &http.Response{StatusCode: 202, Header: make(http.Header), Body: io.NopCloser(bytes.NewBufferString(`{"id":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","owner":"blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","phase":"Admitted","cleanupConfirmed":false}`))}, nil
 	})}}
 	client := &NativeClient{host: host}
-	if _, err := client.Start(context.Background(), "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", cap.NewToken("execution-only"), cap.NewToken("model-only")); err != nil {
+	if _, err := client.Start(context.Background(), "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", cap.NewToken("execution-only"), cap.NewToken("model-only")); err != nil {
 		t.Fatal(err)
+	}
+	if !bytes.Contains(gotBody, []byte(`"owner":"blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"`)) {
+		t.Fatal("expected enrolled owner was not pinned in start request")
 	}
 	if bytes.Contains(gotBody, []byte("operator-only")) || bytes.Contains(gotBody, []byte("execution-only")) || bytes.Contains(gotBody, []byte("model-only")) {
 		t.Fatal("transport or scoped permits leaked into the native request body")

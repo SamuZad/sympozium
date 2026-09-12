@@ -1,5 +1,5 @@
-// Package cellnscoped implements the operator-enabled, one-shot native Celln
-// control path. It is deliberately separate from the legacy router protocol.
+// Package cellnscoped implements the operator-enabled one-shot and enduring
+// native Celln control path. It is deliberately separate from legacy routers.
 package cellnscoped
 
 import (

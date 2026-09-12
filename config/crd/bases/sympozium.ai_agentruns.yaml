@@ -3145,10 +3145,16 @@ spec:
                 type: boolean
               cellnScoped:
                 description: |-
-                  CellnScoped binds a shared-catalogue one-shot run to immutable protected
-                  preparation, final decision, and receiver ownership. It is not used by
-                  legacy router or enduring execution.
+                  CellnScoped binds a shared-catalogue run to immutable protected
+                  preparation, final decision, and receiver ownership. Enduring roots also
+                  retain their namespace-aware parent incarnation here.
                 properties:
+                  cellId:
+                    maxLength: 256
+                    type: string
+                  childId:
+                    maxLength: 256
+                    type: string
                   cleanupConfirmed:
                     description: |-
                       CleanupConfirmed means native teardown and, when applicable, gateway close
@@ -3172,9 +3178,22 @@ spec:
                   nativePhase:
                     maxLength: 32
                     type: string
+                  output:
+                    maxLength: 4194304
+                    type: string
                   owner:
                     maxLength: 256
                     type: string
+                  parentId:
+                    maxLength: 256
+                    type: string
+                  parentIncarnation:
+                    maxLength: 71
+                    pattern: ^blake3:[0-9a-f]{64}$
+                    type: string
+                    x-kubernetes-validations:
+                    - message: scoped parent incarnation is immutable
+                      rule: self == oldSelf
                   preparationName:
                     maxLength: 75
                     type: string
@@ -3192,6 +3211,18 @@ spec:
                       StartAttempted is persisted before the non-idempotent start request. Once
                       true, recovery reads the pinned owner before considering the exact start.
                     type: boolean
+                  executionProvenance:
+                    maxLength: 65536
+                    type: string
+                  substrateProvenance:
+                    maxLength: 65536
+                    type: string
+                  turnId:
+                    maxLength: 128
+                    type: string
+                    x-kubernetes-validations:
+                    - message: scoped turn identity is immutable
+                      rule: self == oldSelf
                 required:
                 - decisionName
                 - decisionUid

@@ -18,6 +18,10 @@ type PlatformExecutionMaterial struct {
 	SystemPrompt        string                      `json:"systemPrompt"`
 	ModelConnectionName string                      `json:"modelConnectionName"`
 	CredentialSourceRef *CredentialSourceRef        `json:"credentialSourceRef"`
+	// TurnUID is captured from the persisted AgentRunTurn object. It is data
+	// correlated with this prepared operation, never authority supplied by a
+	// token or an HTTP caller.
+	TurnUID string `json:"turnUid,omitempty"`
 }
 
 type PreparedRunIdentity struct {
@@ -65,6 +69,7 @@ func executionMaterial(s platformSnapshot, request PlatformResolveRequest, decis
 	}
 	if s.Turn != nil {
 		out.Payload = s.Turn.Spec.Message
+		out.TurnUID = string(s.Turn.UID)
 	}
 	if decision.Route.CredentialSourceRef != nil {
 		ref := *decision.Route.CredentialSourceRef

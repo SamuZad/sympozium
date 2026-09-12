@@ -54,5 +54,12 @@ func ValidatePreparedBindings(op PreparedOperation) error {
 	if requestDigest != d.RequestDigest {
 		return fmt.Errorf("prepared payload identity mismatch")
 	}
+	if d.Parent != nil && d.Parent.TurnID != nil {
+		if m.TurnUID == "" || m.TurnUID != *d.Parent.TurnID {
+			return fmt.Errorf("prepared turn UID mismatch")
+		}
+	} else if m.TurnUID != "" {
+		return fmt.Errorf("non-turn preparation carries a turn UID")
+	}
 	return nil
 }

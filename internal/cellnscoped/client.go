@@ -149,6 +149,15 @@ type OperationStatus struct {
 	Output           string `json:"output,omitempty"`
 	ReceiptDigest    string `json:"receiptDigest,omitempty"`
 	CleanupConfirmed bool   `json:"cleanupConfirmed,omitempty"`
+	// Correlation and provenance are receiver-produced native evidence. The
+	// controller never derives these identifiers from a synthetic status hash.
+	ParentIncarnation string          `json:"parentIncarnation,omitempty"`
+	TurnID            string          `json:"turnId,omitempty"`
+	ParentID          string          `json:"parentId,omitempty"`
+	ChildID           string          `json:"childId,omitempty"`
+	CellID            string          `json:"cellId,omitempty"`
+	Execution         json.RawMessage `json:"execution,omitempty"`
+	Substrate         json.RawMessage `json:"substrate,omitempty"`
 }
 
 func (c *NativeClient) Prepare(ctx context.Context, operation cellnauthority.PreparedOperation, decision cap.Decision) (PrepareResponse, error) {
@@ -165,13 +174,13 @@ func (c *NativeClient) Prepare(ctx context.Context, operation cellnauthority.Pre
 	return out, err
 }
 
-func (c *NativeClient) Start(ctx context.Context, id string, execution, model cap.Token) (OperationStatus, error) {
+func (c *NativeClient) Start(ctx context.Context, id, owner string, execution, model cap.Token) (OperationStatus, error) {
 	headers := map[string]string{"X-Celln-Execution-Permit": execution.Bearer()}
 	if !model.Empty() {
 		headers["X-Celln-Model-Permit"] = model.Bearer()
 	}
 	var out OperationStatus
-	err := c.host.post(ctx, "/v1/scoped/start", map[string]string{"id": id}, headers, &out)
+	err := c.host.post(ctx, "/v1/scoped/start", map[string]string{"id": id, "owner": owner}, headers, &out)
 	return out, err
 }
 

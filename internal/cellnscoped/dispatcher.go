@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"time"
 
+	api "github.com/sympozium-ai/sympozium/api/v1alpha1"
 	"github.com/sympozium-ai/sympozium/internal/cellnauthority"
 	cap "github.com/sympozium-ai/sympozium/internal/cellncapability"
 	"github.com/sympozium-ai/sympozium/internal/modelgateway"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -26,7 +28,33 @@ func (d *Dispatcher) Prepare(ctx context.Context, key types.NamespacedName) (*ce
 	if d == nil || d.Receiver == nil || d.Issuer == nil || d.ClusterID == "" {
 		return nil, errors.New("scoped dispatcher is not configured")
 	}
-	return d.Store.Prepare(ctx, key, cellnauthority.PlatformResolveRequest{ClusterID: d.ClusterID, Now: time.Now().UTC(), AdmissionWindow: 60 * time.Second, Operation: "execution.start"})
+	request := cellnauthority.PlatformResolveRequest{ClusterID: d.ClusterID, Now: time.Now().UTC(), AdmissionWindow: 60 * time.Second, Operation: "execution.start"}
+	var run api.AgentRun
+	if err := d.Store.Reader.Get(ctx, key, &run); err != nil {
+		return nil, err
+	}
+	if run.Spec.ExecutionLifecycle == "enduring" {
+		var namespace corev1.Namespace
+		if err := d.Store.Reader.Get(ctx, types.NamespacedName{Name: key.Namespace}, &namespace); err != nil {
+			return nil, err
+		}
+		incarnation, err := cellnauthority.ScopedParentIncarnation(d.ClusterID, string(namespace.UID), string(run.UID))
+		if err != nil {
+			return nil, err
+		}
+		request.ParentIncarnation = incarnation
+	}
+	return d.Store.Prepare(ctx, key, request)
+}
+
+// PrepareTurn captures a fresh turn from its API UID while retaining the
+// original final run authority and parent incarnation.
+func (d *Dispatcher) PrepareTurn(ctx context.Context, runKey, turnKey types.NamespacedName, original *cellnauthority.FinalizedPreparation, incarnation string) (*cellnauthority.StoredPreparation, error) {
+	if d == nil || original == nil || original.Decision.Operation != "execution.start" || original.Decision.Lifecycle != "enduring-initial" || original.Decision.Parent == nil || original.Decision.Parent.Incarnation != incarnation {
+		return nil, errors.New("original enduring authority is unavailable")
+	}
+	decision := original.Decision
+	return d.Store.Prepare(ctx, runKey, cellnauthority.PlatformResolveRequest{ClusterID: d.ClusterID, Now: time.Now().UTC(), AdmissionWindow: 60 * time.Second, Operation: "execution.turn", ParentIncarnation: incarnation, TurnKey: &turnKey, Original: &decision})
 }
 
 func (d *Dispatcher) EnsureFinal(ctx context.Context, prepared *cellnauthority.StoredPreparation) (*cellnauthority.FinalizedPreparation, error) {
@@ -63,6 +91,23 @@ func (d *Dispatcher) EnsureFinal(ctx context.Context, prepared *cellnauthority.S
 		return nil, err
 	}
 	return d.Store.Finalize(ctx, prepared, finalDecision)
+}
+
+// EnsureTurnFinal reuses the original gateway-pinned Secret UID. It must not
+// ask the gateway to pin a possibly recreated Secret for continuation work.
+func (d *Dispatcher) EnsureTurnFinal(ctx context.Context, prepared *cellnauthority.StoredPreparation, original *cellnauthority.FinalizedPreparation) (*cellnauthority.FinalizedPreparation, error) {
+	if prepared == nil || original == nil || prepared.Operation.Resolution.Decision.Operation != "execution.turn" {
+		return nil, errors.New("turn finalization requires original prepared authority")
+	}
+	secretUID := ""
+	if original.Decision.Route.CredentialSource != nil {
+		secretUID = original.Decision.Route.CredentialSource.SecretUID
+	}
+	final, err := prepared.Operation.Resolution.Decision.FinalizeCredentialSource(secretUID)
+	if err != nil {
+		return nil, err
+	}
+	return d.Store.Finalize(ctx, prepared, final)
 }
 
 func CapabilityDecision(decision cellnauthority.PlatformDecision) (cap.Decision, error) {
@@ -103,7 +148,7 @@ func (d *Dispatcher) StartTokens(final *cellnauthority.FinalizedPreparation) (ca
 	if err != nil {
 		return decision, cap.Token{}, cap.Token{}, err
 	}
-	execution, err := d.Issuer.Issue(decision, cap.IssueRequest{Audience: cap.AudienceExecution, Operation: "execution.start"})
+	execution, err := d.Issuer.Issue(decision, cap.IssueRequest{Audience: cap.AudienceExecution, Operation: decision.Operation})
 	if err != nil {
 		return decision, cap.Token{}, cap.Token{}, err
 	}
@@ -128,8 +173,8 @@ func (d *Dispatcher) RegisterGateway(ctx context.Context, final *cellnauthority.
 	return d.Gateway.Register(ctx, decision, execution, prepared.Operation.Resolution.Execution.ModelConnectionName)
 }
 
-func (d *Dispatcher) Start(ctx context.Context, id string, execution, model cap.Token) (OperationStatus, error) {
-	return d.Receiver.Start(ctx, id, execution, model)
+func (d *Dispatcher) Start(ctx context.Context, id, owner string, execution, model cap.Token) (OperationStatus, error) {
+	return d.Receiver.Start(ctx, id, owner, execution, model)
 }
 
 func ownerDecision(original cap.Decision, operation string, now time.Time) cap.Decision {
