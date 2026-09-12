@@ -1,0 +1,19 @@
+apiVersion: sympozium.ai/v1alpha1
+kind: AgentRun
+metadata:
+  name: denied-uppercase
+  namespace: celln-review-denied-@@REVIEW@@
+  labels: {sympozium.ai/celln-review: "@@REVIEW@@"}
+spec:
+  agentRef: review-agent
+  agentId: default
+  task: '{"text":"must-not-run"}'
+  model: {model: ""}
+  backend: celln
+  executionLifecycle: one-shot
+  timeout: 2m
+  cleanup: delete
+  cellnSelection:
+    runtimeRef: review-runtime
+    toolRefs: []
+    clusterToolRefs: [{name: @@TOOL@@, revision: @@TOOL_REVISION@@}]
