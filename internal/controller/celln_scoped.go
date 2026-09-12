@@ -1,7 +1,9 @@
 package controller
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -23,8 +25,8 @@ const scopedOutcomeUnconfirmed = "Scoped execution outcome is uncertain. The con
 
 var scopedReceiptPattern = regexp.MustCompile(`^(?:sha256:|blake3:)?[0-9a-f]{64}$`)
 
-func scopedOneShotSelected(run *api.AgentRun) bool {
-	return run.Spec.CellnSelection != nil && run.Spec.ExecutionLifecycle != "enduring"
+func scopedCatalogueSelected(run *api.AgentRun) bool {
+	return run.Spec.CellnSelection != nil && (run.Spec.ExecutionLifecycle == "" || run.Spec.ExecutionLifecycle == "one-shot" || run.Spec.ExecutionLifecycle == "enduring")
 }
 
 // sharedCatalogueSelected disambiguates tool-free legacy and shared selections
@@ -35,8 +37,14 @@ func (r *AgentRunReconciler) sharedCatalogueSelected(ctx context.Context, run *a
 		return true, nil
 	}
 	selection := run.Spec.CellnSelection
-	if selection == nil || run.Spec.ExecutionLifecycle == "enduring" {
+	if selection == nil {
 		return false, nil
+	}
+	// Explicit enduring catalogue intent is owned exclusively by the scoped
+	// lifecycle wire. Unsupported wrappers are refused by its resolver; they may
+	// never fall through to the older parent dispatcher.
+	if run.Spec.ExecutionLifecycle == "enduring" {
+		return true, nil
 	}
 	if len(selection.ClusterToolRefs) != 0 {
 		return true, nil
@@ -73,8 +81,8 @@ func (r *AgentRunReconciler) scopedProgress(ctx context.Context, run *api.AgentR
 }
 
 func (r *AgentRunReconciler) reconcilePendingScoped(ctx context.Context, log logr.Logger, run *api.AgentRun) (ctrl.Result, error) {
-	if run.Spec.Backend != "celln" || run.Spec.Celln != nil || !run.Spec.Task.IsString() || run.Spec.ExecutionLifecycle == "enduring" {
-		return ctrl.Result{}, r.failRun(ctx, run, "Scoped catalogue execution requires backend celln, one-shot lifecycle, a string task, and no explicit artifacts")
+	if run.Spec.Backend != "celln" || run.Spec.Celln != nil || !run.Spec.Task.IsString() || !scopedCatalogueSelected(run) {
+		return ctrl.Result{}, r.failRun(ctx, run, "Scoped catalogue execution requires backend celln, a supported lifecycle, a string task, and no explicit artifacts")
 	}
 	if r.ScopedDispatcher == nil {
 		if err := r.scopedProgress(ctx, run, metav1.ConditionFalse, "ScopedDispatchDisabled", "Operator scoped receiver configuration is absent; no legacy, model, OCI, or native execution was submitted"); err != nil {
@@ -163,7 +171,7 @@ func (r *AgentRunReconciler) reconcilePendingScoped(ctx context.Context, log log
 		}
 		run.Status.CellnScoped.StartAttempted = true
 	}
-	observed, err := r.ScopedDispatcher.Start(ctx, run.Status.CellnScoped.ReceiverID, execution, model)
+	observed, err := r.ScopedDispatcher.Start(ctx, run.Status.CellnScoped.ReceiverID, run.Status.CellnScoped.Owner, execution, model)
 	if err != nil {
 		return r.scopedUncertain(ctx, run, "ExecutionOutcomeUnconfirmed", err)
 	}
@@ -191,6 +199,9 @@ func (r *AgentRunReconciler) scopedUncertain(ctx context.Context, run *api.Agent
 
 func (r *AgentRunReconciler) persistScopedBinding(ctx context.Context, run *api.AgentRun, prepared *cellnauthority.StoredPreparation, final *cellnauthority.FinalizedPreparation) error {
 	want := api.CellnScopedStatus{PreparationName: prepared.Name, PreparationUID: string(prepared.UID), DecisionName: final.Name, DecisionUID: string(final.UID)}
+	if final.Decision.Parent != nil {
+		want.ParentIncarnation = final.Decision.Parent.Incarnation
+	}
 	return r.updateStatusWithRetry(ctx, run, func(current *api.AgentRun) {
 		if current.Status.CellnScoped == nil {
 			current.Status.CellnScoped = &want
@@ -213,7 +224,7 @@ func (r *AgentRunReconciler) updateScopedStatus(ctx context.Context, run *api.Ag
 			mutationErr = err
 			return nil
 		}
-		if before.PreparationName != current.Status.CellnScoped.PreparationName || before.PreparationUID != current.Status.CellnScoped.PreparationUID || before.DecisionName != current.Status.CellnScoped.DecisionName || before.DecisionUID != current.Status.CellnScoped.DecisionUID || (before.ReceiverID != "" && (before.ReceiverID != current.Status.CellnScoped.ReceiverID || before.Owner != current.Status.CellnScoped.Owner)) {
+		if before.PreparationName != current.Status.CellnScoped.PreparationName || before.PreparationUID != current.Status.CellnScoped.PreparationUID || before.DecisionName != current.Status.CellnScoped.DecisionName || before.DecisionUID != current.Status.CellnScoped.DecisionUID || before.ParentIncarnation != current.Status.CellnScoped.ParentIncarnation || before.TurnID != current.Status.CellnScoped.TurnID || (before.ReceiverID != "" && (before.ReceiverID != current.Status.CellnScoped.ReceiverID || before.Owner != current.Status.CellnScoped.Owner)) {
 			return errors.New("scoped immutable status identity changed")
 		}
 		return r.Status().Update(ctx, &current)
@@ -249,6 +260,13 @@ func (r *AgentRunReconciler) loadScopedBinding(ctx context.Context, run *api.Age
 	if string(final.UID) != s.DecisionUID {
 		return nil, nil, errors.New("protected scoped decision UID changed")
 	}
+	if final.Decision.Parent == nil {
+		if s.ParentIncarnation != "" || s.TurnID != "" {
+			return nil, nil, errors.New("one-shot scoped status carries parent identity")
+		}
+	} else if s.ParentIncarnation != final.Decision.Parent.Incarnation || (final.Decision.Parent.TurnID != nil && s.TurnID != *final.Decision.Parent.TurnID) {
+		return nil, nil, errors.New("scoped parent identity changed")
+	}
 	return prepared, final, nil
 }
 
@@ -267,6 +285,17 @@ func (r *AgentRunReconciler) applyScopedStatus(ctx context.Context, log logr.Log
 	if int64(len(observed.Output)) > prepared.Operation.Resolution.Execution.RuntimeLimits.OutputBytes || len(observed.Reason) > 4096 || (observed.ReceiptDigest != "" && !scopedReceiptPattern.MatchString(observed.ReceiptDigest)) {
 		return ctrl.Result{}, errors.New("scoped receiver result violates the prepared output contract")
 	}
+	if err := validateScopedCorrelation(prepared, observed); err != nil {
+		return ctrl.Result{}, err
+	}
+	executionProvenance, err := boundedNativeEvidence(observed.Execution)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	substrateProvenance, err := boundedNativeEvidence(observed.Substrate)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 	active := []string{"Prepared", "Admitting", "Admitted", "Running", "Cancelling"}
 	terminal := []string{"Succeeded", "Failed", "Refused", "Cancelled"}
 	if !slices.Contains(active, observed.Phase) && !slices.Contains(terminal, observed.Phase) {
@@ -281,6 +310,20 @@ func (r *AgentRunReconciler) applyScopedStatus(ctx context.Context, log logr.Log
 			}
 			state.ReceiptDigest = observed.ReceiptDigest
 		}
+		if observed.Output != "" {
+			if state.Output != "" && state.Output != observed.Output {
+				return errors.New("scoped correlated output changed")
+			}
+			state.Output = observed.Output
+		}
+		for current, next := range map[*string]string{&state.ParentID: observed.ParentID, &state.ChildID: observed.ChildID, &state.CellID: observed.CellID, &state.ExecutionProvenance: executionProvenance, &state.SubstrateProvenance: substrateProvenance} {
+			if next != "" {
+				if *current != "" && *current != next {
+					return errors.New("scoped native provenance changed")
+				}
+				*current = next
+			}
+		}
 		return nil
 	}); err != nil {
 		return ctrl.Result{}, err
@@ -291,7 +334,14 @@ func (r *AgentRunReconciler) applyScopedStatus(ctx context.Context, log logr.Log
 			if current.Status.StartedAt == nil {
 				current.Status.StartedAt = &now
 			}
-			meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{Type: "CellnScopedExecution", Status: metav1.ConditionTrue, Reason: "OwnerRecordObserved", Message: "The configured receiver returned the original prepared owner record", ObservedGeneration: current.Generation})
+			reason := "OwnerRecordObserved"
+			message := "The configured receiver returned the original prepared owner record"
+			if current.Spec.ExecutionLifecycle == "enduring" && observed.Phase == "Running" && current.Status.CellnScoped != nil && current.Status.CellnScoped.ReceiptDigest != "" && current.Status.CellnScoped.Output != "" {
+				reason = "EnduringParentReady"
+				message = "The original native parent completed its initial turn and remains running"
+				current.Status.Result = current.Status.CellnScoped.Output
+			}
+			meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{Type: "CellnScopedExecution", Status: metav1.ConditionTrue, Reason: reason, Message: message, ObservedGeneration: current.Generation})
 		}); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -315,6 +365,39 @@ func (r *AgentRunReconciler) applyScopedStatus(ctx context.Context, log logr.Log
 	}
 	log.Info("Scoped Celln execution reached terminal owner record", "phase", observed.Phase)
 	return ctrl.Result{Requeue: true}, nil
+}
+
+func validateScopedCorrelation(prepared *cellnauthority.StoredPreparation, observed cellnscoped.OperationStatus) error {
+	d := prepared.Operation.Resolution.Decision
+	if d.Parent == nil {
+		if observed.ParentIncarnation != "" || observed.TurnID != "" {
+			return errors.New("one-shot receiver result carries parent correlation")
+		}
+		return nil
+	}
+	if observed.ParentIncarnation != d.Parent.Incarnation {
+		return errors.New("scoped receiver returned another parent incarnation")
+	}
+	if d.Parent.TurnID != nil && observed.TurnID != *d.Parent.TurnID {
+		return errors.New("scoped receiver returned another turn identity")
+	}
+	return nil
+}
+
+func boundedNativeEvidence(raw json.RawMessage) (string, error) {
+	if len(raw) == 0 {
+		return "", nil
+	}
+	if len(raw) > 65536 || !json.Valid(raw) {
+		return "", errors.New("scoped native provenance is invalid or exceeds its bound")
+	}
+	var compact []byte
+	buffer := &bytes.Buffer{}
+	if err := json.Compact(buffer, raw); err != nil {
+		return "", err
+	}
+	compact = buffer.Bytes()
+	return string(compact), nil
 }
 
 func (r *AgentRunReconciler) cleanupScoped(ctx context.Context, run *api.AgentRun) (bool, error) {

@@ -214,7 +214,7 @@ func main() {
 		DynamicClient:                dynamicClient,
 		Pricing:                      pricingLoader,
 	}
-	// The shared-catalogue native one-shot path is disabled unless an operator
+	// The shared-catalogue native lifecycle path is disabled unless an operator
 	// supplies the complete receiver/gateway/issuer configuration. A malformed
 	// explicit configuration is a startup error, never a legacy fallback.
 	if configPath := os.Getenv("CELLN_SCOPED_CONFIG"); configPath != "" {
@@ -224,7 +224,7 @@ func main() {
 			os.Exit(1)
 		}
 		agentRunReconciler.ScopedDispatcher = dispatcher
-		setupLog.Info("Scoped Celln one-shot execution enabled")
+		setupLog.Info("Scoped Celln one-shot and enduring execution enabled")
 	}
 	if configPath := os.Getenv("CELLN_PARENT_REGISTRATIONS"); configPath != "" {
 		dispatcher, err := cellnparent.LoadRegistrationDispatcher(configPath, agentRunReconciler.ParentConfigPath, mgr.GetAPIReader())
@@ -248,8 +248,8 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentRun")
 		os.Exit(1)
 	}
-	if agentRunReconciler.ParentConfigPath != "" {
-		if err := (&controller.AgentRunTurnReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), ParentConfigPath: agentRunReconciler.ParentConfigPath}).SetupWithManager(mgr); err != nil {
+	if agentRunReconciler.ScopedDispatcher != nil {
+		if err := (&controller.AgentRunTurnReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), ScopedDispatcher: agentRunReconciler.ScopedDispatcher}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create AgentRunTurn controller")
 			os.Exit(1)
 		}

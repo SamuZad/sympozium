@@ -158,7 +158,7 @@ type AgentRunReconciler struct {
 	// issuance rather than falling through to legacy forge or OCI execution.
 	CatalogueDispatcher CatalogueDispatcher
 	// ScopedDispatcher is the explicit operator-configured shared-catalogue
-	// one-shot path. Nil is disabled and never falls back to the legacy router.
+	// one-shot/enduring path. Nil is disabled and never falls back to legacy.
 	ScopedDispatcher *cellnscoped.Dispatcher
 	// ParentConfigPath explicitly enables experimental enduring-parent startup.
 	// Empty refuses new enduring runs; existing cleanup remains fail-closed.
@@ -360,7 +360,7 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, selectionErr
 	}
 	if sharedScoped {
-		if !scopedOneShotSelected(agentRun) && !isTerminal {
+		if !scopedCatalogueSelected(agentRun) && !isTerminal {
 			return ctrl.Result{}, r.failRun(ctx, agentRun, "Scoped Celln run selection or lifecycle changed; create a new run")
 		}
 		switch agentRun.Status.Phase {
@@ -371,7 +371,7 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		case sympoziumv1alpha1.AgentRunPhaseSucceeded, sympoziumv1alpha1.AgentRunPhaseFailed, sympoziumv1alpha1.AgentRunPhaseSkipped:
 			return r.reconcileCompleted(ctx, log, agentRun)
 		default:
-			return ctrl.Result{}, r.failRun(ctx, agentRun, "Scoped Celln one-shot entered an unsupported controller phase")
+			return ctrl.Result{}, r.failRun(ctx, agentRun, "Scoped Celln run entered an unsupported controller phase")
 		}
 	}
 

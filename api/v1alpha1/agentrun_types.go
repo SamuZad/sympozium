@@ -523,9 +523,9 @@ type AgentRunStatus struct {
 	// CellnParent binds enduring intent before any parent creation side effect.
 	// +optional
 	CellnParent *CellnParentStatus `json:"cellnParent,omitempty"`
-	// CellnScoped binds a shared-catalogue one-shot run to immutable protected
-	// preparation, final decision, and receiver ownership. It is not used by
-	// legacy router or enduring execution.
+	// CellnScoped binds a shared-catalogue run to immutable protected
+	// preparation, final decision, and receiver ownership. Enduring roots also
+	// retain their namespace-aware parent incarnation here.
 	// +optional
 	CellnScoped *CellnScopedStatus `json:"cellnScoped,omitempty"`
 	// CellnReceipt retains the validated versioned terminal receipt as JSON.
@@ -559,6 +559,18 @@ type CellnScopedStatus struct {
 	// +optional
 	// +kubebuilder:validation:MaxLength=256
 	Owner string `json:"owner,omitempty"`
+	// ParentIncarnation is present only for enduring initial/turn operations and
+	// must match the immutable prepared decision and receiver evidence.
+	// +optional
+	// +kubebuilder:validation:MaxLength=71
+	// +kubebuilder:validation:Pattern=`^blake3:[0-9a-f]{64}$`
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="scoped parent incarnation is immutable"
+	ParentIncarnation string `json:"parentIncarnation,omitempty"`
+	// TurnID is the actual AgentRunTurn UID for continuation work.
+	// +optional
+	// +kubebuilder:validation:MaxLength=128
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="scoped turn identity is immutable"
+	TurnID string `json:"turnId,omitempty"`
 	// GatewayRegistrationAttempted is persisted before registration so an
 	// ambiguous transport failure remains visible and cleanup still fences the
 	// original budget. It does not by itself prove registration succeeded.
@@ -577,6 +589,27 @@ type CellnScopedStatus struct {
 	// +optional
 	// +kubebuilder:validation:MaxLength=256
 	ReceiptDigest string `json:"receiptDigest,omitempty"`
+	// Output is correlated receiver output for the initial or continuation turn.
+	// +optional
+	// +kubebuilder:validation:MaxLength=4194304
+	Output string `json:"output,omitempty"`
+	// Native IDs and provenance are copied from receiver evidence. They are
+	// observational and cannot select future execution authority.
+	// +optional
+	// +kubebuilder:validation:MaxLength=256
+	ParentID string `json:"parentId,omitempty"`
+	// +optional
+	// +kubebuilder:validation:MaxLength=256
+	ChildID string `json:"childId,omitempty"`
+	// +optional
+	// +kubebuilder:validation:MaxLength=256
+	CellID string `json:"cellId,omitempty"`
+	// +optional
+	// +kubebuilder:validation:MaxLength=65536
+	ExecutionProvenance string `json:"executionProvenance,omitempty"`
+	// +optional
+	// +kubebuilder:validation:MaxLength=65536
+	SubstrateProvenance string `json:"substrateProvenance,omitempty"`
 	// CleanupConfirmed means native teardown and, when applicable, gateway close
 	// both completed. It is the only condition allowing finalizer removal.
 	// +optional
