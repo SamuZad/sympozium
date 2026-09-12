@@ -4,6 +4,7 @@ package modelgateway
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -137,6 +138,10 @@ type Config struct {
 	MaxConcurrent       int
 	MaxProviderDuration time.Duration
 	AllowPrivateOrigins map[string]bool
+	// ProviderRootCAs adds operator-selected trust anchors to the provider
+	// transport. Nil uses the host trust store. Certificate and hostname
+	// verification remain mandatory.
+	ProviderRootCAs *x509.CertPool
 }
 
 func (c *Config) defaults() error {

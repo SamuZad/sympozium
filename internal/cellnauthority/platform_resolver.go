@@ -511,7 +511,10 @@ func resolveDecisionRoute(s platformSnapshot, required bool) (DecisionRouteBindi
 	var origin string
 	var err error
 	if auth == "secret" {
-		origin, err = api.ModelEndpointOrigin(c.Spec.Endpoint)
+		origin, err = api.ModelEndpointOriginInsecure(c.Spec.Endpoint, c.Spec.AllowInsecure)
+		if err == nil && !strings.HasPrefix(strings.ToLower(origin), "https://") {
+			err = fmt.Errorf("credential-bearing model endpoint must use HTTPS")
+		}
 	} else {
 		origin, err = api.ModelEndpointOriginInsecure(c.Spec.Endpoint, c.Spec.AllowInsecure)
 	}
