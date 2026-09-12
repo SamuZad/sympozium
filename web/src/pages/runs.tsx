@@ -661,8 +661,13 @@ export function RunsPage() {
                   {truncate(taskText(run.spec.task), 60)}
                 </TableCell>
                 <TableCell>
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex flex-wrap items-center gap-1.5">
                     <StatusBadge phase={run.status?.phase} />
+                    {run.spec.backend === "celln" && (
+                      <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium" data-testid="celln-run-mode">
+                        {run.spec.executionLifecycle === "enduring" ? "Celln · enduring" : "Celln · one-shot"}
+                      </span>
+                    )}
                     {isAwaitingGate(run) && (
                       <span
                         data-testid="gate-pending-badge"
