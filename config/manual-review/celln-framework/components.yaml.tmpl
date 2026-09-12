@@ -1,0 +1,156 @@
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: celln-review-public-@@REVIEW@@, namespace: celln-review-system-@@REVIEW@@, labels: {sympozium.ai/celln-review: "@@REVIEW@@"}}
+data:
+  issuer-jwks.json: '@@JWKS@@'
+  receiver-ca.pem: |
+@@RECEIVER_CA@@
+  gateway-ca.pem: |
+@@GATEWAY_CA@@
+  provider-ca.pem: |
+@@PROVIDER_CA@@
+  postgres-ca.pem: |
+@@POSTGRES_CA@@
+  parent-template.json: '@@PARENT_TEMPLATE@@'
+  gateway.json: '@@GATEWAY_CONFIG@@'
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: celln-review-migrations-@@REVIEW@@, namespace: celln-review-system-@@REVIEW@@, labels: {sympozium.ai/celln-review: "@@REVIEW@@"}}
+data:
+  002_celln_model_budget.sql: |
+@@MIGRATION_002@@
+  003_celln_model_gateway.sql: |
+@@MIGRATION_003@@
+---
+apiVersion: v1
+kind: Service
+metadata: {name: celln-receiver-@@REVIEW@@, namespace: celln-review-system-@@REVIEW@@, labels: {sympozium.ai/celln-review: "@@REVIEW@@"}}
+spec: {selector: {app: celln-review-native-@@REVIEW@@}, ports: [{name: https, port: 8443, targetPort: 8443}]}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: celln-review-native-@@REVIEW@@, namespace: celln-review-system-@@REVIEW@@, labels: {sympozium.ai/celln-review: "@@REVIEW@@"}}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: celln-review-native-@@REVIEW@@}}
+  template:
+    metadata: {labels: {app: celln-review-native-@@REVIEW@@, sympozium.ai/celln-review: "@@REVIEW@@"}}
+    spec:
+      nodeName: framework
+      serviceAccountName: celln-review-native-@@REVIEW@@
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: native
+          image: @@IMAGE@@
+          imagePullPolicy: IfNotPresent
+          securityContext: {privileged: true, allowPrivilegeEscalation: true}
+          command: ["/usr/local/bin/celln"]
+          args: ["--root", "/state", "dispatcher", "--mote-store", "/state/motes", "--tool-store", "/state/tools", "--max-cells", "6", "--memory-bytes", "536870912", "--egress-slots", "4", "--listen", "127.0.0.1:8091", "--token-file", "/operator/native-token", "--scoped-operator-token-file", "/operator/scoped-token", "--scoped-jwks-file", "/public/issuer-jwks.json", "--scoped-issuer", "sympozium-control-plane", "--scoped-gateway-origin", "https://celln-model-gateway-@@REVIEW@@.celln-review-system-@@REVIEW@@.svc:8443", "--scoped-gateway-ca", "/public/gateway-ca.pem", "--scoped-parent-request-file", "/public/parent-template.json"]
+          volumeMounts: [{name: state, mountPath: /state}, {name: kvm, mountPath: /dev/kvm}, {name: native-secret, mountPath: /operator, readOnly: true}, {name: public, mountPath: /public, readOnly: true}]
+        - name: tls-frontend
+          image: @@IMAGE@@
+          imagePullPolicy: IfNotPresent
+          securityContext: {runAsUser: 0, allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          command: ["/usr/local/bin/review-provider"]
+          args: ["--proxy-receiver", "--listen", ":8443", "--cert", "/tls/tls.crt", "--key", "/tls/tls.key"]
+          ports: [{name: https, containerPort: 8443}]
+          volumeMounts: [{name: receiver-tls, mountPath: /tls, readOnly: true}]
+      volumes:
+        - {name: state, hostPath: {path: "@@NATIVE_ROOT@@", type: Directory}}
+        - {name: kvm, hostPath: {path: /dev/kvm, type: CharDevice}}
+        - {name: native-secret, secret: {secretName: celln-review-native-@@REVIEW@@, defaultMode: 256}}
+        - {name: receiver-tls, secret: {secretName: celln-review-receiver-tls-@@REVIEW@@, defaultMode: 256}}
+        - {name: public, configMap: {name: celln-review-public-@@REVIEW@@}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: celln-postgres-@@REVIEW@@, namespace: celln-review-system-@@REVIEW@@, labels: {sympozium.ai/celln-review: "@@REVIEW@@"}}
+spec: {selector: {app: celln-review-postgres-@@REVIEW@@}, ports: [{name: postgres, port: 5432, targetPort: 5432}]}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: celln-review-postgres-@@REVIEW@@, namespace: celln-review-system-@@REVIEW@@, labels: {sympozium.ai/celln-review: "@@REVIEW@@"}}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: celln-review-postgres-@@REVIEW@@}}
+  template:
+    metadata: {labels: {app: celln-review-postgres-@@REVIEW@@, sympozium.ai/celln-review: "@@REVIEW@@"}}
+    spec:
+      automountServiceAccountToken: false
+      securityContext: {fsGroup: 999}
+      initContainers:
+        - name: tls-permissions
+          image: @@POSTGRES_IMAGE@@
+          command: [sh, -ceu]
+          args: ['install -m 0600 -o 999 -g 999 /tls-input/tls.key /tls/tls.key; install -m 0644 -o 999 -g 999 /tls-input/tls.crt /tls/tls.crt']
+          securityContext: {runAsUser: 0, allowPrivilegeEscalation: false}
+          volumeMounts: [{name: tls-input, mountPath: /tls-input, readOnly: true}, {name: tls, mountPath: /tls}]
+      containers:
+        - name: postgres
+          image: @@POSTGRES_IMAGE@@
+          args: ["postgres", "-c", "ssl=on", "-c", "ssl_cert_file=/tls/tls.crt", "-c", "ssl_key_file=/tls/tls.key"]
+          env: [{name: POSTGRES_DB, value: celln_review}, {name: POSTGRES_USER, value: celln_review}, {name: POSTGRES_PASSWORD_FILE, value: /operator/postgres-password}]
+          ports: [{name: postgres, containerPort: 5432}]
+          volumeMounts: [{name: data, mountPath: /var/lib/postgresql/data}, {name: tls, mountPath: /tls, readOnly: true}, {name: operator, mountPath: /operator, readOnly: true}, {name: migrations, mountPath: /docker-entrypoint-initdb.d, readOnly: true}]
+      volumes:
+        - {name: data, emptyDir: {}}
+        - {name: tls, emptyDir: {}}
+        - {name: tls-input, secret: {secretName: celln-review-postgres-tls-@@REVIEW@@, defaultMode: 256}}
+        - {name: operator, secret: {secretName: celln-review-postgres-@@REVIEW@@, defaultMode: 288}}
+        - {name: migrations, configMap: {name: celln-review-migrations-@@REVIEW@@}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: celln-model-gateway-@@REVIEW@@, namespace: celln-review-system-@@REVIEW@@, labels: {sympozium.ai/celln-review: "@@REVIEW@@"}}
+spec: {selector: {app: celln-review-gateway-@@REVIEW@@}, ports: [{name: https, port: 8443, targetPort: 8443}]}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: celln-review-gateway-@@REVIEW@@, namespace: celln-review-system-@@REVIEW@@, labels: {sympozium.ai/celln-review: "@@REVIEW@@"}}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: celln-review-gateway-@@REVIEW@@}}
+  template:
+    metadata: {labels: {app: celln-review-gateway-@@REVIEW@@, sympozium.ai/celln-review: "@@REVIEW@@"}}
+    spec:
+      serviceAccountName: celln-review-gateway-@@REVIEW@@
+      containers:
+        - name: gateway
+          image: @@IMAGE@@
+          command: ["/usr/local/bin/model-gateway"]
+          args: ["--config", "/public/gateway.json"]
+          ports: [{name: https, containerPort: 8443}]
+          securityContext: {runAsUser: 0, allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          volumeMounts: [{name: public, mountPath: /public, readOnly: true}, {name: gateway-secret, mountPath: /operator, readOnly: true}, {name: gateway-tls, mountPath: /tls, readOnly: true}]
+      volumes:
+        - {name: public, configMap: {name: celln-review-public-@@REVIEW@@}}
+        - {name: gateway-secret, secret: {secretName: celln-review-gateway-@@REVIEW@@, defaultMode: 256}}
+        - {name: gateway-tls, secret: {secretName: celln-review-gateway-tls-@@REVIEW@@, defaultMode: 256}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: celln-review-controller-@@REVIEW@@, namespace: celln-review-system-@@REVIEW@@, labels: {sympozium.ai/celln-review: "@@REVIEW@@"}}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: celln-review-controller-@@REVIEW@@}}
+  template:
+    metadata: {labels: {app: celln-review-controller-@@REVIEW@@, sympozium.ai/celln-review: "@@REVIEW@@"}}
+    spec:
+      serviceAccountName: celln-review-controller-@@REVIEW@@
+      containers:
+        - name: controller
+          image: @@IMAGE@@
+          command: ["/usr/local/bin/controller"]
+          args: ["--watch-namespaces", "celln-review-a-@@REVIEW@@,celln-review-b-@@REVIEW@@,celln-review-denied-@@REVIEW@@", "--config", "/operator/controller.json"]
+          securityContext: {runAsUser: 0, allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          readinessProbe: {httpGet: {path: /readyz, port: 8081}, periodSeconds: 5}
+          volumeMounts: [{name: controller-secret, mountPath: /operator, readOnly: true}]
+      volumes: [{name: controller-secret, secret: {secretName: celln-review-controller-@@REVIEW@@, defaultMode: 256}}]
+---
+@@PROVIDERS@@

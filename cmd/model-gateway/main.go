@@ -40,6 +40,7 @@ type config struct {
 	DatabaseURLFile       string   `json:"databaseUrlFile"`
 	PrivateOrigins        []string `json:"privateOrigins"`
 	ProviderCAFile        string   `json:"providerCaFile,omitempty"`
+	ReadinessNamespaces   []string `json:"readinessNamespaces,omitempty"`
 }
 
 func main() {
@@ -131,7 +132,7 @@ func run(path string) error {
 			return errors.New("invalid operator provider CA certificate")
 		}
 	}
-	gateway, err := modelgateway.New(modelgateway.Config{AuthorityReady: modelgateway.AuthorityReadiness(auth.SelfSubjectAccessReviews()), ClusterID: cfg.ClusterID, RegistrationToken: cap.NewToken(registration), AllowPrivateOrigins: private, ProviderRootCAs: providerRoots}, verifier, reader, budgets, authorities)
+	gateway, err := modelgateway.New(modelgateway.Config{AuthorityReady: modelgateway.AuthorityReadinessForNamespaces(auth.SelfSubjectAccessReviews(), cfg.ReadinessNamespaces), ClusterID: cfg.ClusterID, RegistrationToken: cap.NewToken(registration), AllowPrivateOrigins: private, ProviderRootCAs: providerRoots}, verifier, reader, budgets, authorities)
 	if err != nil {
 		return err
 	}
