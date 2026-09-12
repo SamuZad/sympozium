@@ -26,6 +26,7 @@ import (
 	sympoziumv1alpha1 "github.com/sympozium-ai/sympozium/api/v1alpha1"
 	"github.com/sympozium-ai/sympozium/internal/cellnparent"
 	"github.com/sympozium-ai/sympozium/internal/cellnreview"
+	"github.com/sympozium-ai/sympozium/internal/cellnscoped"
 	"github.com/sympozium-ai/sympozium/internal/controller"
 	"github.com/sympozium-ai/sympozium/internal/dra"
 	"github.com/sympozium-ai/sympozium/internal/eventbus"
@@ -212,6 +213,18 @@ func main() {
 		DelegationControllerExecutor: delegationControllerExecutor,
 		DynamicClient:                dynamicClient,
 		Pricing:                      pricingLoader,
+	}
+	// The shared-catalogue native one-shot path is disabled unless an operator
+	// supplies the complete receiver/gateway/issuer configuration. A malformed
+	// explicit configuration is a startup error, never a legacy fallback.
+	if configPath := os.Getenv("CELLN_SCOPED_CONFIG"); configPath != "" {
+		dispatcher, err := cellnscoped.LoadDispatcher(configPath, mgr.GetClient(), mgr.GetAPIReader())
+		if err != nil {
+			setupLog.Error(err, "invalid scoped Celln controller configuration")
+			os.Exit(1)
+		}
+		agentRunReconciler.ScopedDispatcher = dispatcher
+		setupLog.Info("Scoped Celln one-shot execution enabled")
 	}
 	if configPath := os.Getenv("CELLN_PARENT_REGISTRATIONS"); configPath != "" {
 		dispatcher, err := cellnparent.LoadRegistrationDispatcher(configPath, agentRunReconciler.ParentConfigPath, mgr.GetAPIReader())
