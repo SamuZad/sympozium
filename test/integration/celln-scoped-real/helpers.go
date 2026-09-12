@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -24,13 +25,14 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	api "github.com/sympozium-ai/sympozium/api/v1alpha1"
-	"github.com/sympozium-ai/sympozium/internal/cellncapability"
 	"github.com/sympozium-ai/sympozium/internal/cellnscoped"
 	"github.com/sympozium-ai/sympozium/internal/modelbudget"
 	"github.com/sympozium-ai/sympozium/internal/modelgateway"
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -75,7 +77,7 @@ func liveClient(o options) (client.Client, kubernetes.Interface, *runtime.Scheme
 	}
 	rest.Timeout = 10 * time.Second
 	scheme := runtime.NewScheme()
-	for _, add := range []func(*runtime.Scheme) error{api.AddToScheme, corev1.AddToScheme, batchv1.AddToScheme, appsv1.AddToScheme} {
+	for _, add := range []func(*runtime.Scheme) error{api.AddToScheme, corev1.AddToScheme, batchv1.AddToScheme, appsv1.AddToScheme, networkingv1.AddToScheme, rbacv1.AddToScheme} {
 		if err := add(scheme); err != nil {
 			return nil, nil, nil, err
 		}
@@ -92,23 +94,75 @@ func resourceNames(namespace string) (string, string) {
 	return "celln-live-" + namespace, "celln-live-policy-" + namespace
 }
 
-func requireAbsent(ctx context.Context, c client.Client, o options) error {
-	for _, name := range []string{o.namespace, o.preparationNamespace} {
+func requireAbsent(ctx context.Context, c client.Client, o options, pkg nativePackage) error {
+	for _, name := range []string{o.namespace, o.enduringNamespace, o.deniedNamespace, o.preparationNamespace} {
 		var ns corev1.Namespace
 		err := c.Get(ctx, types.NamespacedName{Name: name}, &ns)
-		if err == nil {
-			return fmt.Errorf("refusing existing namespace %q", name)
+		if o.reviewOwnership == "" {
+			if err == nil {
+				return fmt.Errorf("refusing existing namespace %q without --existing-review-ownership", name)
+			}
+			if !apierrors.IsNotFound(err) {
+				return fmt.Errorf("check namespace %q: %w", name, err)
+			}
+			continue
 		}
-		if !apierrors.IsNotFound(err) {
-			return fmt.Errorf("check namespace %q: %w", name, err)
+		if err != nil {
+			return fmt.Errorf("owned review namespace %q unavailable: %w", name, err)
+		}
+		if ns.Labels["sympozium.ai/celln-review"] != o.reviewOwnership {
+			return fmt.Errorf("namespace %q lacks exact review ownership", name)
+		}
+		tenant := ns.Labels["sympozium.ai/celln-review-tenant"] == "enabled"
+		if tenant != (name == o.namespace || name == o.enduringNamespace) {
+			return fmt.Errorf("namespace %q has unexpected tenant enablement", name)
+		}
+		if err := requireReviewNamespaceEmpty(ctx, c, name); err != nil {
+			return err
 		}
 	}
-	profileName, policyName := resourceNames(o.namespace)
-	for name, object := range map[string]client.Object{profileName: &api.CellnRuntimeProfile{}, policyName: &api.CellnExecutionPolicy{}} {
+	_, policyName := resourceNames(o.namespace)
+	for name, object := range map[string]client.Object{pkg.OneShot.Name: &api.CellnRuntimeProfile{}, pkg.Enduring.Name: &api.CellnRuntimeProfile{}, pkg.Uppercase.Name: &api.ClusterCellnTool{}, policyName: &api.CellnExecutionPolicy{}} {
 		if err := c.Get(ctx, types.NamespacedName{Name: name}, object); err == nil {
 			return fmt.Errorf("refusing existing cluster authority object %q", name)
 		} else if !apierrors.IsNotFound(err) {
 			return fmt.Errorf("check cluster authority %q: %w", name, err)
+		}
+	}
+	return nil
+}
+
+func requireReviewNamespaceEmpty(ctx context.Context, c client.Client, name string) error {
+	lists := []client.ObjectList{&corev1.PodList{}, &corev1.SecretList{}, &corev1.ServiceList{}, &corev1.PersistentVolumeClaimList{}, &batchv1.JobList{}, &batchv1.CronJobList{}, &appsv1.DeploymentList{}, &appsv1.StatefulSetList{}, &appsv1.DaemonSetList{}, &appsv1.ReplicaSetList{}, &networkingv1.NetworkPolicyList{}, &rbacv1.RoleList{}, &rbacv1.RoleBindingList{}, &api.AgentList{}, &api.AgentRunList{}, &api.AgentRunTurnList{}, &api.AgentRuntimeList{}, &api.ModelConnectionList{}}
+	for _, list := range lists {
+		if err := c.List(ctx, list, client.InNamespace(name)); err != nil {
+			return fmt.Errorf("verify empty review namespace %q: %w", name, err)
+		}
+		raw, _ := json.Marshal(list)
+		var envelope struct {
+			Items []json.RawMessage `json:"items"`
+		}
+		_ = json.Unmarshal(raw, &envelope)
+		if len(envelope.Items) != 0 {
+			return fmt.Errorf("review namespace %q contains unexpected %T resources", name, list)
+		}
+	}
+	var configMaps corev1.ConfigMapList
+	if err := c.List(ctx, &configMaps, client.InNamespace(name)); err != nil {
+		return err
+	}
+	for _, item := range configMaps.Items {
+		if item.Name != "kube-root-ca.crt" {
+			return fmt.Errorf("review namespace %q contains unexpected ConfigMap %q", name, item.Name)
+		}
+	}
+	var serviceAccounts corev1.ServiceAccountList
+	if err := c.List(ctx, &serviceAccounts, client.InNamespace(name)); err != nil {
+		return err
+	}
+	for _, item := range serviceAccounts.Items {
+		if item.Name != "default" {
+			return fmt.Errorf("review namespace %q contains unexpected ServiceAccount %q", name, item.Name)
 		}
 	}
 	return nil
@@ -214,8 +268,8 @@ type managedProcess struct {
 	done chan error
 }
 
-func startCelln(ctx context.Context, o options, address, jwks, gateway, gatewayCA string) (*managedProcess, error) {
-	args := []string{"--root", o.cellnRoot, "dispatcher", "--listen", address, "--token-file", o.cellnTokenFile, "--scoped-operator-token-file", o.scopedOperatorTokenFile, "--scoped-jwks-file", jwks, "--scoped-issuer", issuerName, "--scoped-gateway-origin", gateway, "--scoped-gateway-ca", gatewayCA}
+func startCelln(ctx context.Context, o options, address, jwks, gateway, gatewayCA, parentTemplate string) (*managedProcess, error) {
+	args := []string{"--root", o.cellnRoot, "dispatcher", "--listen", address, "--token-file", o.cellnTokenFile, "--scoped-operator-token-file", o.scopedOperatorTokenFile, "--scoped-jwks-file", jwks, "--scoped-issuer", issuerName, "--scoped-gateway-origin", gateway, "--scoped-gateway-ca", gatewayCA, "--scoped-parent-request-file", parentTemplate}
 	cmd := exec.CommandContext(ctx, o.cellnBinary, args...)
 	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -229,6 +283,26 @@ func startCelln(ctx context.Context, o options, address, jwks, gateway, gatewayC
 	process := &managedProcess{cmd: cmd, done: make(chan error, 1)}
 	go func() { process.done <- cmd.Wait() }()
 	return process, nil
+}
+
+func writeParentTemplate(path string, pkg nativePackage) error {
+	request := map[string]any{
+		"apiVersion": "celln.dev/v1alpha1", "id": "$parent",
+		"workload":     map[string]any{"id": "$parent", "caller": "$principal"},
+		"mote":         pkg.Parent.Artifact.Mote,
+		"tools":        []any{map[string]any{"alias": pkg.Parent.Artifact.EntryPoint, "hash": pkg.Parent.Artifact.Executable.Hash, "closure": pkg.Parent.Artifact.Closure}},
+		"invocation":   map[string]any{"alias": pkg.Parent.Artifact.EntryPoint, "args": []string{}},
+		"capabilities": map[string]any{"workspace": pkg.Parent.Limits.Workspace, "egress": pkg.Parent.Limits.Egress, "timeoutMs": 120000, "memoryBytes": pkg.Parent.Limits.MemoryBytes, "outputBytes": 65536},
+		"execution":    map[string]any{"lane": pkg.Parent.Artifact.Lane, "requireHardwareIsolation": true},
+	}
+	// The receiver requires retained parent/child substrate overhead beyond two
+	// parent-sized guests. This is capacity, not a new executable artifact.
+	reserved := uint64(pkg.Parent.Limits.MemoryBytes) * 4
+	raw, err := json.Marshal(map[string]any{"apiVersion": "celln.scoped-parent-template/v1", "request": request, "reservedMemoryBytes": reserved})
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, raw, 0600)
 }
 
 func stopProcess(process *managedProcess) {
@@ -283,7 +357,7 @@ func writeControllerConfig(path string, o options, keyFile, receiver, receiverCA
 }
 
 func (p *providerRecorder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	p.attempts.Add(1)
+	attempt := p.attempts.Add(1)
 	fail := func(message string, status int) {
 		p.mu.Lock()
 		if p.failure == "" {
@@ -296,7 +370,11 @@ func (p *providerRecorder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail("unexpected method or path", http.StatusBadRequest)
 		return
 	}
-	if r.Header.Get("Authorization") != "Bearer "+p.secret || r.Header.Get("X-Celln-Execution-Permit") != "" || r.Header.Get("X-Celln-Model-Permit") != "" {
+	wantSecret := p.enduringSecret
+	if attempt <= 2 {
+		wantSecret = p.oneShotSecret
+	}
+	if r.Header.Get("Authorization") != "Bearer "+wantSecret || r.Header.Get("X-Celln-Execution-Permit") != "" || r.Header.Get("X-Celln-Model-Permit") != "" {
 		fail("credential or scoped-header mismatch", http.StatusUnauthorized)
 		return
 	}
@@ -310,27 +388,51 @@ func (p *providerRecorder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Messages  []struct{ Role, Content string } `json:"messages"`
 		MaxTokens int64                            `json:"max_tokens"`
 		Stream    bool                             `json:"stream,omitempty"`
+		Tools     []json.RawMessage                `json:"tools"`
 	}
-	if err := cellncapability.StrictDecode(body, &request); err != nil || request.Model != p.input.Model.Name || request.Stream || request.MaxTokens != p.input.Expected.ReservedOutputTokens {
+	if err := json.Unmarshal(body, &request); err != nil || request.Model != modelName || request.Stream || request.MaxTokens != requestReservation || len(request.Tools) != 1 || !bytes.Contains(request.Tools[0], []byte(`"name":"uppercase"`)) {
 		fail("model request contract mismatch", http.StatusBadRequest)
 		return
 	}
-	foundTask := false
-	for _, message := range request.Messages {
-		if message.Role == "user" && strings.Contains(message.Content, p.input.Task) {
-			foundTask = true
-		}
+	if len(request.Messages) == 0 {
+		fail("empty model conversation", http.StatusBadRequest)
+		return
 	}
-	if !foundTask {
-		fail("task was not scoped into provider request", http.StatusBadRequest)
+	last := request.Messages[len(request.Messages)-1]
+	var message map[string]any
+	completionTokens := int64(1)
+	if last.Role == "tool" {
+		var result struct {
+			Text string `json:"text"`
+		}
+		if strictJSON([]byte(last.Content), &result) != nil || result.Text == "" || result.Text != strings.ToUpper(result.Text) {
+			fail("real uppercase tool result missing from follow-up", http.StatusBadRequest)
+			return
+		}
+		message = map[string]any{"role": "assistant", "content": result.Text}
+	} else if last.Role == "user" {
+		var text string
+		for _, candidate := range []string{"celln", "violet"} {
+			if strings.Contains(strings.ToLower(last.Content), candidate) {
+				text = candidate
+			}
+		}
+		if text == "" {
+			fail("bounded uppercase task missing", http.StatusBadRequest)
+			return
+		}
+		completionTokens = 2
+		message = map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{map[string]any{"id": "uppercase-call", "type": "function", "function": map[string]any{"name": "uppercase", "arguments": fmt.Sprintf(`{"text":%q}`, text)}}}}
+	} else {
+		fail("unexpected final conversation role", http.StatusBadRequest)
 		return
 	}
 	p.valid.Add(1)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"id": "bounded-scoped-provider", "object": "chat.completion",
-		"choices": []any{map[string]any{"index": 0, "message": map[string]any{"role": "assistant", "content": p.input.Expected.Output}, "finish_reason": "stop"}},
-		"usage":   map[string]any{"prompt_tokens": 1, "completion_tokens": p.input.Expected.ObservedOutputTokens, "total_tokens": 1 + p.input.Expected.ObservedOutputTokens},
+		"choices": []any{map[string]any{"index": 0, "message": message, "finish_reason": "stop"}},
+		"usage":   map[string]any{"prompt_tokens": 1, "completion_tokens": completionTokens, "total_tokens": 1 + completionTokens},
 	})
 }
 
