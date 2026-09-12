@@ -2,11 +2,13 @@ package cellnauthority
 
 import (
 	"context"
+	"strings"
+	"testing"
+	"time"
+
 	api "github.com/sympozium-ai/sympozium/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"testing"
-	"time"
 )
 
 type preparationUIDClient struct{ client.Client }
@@ -63,5 +65,36 @@ func TestPreparedMaterialRejectsSubstitution(t *testing.T) {
 	op.Resolution.Execution.Payload = "replacement"
 	if err := ValidatePreparedBindings(op); err == nil {
 		t.Fatal("changed payload accepted")
+	}
+}
+
+func TestFinalPreparationIsImmutableAndRetainsOriginalAuthority(t *testing.T) {
+	f := newPlatformFixture(t, "tenant-a", true)
+	store := PreparedStore{Writer: preparationUIDClient{f.client}, Reader: f.spy, Namespace: "control-plane", Resolver: f.resolver}
+	prepared, err := store.Prepare(context.Background(), f.runKey, PlatformResolveRequest{ClusterID: "cluster", Now: f.now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalDecision, err := prepared.Operation.Resolution.Decision.FinalizeCredentialSource("secret-uid-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	final, err := store.Finalize(context.Background(), prepared, finalDecision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := store.LoadFinal(context.Background(), final.Name, prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameFinalDecision(finalDecision, recovered.Decision) || recovered.Decision.Windows != prepared.Operation.Resolution.Decision.Windows || recovered.Decision.Budget != prepared.Operation.Resolution.Decision.Budget {
+		t.Fatal("final publication changed the original decision clock or budget")
+	}
+	conflict, err := prepared.Operation.Resolution.Decision.FinalizeCredentialSource("secret-uid-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Finalize(context.Background(), prepared, conflict); err == nil || !strings.Contains(err.Error(), "conflicting") {
+		t.Fatalf("conflicting gateway UID pin was not refused: %v", err)
 	}
 }

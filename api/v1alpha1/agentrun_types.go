@@ -387,6 +387,7 @@ const (
 // AgentRunStatus defines the observed state of AgentRun.
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.cellnIssuance) || has(self.cellnIssuance)",message="saved Celln issuance cannot be removed"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.cellnParent) || has(self.cellnParent)",message="saved Celln parent cannot be removed"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.cellnScoped) || has(self.cellnScoped)",message="saved scoped Celln identity cannot be removed"
 type AgentRunStatus struct {
 	// CellnOnly records a new run's execution boundary before any finalizer or
 	// workload side effects. The controller refuses subsequent backend changes.
@@ -522,10 +523,64 @@ type AgentRunStatus struct {
 	// CellnParent binds enduring intent before any parent creation side effect.
 	// +optional
 	CellnParent *CellnParentStatus `json:"cellnParent,omitempty"`
+	// CellnScoped binds a shared-catalogue one-shot run to immutable protected
+	// preparation, final decision, and receiver ownership. It is not used by
+	// legacy router or enduring execution.
+	// +optional
+	CellnScoped *CellnScopedStatus `json:"cellnScoped,omitempty"`
 	// CellnReceipt retains the validated versioned terminal receipt as JSON.
 	// +kubebuilder:validation:MaxLength=131072
 	// +optional
 	CellnReceipt string `json:"cellnReceipt,omitempty"`
+}
+
+// CellnScopedStatus is the durable controller-side recovery record for the
+// separately authenticated /v1/scoped protocol. Identity fields are write-once.
+// +kubebuilder:validation:XValidation:rule="self.preparationName == oldSelf.preparationName && self.preparationUid == oldSelf.preparationUid && self.decisionName == oldSelf.decisionName && self.decisionUid == oldSelf.decisionUid",message="protected scoped preparation identity is immutable"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.receiverId) || (has(self.receiverId) && self.receiverId == oldSelf.receiverId && self.owner == oldSelf.owner)",message="scoped receiver owner identity is immutable"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.gatewayRegistrationAttempted) || !oldSelf.gatewayRegistrationAttempted || (has(self.gatewayRegistrationAttempted) && self.gatewayRegistrationAttempted)",message="gateway registration attempt cannot be forgotten"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.gatewayRegistered) || !oldSelf.gatewayRegistered || (has(self.gatewayRegistered) && self.gatewayRegistered)",message="gateway registration cannot regress"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.startAttempted) || !oldSelf.startAttempted || (has(self.startAttempted) && self.startAttempted)",message="scoped start attempt cannot be forgotten"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.cleanupConfirmed) || !oldSelf.cleanupConfirmed || (has(self.cleanupConfirmed) && self.cleanupConfirmed)",message="scoped cleanup confirmation cannot regress"
+type CellnScopedStatus struct {
+	// +kubebuilder:validation:MaxLength=75
+	PreparationName string `json:"preparationName"`
+	// +kubebuilder:validation:MaxLength=128
+	PreparationUID string `json:"preparationUid"`
+	// +kubebuilder:validation:MaxLength=76
+	DecisionName string `json:"decisionName"`
+	// +kubebuilder:validation:MaxLength=128
+	DecisionUID string `json:"decisionUid"`
+	// ReceiverID and Owner are returned by the enrolled native receiver and
+	// jointly identify the only execution this run may observe or clean up.
+	// +optional
+	// +kubebuilder:validation:MaxLength=256
+	ReceiverID string `json:"receiverId,omitempty"`
+	// +optional
+	// +kubebuilder:validation:MaxLength=256
+	Owner string `json:"owner,omitempty"`
+	// GatewayRegistrationAttempted is persisted before registration so an
+	// ambiguous transport failure remains visible and cleanup still fences the
+	// original budget. It does not by itself prove registration succeeded.
+	// +optional
+	GatewayRegistrationAttempted bool `json:"gatewayRegistrationAttempted,omitempty"`
+	// GatewayRegistered is set only after the exact final decision is accepted.
+	// +optional
+	GatewayRegistered bool `json:"gatewayRegistered,omitempty"`
+	// StartAttempted is persisted before the non-idempotent start request. Once
+	// true, recovery reads the pinned owner before considering the exact start.
+	// +optional
+	StartAttempted bool `json:"startAttempted,omitempty"`
+	// +optional
+	// +kubebuilder:validation:MaxLength=32
+	NativePhase string `json:"nativePhase,omitempty"`
+	// +optional
+	// +kubebuilder:validation:MaxLength=256
+	ReceiptDigest string `json:"receiptDigest,omitempty"`
+	// CleanupConfirmed means native teardown and, when applicable, gateway close
+	// both completed. It is the only condition allowing finalizer removal.
+	// +optional
+	CleanupConfirmed bool `json:"cleanupConfirmed,omitempty"`
 }
 
 // DelegateStatus tracks an in-flight delegation to another persona or ad-hoc sub-agent.
