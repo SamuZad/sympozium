@@ -83,6 +83,125 @@ spec:
                   CancelAttempted is persisted before sending cancellation. An uncertain send
                   is reconciled from original turn evidence, never automatically repeated.
                 type: boolean
+              cellnScoped:
+                description: |-
+                  CellnScoped is the protected per-turn preparation, decision and owner.
+                  It is independent of the root operation while retaining root authority.
+                properties:
+                  cellId:
+                    maxLength: 256
+                    type: string
+                  childId:
+                    maxLength: 256
+                    type: string
+                  cleanupConfirmed:
+                    description: |-
+                      CleanupConfirmed means native teardown and, when applicable, gateway close
+                      both completed. It is the only condition allowing finalizer removal.
+                    type: boolean
+                  decisionName:
+                    maxLength: 76
+                    type: string
+                  decisionUid:
+                    maxLength: 128
+                    type: string
+                  executionProvenance:
+                    maxLength: 65536
+                    type: string
+                  gatewayRegistered:
+                    description: GatewayRegistered is set only after the exact final
+                      decision is accepted.
+                    type: boolean
+                  gatewayRegistrationAttempted:
+                    description: |-
+                      GatewayRegistrationAttempted is persisted before registration so an
+                      ambiguous transport failure remains visible and cleanup still fences the
+                      original budget. It does not by itself prove registration succeeded.
+                    type: boolean
+                  nativePhase:
+                    maxLength: 32
+                    type: string
+                  output:
+                    description: Output is correlated receiver output for the initial
+                      or continuation turn.
+                    maxLength: 4194304
+                    type: string
+                  owner:
+                    maxLength: 256
+                    type: string
+                  parentId:
+                    description: |-
+                      Native IDs and provenance are copied from receiver evidence. They are
+                      observational and cannot select future execution authority.
+                    maxLength: 256
+                    type: string
+                  parentIncarnation:
+                    description: |-
+                      ParentIncarnation is present only for enduring initial/turn operations and
+                      must match the immutable prepared decision and receiver evidence.
+                    maxLength: 71
+                    pattern: ^blake3:[0-9a-f]{64}$
+                    type: string
+                    x-kubernetes-validations:
+                    - message: scoped parent incarnation is immutable
+                      rule: self == oldSelf
+                  preparationName:
+                    maxLength: 75
+                    type: string
+                  preparationUid:
+                    maxLength: 128
+                    type: string
+                  receiptDigest:
+                    maxLength: 256
+                    type: string
+                  receiverId:
+                    description: |-
+                      ReceiverID and Owner are returned by the enrolled native receiver and
+                      jointly identify the only execution this run may observe or clean up.
+                    maxLength: 256
+                    type: string
+                  startAttempted:
+                    description: |-
+                      StartAttempted is persisted before the non-idempotent start request. Once
+                      true, recovery reads the pinned owner before considering the exact start.
+                    type: boolean
+                  substrateProvenance:
+                    maxLength: 65536
+                    type: string
+                  turnId:
+                    description: TurnID is the actual AgentRunTurn UID for continuation
+                      work.
+                    maxLength: 128
+                    type: string
+                    x-kubernetes-validations:
+                    - message: scoped turn identity is immutable
+                      rule: self == oldSelf
+                required:
+                - decisionName
+                - decisionUid
+                - preparationName
+                - preparationUid
+                type: object
+                x-kubernetes-validations:
+                - message: protected scoped preparation identity is immutable
+                  rule: self.preparationName == oldSelf.preparationName && self.preparationUid
+                    == oldSelf.preparationUid && self.decisionName == oldSelf.decisionName
+                    && self.decisionUid == oldSelf.decisionUid
+                - message: scoped receiver owner identity is immutable
+                  rule: '!has(oldSelf.receiverId) || (has(self.receiverId) && self.receiverId
+                    == oldSelf.receiverId && self.owner == oldSelf.owner)'
+                - message: gateway registration attempt cannot be forgotten
+                  rule: '!has(oldSelf.gatewayRegistrationAttempted) || !oldSelf.gatewayRegistrationAttempted
+                    || (has(self.gatewayRegistrationAttempted) && self.gatewayRegistrationAttempted)'
+                - message: gateway registration cannot regress
+                  rule: '!has(oldSelf.gatewayRegistered) || !oldSelf.gatewayRegistered
+                    || (has(self.gatewayRegistered) && self.gatewayRegistered)'
+                - message: scoped start attempt cannot be forgotten
+                  rule: '!has(oldSelf.startAttempted) || !oldSelf.startAttempted ||
+                    (has(self.startAttempted) && self.startAttempted)'
+                - message: scoped cleanup confirmation cannot regress
+                  rule: '!has(oldSelf.cleanupConfirmed) || !oldSelf.cleanupConfirmed
+                    || (has(self.cleanupConfirmed) && self.cleanupConfirmed)'
               conditions:
                 description: |-
                   Conditions describe reconciliation observations, not execution authority.
@@ -145,100 +264,6 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
-              cellnScoped:
-                description: |-
-                  CellnScoped is the protected per-turn preparation, decision and owner.
-                  It is independent of the root operation while retaining root authority.
-                properties:
-                  cellId:
-                    maxLength: 256
-                    type: string
-                  childId:
-                    maxLength: 256
-                    type: string
-                  cleanupConfirmed:
-                    type: boolean
-                  decisionName:
-                    maxLength: 76
-                    type: string
-                  decisionUid:
-                    maxLength: 128
-                    type: string
-                  executionProvenance:
-                    maxLength: 65536
-                    type: string
-                  gatewayRegistered:
-                    type: boolean
-                  gatewayRegistrationAttempted:
-                    type: boolean
-                  nativePhase:
-                    maxLength: 32
-                    type: string
-                  output:
-                    maxLength: 4194304
-                    type: string
-                  owner:
-                    maxLength: 256
-                    type: string
-                  parentId:
-                    maxLength: 256
-                    type: string
-                  parentIncarnation:
-                    maxLength: 71
-                    pattern: ^blake3:[0-9a-f]{64}$
-                    type: string
-                    x-kubernetes-validations:
-                    - message: scoped parent incarnation is immutable
-                      rule: self == oldSelf
-                  preparationName:
-                    maxLength: 75
-                    type: string
-                  preparationUid:
-                    maxLength: 128
-                    type: string
-                  receiptDigest:
-                    maxLength: 256
-                    type: string
-                  receiverId:
-                    maxLength: 256
-                    type: string
-                  startAttempted:
-                    type: boolean
-                  substrateProvenance:
-                    maxLength: 65536
-                    type: string
-                  turnId:
-                    maxLength: 128
-                    type: string
-                    x-kubernetes-validations:
-                    - message: scoped turn identity is immutable
-                      rule: self == oldSelf
-                required:
-                - decisionName
-                - decisionUid
-                - preparationName
-                - preparationUid
-                type: object
-                x-kubernetes-validations:
-                - message: protected scoped preparation identity is immutable
-                  rule: self.preparationName == oldSelf.preparationName && self.preparationUid
-                    == oldSelf.preparationUid && self.decisionName == oldSelf.decisionName
-                    && self.decisionUid == oldSelf.decisionUid
-                - message: scoped receiver owner identity is immutable
-                  rule: '!has(oldSelf.receiverId) || (has(self.receiverId) && self.receiverId
-                    == oldSelf.receiverId && self.owner == oldSelf.owner)'
-                - message: gateway registration attempt cannot be forgotten
-                  rule: '!has(oldSelf.gatewayRegistrationAttempted) || !oldSelf.gatewayRegistrationAttempted
-                    || (has(self.gatewayRegistrationAttempted) && self.gatewayRegistrationAttempted)'
-                - message: gateway registration cannot regress
-                  rule: '!has(oldSelf.gatewayRegistered) || !oldSelf.gatewayRegistered
-                    || (has(self.gatewayRegistered) && self.gatewayRegistered)'
-                - message: scoped start attempt cannot be forgotten
-                  rule: '!has(oldSelf.startAttempted) || !oldSelf.startAttempted
-                    || (has(self.startAttempted) && self.startAttempted)'
-                - message: scoped cleanup confirmation cannot regress
-                  rule: '!has(oldSelf.cleanupConfirmed) || !oldSelf.cleanupConfirmed
-                    || (has(self.cleanupConfirmed) && self.cleanupConfirmed)'
               execution:
                 properties:
                   attempted:

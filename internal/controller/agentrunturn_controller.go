@@ -65,6 +65,21 @@ func (r *AgentRunTurnReconciler) Reconcile(ctx context.Context, request ctrl.Req
 		}
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
+	if turn.Status.CellnScoped != nil && turn.Status.CellnScoped.CleanupConfirmed {
+		return r.removeTurnFinalizer(ctx, &turn)
+	}
+	if condition := meta.FindStatusCondition(turn.Status.Conditions, "CellnTurnComplete"); condition != nil && condition.Status == metav1.ConditionTrue && condition.Reason == "CancelledBeforeAdmission" {
+		return r.removeTurnFinalizer(ctx, &turn)
+	}
+	if turn.Spec.CancelRequested && turn.Status.CellnScoped == nil {
+		if err := r.updateTurnStatus(ctx, &turn, func(current *api.AgentRunTurn) error {
+			meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{Type: "CellnTurnComplete", Status: metav1.ConditionTrue, Reason: "CancelledBeforeAdmission", Message: "Turn cancelled before native dispatch; no native operation was started.", ObservedGeneration: current.Generation})
+			return nil
+		}); err != nil {
+			return ctrl.Result{}, err
+		}
+		return r.removeTurnFinalizer(ctx, &turn)
+	}
 	if turn.DeletionTimestamp.IsZero() && !controllerutil.ContainsFinalizer(&turn, agentRunTurnFinalizer) {
 		patch := client.MergeFrom(turn.DeepCopy())
 		controllerutil.AddFinalizer(&turn, agentRunTurnFinalizer)
@@ -78,7 +93,7 @@ func (r *AgentRunTurnReconciler) Reconcile(ctx context.Context, request ctrl.Req
 	if r.ScopedDispatcher == nil {
 		return r.turnUncertain(ctx, &turn, "ReconciliationRequired", errors.New("scoped turn dispatcher is not configured"))
 	}
-	if !turn.DeletionTimestamp.IsZero() {
+	if !turn.DeletionTimestamp.IsZero() || turn.Spec.CancelRequested {
 		return r.cleanupTurn(ctx, &turn)
 	}
 
@@ -118,6 +133,11 @@ func (r *AgentRunTurnReconciler) Reconcile(ctx context.Context, request ctrl.Req
 		return r.turnUncertain(ctx, &turn, "TurnAuthorityUnavailable", err)
 	}
 	s := turn.Status.CellnScoped
+	if !s.StartAttempted {
+		if err := r.ScopedDispatcher.RevalidateAdmission(ctx, prepared); err != nil {
+			return r.turnUncertain(ctx, &turn, "AuthorityChangedBeforeAdmission", err)
+		}
+	}
 	if s.ReceiverID == "" {
 		enrolled, err := r.ScopedDispatcher.Enroll(ctx, prepared, final)
 		if err != nil {
