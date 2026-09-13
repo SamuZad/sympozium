@@ -54,8 +54,9 @@ spec:
           image: @@IMAGE@@
           imagePullPolicy: IfNotPresent
           securityContext: {privileged: true, allowPrivilegeEscalation: true}
+          resources: {requests: {cpu: 250m, memory: 1Gi}, limits: {memory: 3Gi}}
           command: ["/usr/local/bin/celln"]
-          args: ["--root", "/state", "dispatcher", "--mote-store", "/state/motes", "--tool-store", "/state/tools", "--max-cells", "6", "--memory-bytes", "1073741824", "--egress-slots", "4", "--listen", "127.0.0.1:8091", "--token-file", "/operator/native-token", "--scoped-operator-token-file", "/operator/scoped-token", "--scoped-jwks-file", "/public/issuer-jwks.json", "--scoped-issuer", "sympozium-control-plane", "--scoped-gateway-origin", "https://celln-model-gateway-@@REVIEW@@.celln-review-system-@@REVIEW@@.svc:8443", "--scoped-gateway-ca", "/public/gateway-ca.pem", "--scoped-parent-request-file", "/public/parent-template.json"]
+          args: ["--root", "/state", "dispatcher", "--mote-store", "/state/motes", "--tool-store", "/state/tools", "--max-cells", "6", "--memory-bytes", "2147483648", "--egress-slots", "4", "--listen", "127.0.0.1:8091", "--token-file", "/operator/native-token", "--scoped-operator-token-file", "/operator/scoped-token", "--scoped-jwks-file", "/public/issuer-jwks.json", "--scoped-issuer", "sympozium-control-plane", "--scoped-gateway-origin", "https://celln-model-gateway-@@REVIEW@@.celln-review-system-@@REVIEW@@.svc:8443", "--scoped-gateway-ca", "/public/gateway-ca.pem", "--scoped-parent-request-file", "/public/parent-template.json"]
           volumeMounts: [{name: state, mountPath: /state}, {name: kvm, mountPath: /dev/kvm}, {name: guest-kernel, mountPath: /boot/vmlinuz-@@KERNEL_RELEASE@@, readOnly: true}, {name: guest-modules, mountPath: /lib/modules/@@KERNEL_RELEASE@@, readOnly: true}, {name: native-secret, mountPath: /operator, readOnly: true}, {name: public, mountPath: /public, readOnly: true}]
         - name: tls-frontend
           image: @@IMAGE@@

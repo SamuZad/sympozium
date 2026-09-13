@@ -59,6 +59,11 @@ func clientForEndpoint(endpoint string, allowPrivate bool, maxDuration time.Dura
 	if u.Scheme != "https" && !allowPrivate {
 		return nil, fail(ReasonDestination, 403, nil)
 	}
+	// Private fixture trust anchors must not become trust anchors for ordinary
+	// public providers. Those always use the system/public CA set.
+	if !allowPrivate {
+		roots = nil
+	}
 	base := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: -1}
 	dialer := restrictedDialer{resolver: netResolver{}, allowPrivate: allowPrivate, loopbackOnly: u.Scheme == "http", dial: base.DialContext}
 	transport := &http.Transport{
