@@ -21,7 +21,7 @@ function turnOutcomeCommitted(turn: AgentRunTurn) {
   return Boolean(scoped?.nativePhase && terminalNativePhases.has(scoped.nativePhase) && condition?.status === "True" && condition.reason === "Committed");
 }
 
-export function CellnConversation({ run, observationUnavailable = false }: { run: AgentRun; observationUnavailable?: boolean }) {
+export function CellnConversation({ run, observationUnavailable = false, retainEvidence = false, compactEvidence = false }: { run: AgentRun; observationUnavailable?: boolean; retainEvidence?: boolean; compactEvidence?: boolean }) {
   const uid = run.metadata.uid || "";
   const namespace = run.metadata.namespace || "default";
   const storageKey = `celln-turn:${namespace}:${uid}`;
@@ -182,7 +182,7 @@ export function CellnConversation({ run, observationUnavailable = false }: { run
       <p className="text-sm text-muted-foreground">This is an enduring parent, not a one-shot cell. The parent retains live context and each follow-up runs in a disposable child cell. A recorded answer does not mean the parent is still available.</p>
       <p role="status">{ready ? "Parent initialized" : admissionPending ? "Waiting for parent admission — sending disabled" : "Parent unavailable or starting — sending disabled"}</p>
       {observationUnavailable && <p role="alert">Run status could not be refreshed. Recorded history is shown, but sending is disabled until the current run can be checked.</p>}
-      {deleting && <p role="status" data-testid="celln-delete-pending">Deletion requested. Sending is disabled while the controller reconciles teardown. Acceptance of deletion is not confirmation that the parent has stopped.</p>}
+      {deleting && <p role="status" data-testid="celln-delete-pending">{scopedParent?.cleanupConfirmed ? "The original scoped owner confirmed cleanup. Sending remains disabled." : "Deletion requested. Sending is disabled while the controller reconciles teardown. Acceptance of deletion is not confirmation that the parent has stopped."}</p>}
       {lifecycleDetail && <p role="status" data-testid="celln-parent-lifecycle-detail">{lifecycleDetail}</p>}
       <p className="text-sm text-muted-foreground" data-testid="celln-parent-turn-limit">Requested ceiling: {requestedTurns} total turns, including the initial turn. The host may enforce stricter limits; this is not a guarantee of remaining capacity.</p>
       {admissionPending && <p className="text-sm" data-testid="celln-parent-admission">{parentCondition.message}</p>}
@@ -192,7 +192,7 @@ export function CellnConversation({ run, observationUnavailable = false }: { run
           <p className="whitespace-pre-wrap">You: {taskText(run.spec.task)}</p>
           <p className="whitespace-pre-wrap">{scopedParent.output ? `Agent: ${scopedParent.output}` : scopedParent.startAttempted ? "Initial turn submitted — awaiting correlated output and receipt" : "Initial turn preparing"}</p>
         </div>
-        <CellnScopedExecution status={scopedParent} condition={parentCondition} mode="enduring" label="Parent native execution" />
+        <CellnScopedExecution status={scopedParent} condition={parentCondition} mode="enduring" label="Parent native execution" compact={compactEvidence} />
       </>}
       {turns.map((turn) => {
         const turnScoped = turn.status?.cellnScoped;
@@ -215,7 +215,7 @@ export function CellnConversation({ run, observationUnavailable = false }: { run
         {!turnComplete && cancellationPending(turn) && <p role="status" data-testid="celln-turn-cancel-pending">Cancellation requested for this turn only. Waiting for the original parent's committed result; child teardown is not confirmed.</p>}
         {!turnComplete && attempted && <Button variant="outline" data-testid="celln-turn-cancel" disabled={!canCancel(turn)} onClick={() => cancelTurn(turn)}>Cancel turn</Button>}
         {turnCondition?.status !== "True" && turnCondition?.reason === "ReconciliationRequired" && <p role="status" data-testid="celln-turn-reconciliation">Turn admission or outcome is unconfirmed. The original request is retained; do not resubmit it. Ask the operator to reconcile this turn.</p>}
-        {turnScoped && <CellnScopedExecution status={turnScoped} condition={turnCondition} mode="turn" label="Turn native execution" />}
+        {turnScoped && <CellnScopedExecution status={turnScoped} condition={turnCondition} mode="turn" label="Turn native execution" compact={compactEvidence} />}
       </div>})}
       {history.isError && <p role="alert">Turn history unavailable. Sending is disabled until history can be checked.</p>}
       {history.hasNextPage && <><p className="text-sm text-muted-foreground">Load the complete turn history before sending so this page can verify no prior turn is unresolved. This does not claim host budget usage.</p><Button variant="outline" disabled={history.isFetchingNextPage} onClick={() => history.fetchNextPage()}>Load more turns</Button></>}
@@ -228,8 +228,8 @@ export function CellnConversation({ run, observationUnavailable = false }: { run
       <p className="text-sm text-muted-foreground">Retained conversation context is also bounded by the selected harness. A message below this input limit may still exceed its remaining context capacity.</p>
       <Button data-testid="celln-turn-send" disabled={!canSend} onClick={send}>Send turn</Button>
       <div className="border-t pt-4">
-        <p className="text-sm text-muted-foreground">Deletion stops this parent and removes the Kubernetes run/turn history after cleanup. It is not pause/resume; privately retained host audit may remain.</p>
-        <Button variant="destructive" data-testid="celln-delete-run" disabled={!uid || deleting || sending} onClick={deleteRun}>Delete run and stop parent</Button>
+        <p className="text-sm text-muted-foreground">{retainEvidence ? "Stopping retains this review record for inspection. Remove it separately only after confirmed cleanup. It cannot resume." : "Deletion stops this parent and removes the Kubernetes run/turn history after cleanup. It is not pause/resume; privately retained host audit may remain."}</p>
+        <Button variant="destructive" data-testid="celln-delete-run" disabled={!uid || deleting || sending} onClick={deleteRun}>{retainEvidence ? "Stop parent and retain evidence" : "Delete run and stop parent"}</Button>
       </div>
     </CardContent>
   </Card>;

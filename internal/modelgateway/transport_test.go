@@ -11,6 +11,17 @@ import (
 	"time"
 )
 
+func TestPublicProviderDoesNotTrustFixtureCA(t *testing.T) {
+	c, err := clientForEndpoint("https://api.example.com/chat/completions", false, time.Second, x509.NewCertPool())
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := c.Transport.(*http.Transport)
+	if transport.TLSClientConfig.RootCAs != nil || transport.TLSClientConfig.InsecureSkipVerify || transport.Proxy != nil {
+		t.Fatal("public provider trust or transport was widened")
+	}
+}
+
 type fixedResolver []net.IP
 
 func (f fixedResolver) LookupIP(context.Context, string, string) ([]net.IP, error) { return f, nil }
