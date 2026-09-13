@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"time"
 
 	api "github.com/sympozium-ai/sympozium/api/v1alpha1"
 	"k8s.io/apimachinery/pkg/types"
@@ -34,7 +35,7 @@ func ReconcileTurn(ctx context.Context, writer client.Client, reader client.Read
 	}
 	defer transport.Close()
 	if !attempted {
-		if err := ClaimTurnSlot(ctx, writer, reader, key, config); err != nil {
+		if err := ClaimTurnSlot(ctx, writer, reader, key, config, time.Now().UTC()); err != nil {
 			return false, err
 		}
 		// Claim may have raced another reconcile of this turn. Reread both records

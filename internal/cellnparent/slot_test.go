@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	api "github.com/sympozium-ai/sympozium/api/v1alpha1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -58,7 +59,7 @@ func TestTurnSlotSerializesClaimantsRetainsUncertaintyAndConsumesBudget(t *testi
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			err := ClaimTurnSlot(ctx, store, store, client.ObjectKeyFromObject(turns[i]), path)
+			err := ClaimTurnSlot(ctx, store, store, client.ObjectKeyFromObject(turns[i]), path, time.Now().UTC())
 			if err == nil {
 				winners <- i
 			} else if !errors.Is(err, ErrTurnBusy) && !apierrors.IsConflict(err) {
@@ -78,7 +79,7 @@ func TestTurnSlotSerializesClaimantsRetainsUncertaintyAndConsumesBudget(t *testi
 		t.Fatalf("slot winners=%d", count)
 	}
 	key := client.ObjectKeyFromObject(turns[winner])
-	if err := ClaimTurnSlot(ctx, store, store, key, path); err != nil {
+	if err := ClaimTurnSlot(ctx, store, store, key, path, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	var saved api.AgentRun
@@ -115,7 +116,7 @@ func TestTurnSlotSerializesClaimantsRetainsUncertaintyAndConsumesBudget(t *testi
 	}
 	loser := 1 - winner
 	loserKey := client.ObjectKeyFromObject(turns[loser])
-	if err := ClaimTurnSlot(ctx, store, store, loserKey, path); err != nil {
+	if err := ClaimTurnSlot(ctx, store, store, loserKey, path, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	if !errors.Is(ReleaseTurnSlot(ctx, store, store, key), ErrTurnBusy) {
@@ -125,7 +126,7 @@ func TestTurnSlotSerializesClaimantsRetainsUncertaintyAndConsumesBudget(t *testi
 	if err := ReleaseTurnSlot(ctx, store, store, loserKey); err != nil {
 		t.Fatal(err)
 	}
-	if ClaimTurnSlot(ctx, store, store, client.ObjectKeyFromObject(turns[2]), path) == nil {
+	if ClaimTurnSlot(ctx, store, store, client.ObjectKeyFromObject(turns[2]), path, time.Now().UTC()) == nil {
 		t.Fatal("turn budget exceeded")
 	}
 	if err := store.Get(ctx, client.ObjectKeyFromObject(run), &saved); err != nil {

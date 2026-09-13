@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	api "github.com/sympozium-ai/sympozium/api/v1alpha1"
 	"k8s.io/apimachinery/pkg/types"
@@ -11,6 +12,11 @@ import (
 )
 
 var ErrTurnBusy = errors.New("parent already owns a different turn; wait for its reconciliation")
+
+// ErrParentLeaseExpired marks refusals of new turn claims after the original
+// execution lease elapsed. It never fires for the already-owning turn's
+// idempotent re-claim. Callers use errors.Is to surface an actionable reason.
+var ErrParentLeaseExpired = errors.New("parent lease expired")
 
 func readTurnPair(ctx context.Context, reader client.Reader, key types.NamespacedName) (*api.AgentRun, *api.AgentRunTurn, error) {
 	var turn api.AgentRunTurn
@@ -27,10 +33,24 @@ func readTurnPair(ctx context.Context, reader client.Reader, key types.Namespace
 	return &run, &turn, nil
 }
 
+// ParentLeaseExpired reports whether the original execution lease recorded at
+// parent admission has elapsed. A missing admission stamp predates lease
+// enforcement and is not treated as expiry. The deadline is inclusive: the
+// lease covers [admittedAt, admittedAt+leaseSeconds), so work starting exactly
+// at the deadline is already outside the original authority.
+func ParentLeaseExpired(parent *api.CellnParentStatus, leaseSeconds int64, now time.Time) bool {
+	if parent == nil || parent.AdmittedAt == nil || parent.AdmittedAt.IsZero() || leaseSeconds <= 0 {
+		return false
+	}
+	return !now.Before(parent.AdmittedAt.Add(time.Duration(leaseSeconds) * time.Second))
+}
+
 // ClaimTurnSlot serializes subsequent turns with one parent status CAS. It
 // admits no HTTP request. The initial turn must already have committed; budgets
 // are spent once when the slot is assigned, never refunded after uncertainty.
-func ClaimTurnSlot(ctx context.Context, writer client.Client, reader client.Reader, key types.NamespacedName, config string) error {
+// An expired original lease refuses new claims, but the already-owning turn
+// keeps its idempotent re-claim so in-flight reconciliation can finish.
+func ClaimTurnSlot(ctx context.Context, writer client.Client, reader client.Reader, key types.NamespacedName, config string, now time.Time) error {
 	run, turn, err := readTurnPair(ctx, reader, key)
 	if err != nil {
 		return err
@@ -52,6 +72,9 @@ func ClaimTurnSlot(ctx context.Context, writer client.Client, reader client.Read
 			return nil
 		}
 		return ErrTurnBusy
+	}
+	if ParentLeaseExpired(parent, int64(run.Spec.Enduring.LeaseSeconds), now) {
+		return fmt.Errorf("%w; original admission does not authorize new turns", ErrParentLeaseExpired)
 	}
 	if parent.AcceptedTurns < 0 || parent.AcceptedTurns >= run.Spec.Enduring.MaxTurns-1 {
 		return fmt.Errorf("parent turn budget exhausted")

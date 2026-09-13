@@ -162,3 +162,13 @@ jobs:
           kubectl logs -n sympozium-system deploy/sympozium-controller-manager --tail=400
           echo "== Apiserver logs =="
           kubectl logs -n sympozium-system deploy/sympozium-apiserver --tail=400
+
+      - name: Upload sanitized persistence evidence
+        # Retains the per-assertion evidence files written by
+        # test-persistent-harness-session.sh on recall failures (issue #471).
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: persistent-harness-evidence
+          path: /tmp/sympozium-persistent-harness-evidence-*
+          if-no-files-found: warn

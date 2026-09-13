@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/sympozium-ai/sympozium/internal/celln"
 	"unicode"
 
 	api "github.com/sympozium-ai/sympozium/api/v1alpha1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -109,6 +111,9 @@ func ClaimCreate(ctx context.Context, writer client.Client, reader client.Reader
 		return false, nil
 	}
 	run.Status.CellnParent.CreateAttempted = true
+	// The original execution lease starts at the first attempt. Repeat claims
+	// return early above, so this stamp is written once and never extended.
+	run.Status.CellnParent.AdmittedAt = &metav1.Time{Time: time.Now().UTC()}
 	if err := writer.Status().Update(ctx, &run); err != nil {
 		return false, err
 	}
