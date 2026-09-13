@@ -9,11 +9,13 @@ export function CellnScopedExecution({
   condition,
   mode,
   label = "Native execution",
+  compact = false,
 }: {
   status: CellnScopedStatus;
   condition?: Condition;
   mode: "one-shot" | "enduring" | "turn";
   label?: string;
+  compact?: boolean;
 }) {
   const cleanup = status.cleanupConfirmed
     ? "Confirmed by the scoped cleanup record"
@@ -24,7 +26,7 @@ export function CellnScopedExecution({
     ? `${condition.status} · ${condition.reason || "No reason reported"}${condition.message ? ` — ${condition.message}` : ""}`
     : "No current controller confirmation recorded";
 
-  return <div className="space-y-3 rounded border p-3 text-sm" data-testid="celln-scoped-execution">
+  const evidence = <div className="space-y-3 rounded border p-3 text-sm" data-testid="celln-scoped-execution">
     <div className="flex flex-wrap items-center justify-between gap-2">
       <p className="font-medium">{label}</p>
       <span className="rounded bg-muted px-2 py-1 text-xs font-medium" data-testid="celln-scoped-mode">
@@ -49,4 +51,5 @@ export function CellnScopedExecution({
       {(status.executionProvenance || status.substrateProvenance) && <p className="text-xs text-muted-foreground">Native execution provenance is recorded. Raw provenance is not rendered because it may contain operational details.</p>}
     </div>
   </div>;
+  return compact ? <details className="rounded border p-3"><summary className="cursor-pointer text-sm">{label}: {status.nativePhase || "Pending"} · {status.cleanupConfirmed ? "Cleanup confirmed" : "Cleanup not confirmed"} — inspect provenance</summary><div className="mt-3">{evidence}</div></details> : evidence;
 }
