@@ -3,6 +3,8 @@ package controller
 import (
 	"context"
 	"errors"
+
+	"github.com/sympozium-ai/sympozium/internal/modelbudget"
 	"reflect"
 	"slices"
 	"time"
@@ -12,6 +14,7 @@ import (
 	"github.com/sympozium-ai/sympozium/internal/cellnparent"
 	"github.com/sympozium-ai/sympozium/internal/cellnscoped"
 	"k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/retry"
@@ -93,10 +96,29 @@ func (r *AgentRunTurnReconciler) Reconcile(ctx context.Context, request ctrl.Req
 	if r.ScopedDispatcher == nil {
 		return r.turnUncertain(ctx, &turn, "ReconciliationRequired", errors.New("scoped turn dispatcher is not configured"))
 	}
+	if condition := meta.FindStatusCondition(turn.Status.Conditions, "CellnTurnComplete"); condition != nil && condition.Status == metav1.ConditionTrue && condition.Reason == "BudgetExhausted" {
+		return r.cleanupTurn(ctx, &turn)
+	}
 	if !turn.DeletionTimestamp.IsZero() || turn.Spec.CancelRequested {
 		return r.cleanupTurn(ctx, &turn)
 	}
 
+	if turn.Status.CellnScoped == nil && turn.Status.Execution == nil {
+		var original api.AgentRun
+		err := reader.Get(ctx, client.ObjectKey{Namespace: turn.Namespace, Name: turn.Spec.RunName}, &original)
+		if apierrors.IsNotFound(err) || (err == nil && (string(original.UID) != turn.Spec.RunUID || !original.DeletionTimestamp.IsZero() || (original.Status.CellnScoped != nil && original.Status.CellnScoped.CleanupConfirmed))) {
+			if err := r.updateTurnStatus(ctx, &turn, func(current *api.AgentRunTurn) error {
+				meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{Type: "CellnTurnComplete", Status: metav1.ConditionTrue, Reason: "CancelledBeforeAdmission", Message: "Original parent is closed or unavailable; this turn never acquired native dispatch authority.", ObservedGeneration: current.Generation})
+				return nil
+			}); err != nil {
+				return ctrl.Result{}, err
+			}
+			return r.removeTurnFinalizer(ctx, &turn)
+		}
+		if err != nil {
+			return r.turnUncertain(ctx, &turn, "OriginalParentUnavailable", err)
+		}
+	}
 	parent, err := r.scopedTurnParent(ctx, reader, &turn)
 	if err != nil {
 		return r.turnUncertain(ctx, &turn, "OriginalParentUnavailable", err)
@@ -179,6 +201,16 @@ func (r *AgentRunTurnReconciler) Reconcile(ctx context.Context, request ctrl.Req
 			}
 		}
 		if err := r.ScopedDispatcher.RegisterGateway(ctx, final, decision, execution); err != nil {
+			var refusal *cellnscoped.HTTPError
+			if errors.As(err, &refusal) && refusal.Status == 429 && refusal.Reason == modelbudget.ReasonExhausted {
+				if err := r.updateTurnStatus(ctx, &turn, func(current *api.AgentRunTurn) error {
+					meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{Type: "CellnTurnComplete", Status: metav1.ConditionTrue, Reason: "BudgetExhausted", Message: "AUTH_BUDGET_EXHAUSTED: the original parent allowance refused this unstarted turn. Exact native and gateway registration fences are required before cleanup is confirmed.", ObservedGeneration: current.Generation})
+					return nil
+				}); err != nil {
+					return ctrl.Result{}, err
+				}
+				return ctrl.Result{Requeue: true}, nil
+			}
 			return r.turnUncertain(ctx, &turn, "GatewayRegistrationUnconfirmed", err)
 		}
 		if err := r.updateTurnScoped(ctx, &turn, func(state *api.CellnScopedStatus) error { state.GatewayRegistered = true; return nil }); err != nil {

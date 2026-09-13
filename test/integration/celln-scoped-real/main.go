@@ -270,6 +270,38 @@ func run(ctx context.Context, o options) (retErr error) {
 					cleanupFailures = append(cleanupFailures, "protected recovery identity could not be retained")
 				}
 			}
+			if run != nil && current.UID == run.UID && current.UID != "" && current.Spec.ExecutionLifecycle == "enduring" && current.Status.CellnScoped != nil {
+				if !current.Status.CellnScoped.CleanupConfirmed {
+					if _, err := beginEnduringCleanup(cleanupCtx, reconciler, k8sClient, &current); err != nil {
+						cleanupFailures = append(cleanupFailures, err.Error())
+						continue
+					}
+				}
+				var children api.AgentRunTurnList
+				if err := k8sClient.List(cleanupCtx, &children, client.InNamespace(current.Namespace)); err != nil {
+					cleanupFailures = append(cleanupFailures, err.Error())
+					continue
+				}
+				childFailed := false
+				for i := range children.Items {
+					child := &children.Items[i]
+					if child.Spec.RunUID != string(current.UID) || child.Spec.RunName != current.Name {
+						continue
+					}
+					if err := rememberProtected(cleanupCtx, k8sClient, objects, o.preparationNamespace, child.Status.CellnScoped); err != nil {
+						cleanupFailures = append(cleanupFailures, err.Error())
+						childFailed = true
+						continue
+					}
+					if err := finishTurnAfterRootCleanup(cleanupCtx, turnReconciler, k8sClient, child); err != nil {
+						cleanupFailures = append(cleanupFailures, err.Error())
+						childFailed = true
+					}
+				}
+				if childFailed {
+					continue
+				}
+			}
 			if cleanupErr := deleteRunThroughController(cleanupCtx, reconciler, k8sClient, run); cleanupErr != nil {
 				cleanupFailures = append(cleanupFailures, cleanupErr.Error())
 			}

@@ -72,6 +72,7 @@ type BudgetStore interface {
 	Inspect(context.Context, string, string) (modelbudget.Usage, error)
 	FenceRun(context.Context, string) error
 	FenceTurn(context.Context, string, string) error
+	FenceTurnRegistration(context.Context, modelbudget.TurnRegistration) error
 }
 
 type AuthorityStore interface {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -15,6 +16,7 @@ import (
 	"github.com/sympozium-ai/sympozium/internal/modelbudget"
 	"github.com/sympozium-ai/sympozium/internal/modelgateway"
 	"io"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"log"
 	"net/http/httputil"
@@ -157,6 +159,67 @@ func TestRecoverScopedReview(t *testing.T) {
 		t.Fatal("not an isolated review namespace")
 	}
 	key := types.NamespacedName{Namespace: namespace, Name: name}
+	if os.Getenv("CELLN_REVIEW_RECOVER_TURN") == "1" {
+		var turn api.AgentRunTurn
+		if err := c.Get(ctx, key, &turn); err != nil {
+			t.Fatal(err)
+		}
+		s := turn.Status.CellnScoped
+		if s == nil {
+			t.Fatal("missing original turn identity")
+		}
+		prepared, err := d.Store.Load(ctx, s.PreparationName)
+		var final *cellnauthority.FinalizedPreparation
+		if err == nil {
+			final, err = d.Store.LoadFinal(ctx, s.DecisionName, prepared)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(prepared.UID) != s.PreparationUID || string(final.UID) != s.DecisionUID {
+				t.Fatal("protected turn identity changed")
+			}
+		} else {
+			if !apierrors.IsNotFound(err) || s.StartAttempted || len(s.ReceiverID) != 71 || !strings.HasPrefix(s.ReceiverID, "sha256:") {
+				t.Fatal("not a recoverable never-started enrollment")
+			}
+			if _, err := hex.DecodeString(s.ReceiverID[7:]); err != nil {
+				t.Fatal("invalid enrolled identity")
+			}
+			var enrolled struct {
+				ID, Owner string
+				Decision  cellnauthority.PlatformDecision
+			}
+			raw, err := os.ReadFile(filepath.Join(root, "scoped/prepared", s.ReceiverID[7:]))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if json.Unmarshal(raw, &enrolled) != nil || enrolled.ID != s.ReceiverID || enrolled.Owner != s.Owner {
+				t.Fatal("independent enrolled turn mismatch")
+			}
+			final = &cellnauthority.FinalizedPreparation{Decision: enrolled.Decision}
+		}
+		if final.Decision.Run.UID != turn.Spec.RunUID || final.Decision.Run.Namespace != turn.Namespace || final.Decision.Parent == nil || final.Decision.Parent.TurnID == nil || *final.Decision.Parent.TurnID != string(turn.UID) {
+			t.Fatal("original turn preparation mismatch")
+		}
+		observed, err := d.Cleanup(ctx, s.ReceiverID, final, s.GatewayRegistrationAttempted)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if observed.ID != s.ReceiverID || observed.Owner != s.Owner || !observed.CleanupConfirmed {
+			t.Fatal("original turn cleanup unconfirmed")
+		}
+		s.CleanupConfirmed = true
+		s.NativePhase = observed.Phase
+		if err := c.Status().Update(ctx, &turn); err != nil {
+			t.Fatal(err)
+		}
+		r := &controller.AgentRunTurnReconciler{Client: c, APIReader: c, ScopedDispatcher: d}
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+			t.Fatal(err)
+		}
+		t.Log("exact original turn native and gateway fences confirmed; no replacement work submitted")
+		return
+	}
 	var run api.AgentRun
 	if err := c.Get(ctx, key, &run); err != nil {
 		t.Fatal(err)

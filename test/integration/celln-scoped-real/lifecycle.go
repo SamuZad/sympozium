@@ -136,16 +136,18 @@ func createAndProveExhaustedTurn(ctx context.Context, reconciler *controller.Age
 	}
 	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(turn)}
 	for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); {
-		_, reconcileErr := reconciler.Reconcile(ctx, request)
+		_, _ = reconciler.Reconcile(ctx, request)
 		var current api.AgentRunTurn
 		if err := c.Get(ctx, request.NamespacedName, &current); err != nil {
 			return nil, err
 		}
-		if reconcileErr != nil && strings.Contains(reconcileErr.Error(), modelbudget.ReasonExhausted) {
-			if recorder.attempts.Load() != calls {
-				return nil, errors.New("provider called after budget exhaustion")
+		for _, condition := range current.Status.Conditions {
+			if condition.Type == "CellnTurnComplete" && condition.Status == metav1.ConditionTrue && condition.Reason == "BudgetExhausted" && current.Status.CellnScoped != nil && current.Status.CellnScoped.CleanupConfirmed {
+				if recorder.attempts.Load() != calls || current.Status.CellnScoped.StartAttempted {
+					return &current, errors.New("native/provider called after budget exhaustion")
+				}
+				return &current, nil
 			}
-			return &current, nil
 		}
 		select {
 		case <-ctx.Done():
@@ -159,7 +161,13 @@ func createAndProveExhaustedTurn(ctx context.Context, reconciler *controller.Age
 func finishTurnAfterRootCleanup(ctx context.Context, reconciler *controller.AgentRunTurnReconciler, c client.Client, turn *api.AgentRunTurn) error {
 	var requested api.AgentRunTurn
 	if err := c.Get(ctx, client.ObjectKeyFromObject(turn), &requested); err != nil {
+		if apierrors.IsNotFound(err) && turn.Status.CellnScoped != nil && turn.Status.CellnScoped.CleanupConfirmed {
+			return nil
+		}
 		return err
+	}
+	if requested.UID != turn.UID {
+		return errors.New("turn identity changed before cleanup")
 	}
 	uid := requested.UID
 	if err := c.Delete(ctx, &requested, &client.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}}); err != nil && !apierrors.IsNotFound(err) {
@@ -206,7 +214,28 @@ func beginEnduringCleanup(ctx context.Context, reconciler *controller.AgentRunRe
 		}
 		err := c.Get(ctx, request.NamespacedName, &current)
 		if apierrors.IsNotFound(err) {
-			return last, errors.New("enduring root disappeared before dependent turn cleanup")
+			// The controller may remove the root finalizer in the same reconcile
+			// that confirms teardown. Verify its independent native owner record;
+			// object absence alone is never cleanup evidence.
+			s := last.Status.CellnScoped
+			if s == nil {
+				return last, errors.New("root disappeared without protected owner identity")
+			}
+			prepared, err := reconciler.ScopedDispatcher.Store.Load(ctx, s.PreparationName)
+			if err != nil {
+				return last, err
+			}
+			final, err := reconciler.ScopedDispatcher.Store.LoadFinal(ctx, s.DecisionName, prepared)
+			if err != nil {
+				return last, err
+			}
+			observed, err := reconciler.ScopedDispatcher.Read(ctx, s.ReceiverID, final)
+			if err != nil || observed.ID != s.ReceiverID || observed.Owner != s.Owner || !observed.CleanupConfirmed {
+				return last, errors.New("root disappeared without independent native teardown confirmation")
+			}
+			s.CleanupConfirmed = true
+			s.NativePhase = observed.Phase
+			return last, nil
 		}
 		if err != nil {
 			return last, err

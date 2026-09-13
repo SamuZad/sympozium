@@ -414,7 +414,7 @@ func (r *AgentRunReconciler) cleanupScoped(ctx context.Context, run *api.AgentRu
 		return false, errors.New("scoped cleanup configuration is unavailable")
 	}
 	if run.Status.CellnScoped.CleanupConfirmed {
-		return true, nil
+		return r.scopedChildrenFinalized(ctx, run)
 	}
 	prepared, final, err := r.loadScopedBinding(ctx, run)
 	if err != nil {
@@ -446,6 +446,24 @@ func (r *AgentRunReconciler) cleanupScoped(ctx context.Context, run *api.AgentRu
 		return nil
 	}); err != nil {
 		return false, err
+	}
+	return r.scopedChildrenFinalized(ctx, run)
+}
+
+// Keep the stopped root's protected recovery binding available until existing
+// scoped child finalizers have consumed its parent-and-descendants cleanup proof.
+func (r *AgentRunReconciler) scopedChildrenFinalized(ctx context.Context, run *api.AgentRun) (bool, error) {
+	if run.Spec.ExecutionLifecycle != "enduring" {
+		return true, nil
+	}
+	var children api.AgentRunTurnList
+	if err := r.APIReader.List(ctx, &children, client.InNamespace(run.Namespace)); err != nil {
+		return false, err
+	}
+	for _, child := range children.Items {
+		if child.Spec.RunUID == string(run.UID) && child.Spec.RunName == run.Name && slices.Contains(child.Finalizers, agentRunTurnFinalizer) {
+			return false, nil
+		}
 	}
 	return true, nil
 }
