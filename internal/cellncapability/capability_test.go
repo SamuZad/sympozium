@@ -290,6 +290,20 @@ func TestIssuerRefusesAuthorityExtension(t *testing.T) {
 	}
 }
 
+func TestIssuerAllowsFreshOwnerCleanupAfterOriginalWorkDeadline(t *testing.T) {
+	decision, _ := fixtureDecisionByVector(t, "harness-one-shot")
+	now := time.Unix(decision.Budget.TurnDeadlineUnix+3600, 0).UTC()
+	decision.Operation = "execution.cleanup"
+	decision.Windows = Windows{IssuedAt: now.Unix(), NotBefore: now.Unix(), AdmissionDeadline: now.Unix() + 60}
+	issuer, err := NewIssuer(ControlPlaneIssuer, keyFromByte("cleanup-test", 0x58), ClockFunc(func() time.Time { return now }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := issuer.Issue(decision, IssueRequest{Audience: AudienceExecution, Operation: "execution.cleanup", JTI: "cleanup-owner-after-work-deadline"}); err != nil {
+		t.Fatalf("fresh owner cleanup incorrectly reset or enforced the original work deadline: %v", err)
+	}
+}
+
 func TestTokenRedaction(t *testing.T) {
 	token := NewToken("super-secret-bearer")
 	if got := token.String(); got == token.Bearer() || bytes.Contains([]byte(got), []byte("super-secret")) {

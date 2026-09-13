@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"errors"
 	"flag"
@@ -38,6 +39,8 @@ type config struct {
 	RegistrationTokenFile string   `json:"registrationTokenFile"`
 	DatabaseURLFile       string   `json:"databaseUrlFile"`
 	PrivateOrigins        []string `json:"privateOrigins"`
+	ProviderCAFile        string   `json:"providerCaFile,omitempty"`
+	ReadinessNamespaces   []string `json:"readinessNamespaces,omitempty"`
 }
 
 func main() {
@@ -115,7 +118,21 @@ func run(path string) error {
 	if err != nil {
 		return err
 	}
-	gateway, err := modelgateway.New(modelgateway.Config{AuthorityReady: modelgateway.AuthorityReadiness(auth.SelfSubjectAccessReviews()), ClusterID: cfg.ClusterID, RegistrationToken: cap.NewToken(registration), AllowPrivateOrigins: private}, verifier, reader, budgets, authorities)
+	var providerRoots *x509.CertPool
+	if cfg.ProviderCAFile != "" {
+		public, err := os.ReadFile(cfg.ProviderCAFile)
+		if err != nil || len(public) > 1<<20 {
+			return errors.New("invalid operator provider CA file")
+		}
+		providerRoots, err = x509.SystemCertPool()
+		if err != nil {
+			return errors.New("system provider trust unavailable")
+		}
+		if !providerRoots.AppendCertsFromPEM(public) {
+			return errors.New("invalid operator provider CA certificate")
+		}
+	}
+	gateway, err := modelgateway.New(modelgateway.Config{AuthorityReady: modelgateway.AuthorityReadinessForNamespaces(auth.SelfSubjectAccessReviews(), cfg.ReadinessNamespaces), ClusterID: cfg.ClusterID, RegistrationToken: cap.NewToken(registration), AllowPrivateOrigins: private, ProviderRootCAs: providerRoots}, verifier, reader, budgets, authorities)
 	if err != nil {
 		return err
 	}

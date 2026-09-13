@@ -1,0 +1,26 @@
+apiVersion: sympozium.ai/v1alpha1
+kind: AgentRun
+metadata:
+  name: enduring-uppercase
+  namespace: celln-review-b-@@REVIEW@@
+  labels: {sympozium.ai/celln-review: "@@REVIEW@@"}
+spec:
+  agentRef: review-agent
+  agentId: default
+  sessionKey: review-enduring
+  task: celln
+  systemPrompt: Use the selected uppercase tool exactly once on every turn and return only its text field.
+  model: {connectionRef: review-model, model: review-uppercase}
+  backend: celln
+  executionLifecycle: enduring
+  enduring:
+    leaseSeconds: 600
+    maxTurns: 2
+    maxModelRequests: 4
+    maxOutputTokens: 2048
+  timeout: 2m
+  cleanup: delete
+  cellnSelection:
+    runtimeRef: review-runtime
+    toolRefs: []
+    clusterToolRefs: [{name: @@TOOL@@, revision: @@TOOL_REVISION@@}]

@@ -54,7 +54,8 @@ make test-celln-tenancy-local
 
 This runs the component/API/binary checks and Celln's strict `make conformance-kvm`
 runner. The latter builds its native parent and JSON Harness package, makes no
-external model calls, executes five real-KVM proofs in separate serial processes,
+external model calls, executes the required real-KVM proofs in separate serial processes (including
+native model-free JSON adapter execution on updated Celln revisions),
 and refuses printed skips/missing cases. `/dev/kvm`, the kernel, musl target,
 compiler and image tools are required. KVM logs remain in the pinned Celln
 checkout's private `target/conformance-kvm.*` directory.
