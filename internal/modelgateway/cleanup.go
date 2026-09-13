@@ -3,6 +3,11 @@ package modelgateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/sympozium-ai/sympozium/internal/modelbudget"
 
 	cap "github.com/sympozium-ai/sympozium/internal/cellncapability"
 )
@@ -21,7 +26,8 @@ func (g *Gateway) Close(ctx context.Context, token cap.Token, in CloseRequest) e
 	}
 	verify := contextFor(decision, "execution.cleanup")
 	verify.ClusterID = g.config.ClusterID
-	if _, err = g.verifier.Verify(token, in.Decision, verify); err != nil {
+	verified, err := g.verifier.Verify(token, in.Decision, verify)
+	if err != nil {
 		return fail(ReasonUnauthorized, 401, nil)
 	}
 	initial, err := g.authorities.Authority(ctx, decision.Budget.BudgetID, decision.Run.UID)
@@ -40,7 +46,22 @@ func (g *Gateway) Close(ctx context.Context, token cap.Token, in CloseRequest) e
 		tid := *decision.Parent.TurnID
 		turn, err := g.authorities.Authority(ctx, decision.Budget.BudgetID, tid)
 		if err != nil {
-			return err
+			if !errors.Is(err, pgx.ErrNoRows) {
+				return err
+			}
+			// Missing authority is not proof of absence: registration may be
+			// racing or partially committed. Verify the unchanged original
+			// parent authority, then atomically fence the exact budget row.
+			candidate := decision
+			candidate.Operation = "execution.turn"
+			if err := retainRunAuthority(original, candidate); err != nil {
+				return err
+			}
+			return g.budgets.FenceTurnRegistration(ctx, modelbudget.TurnRegistration{
+				BudgetID: decision.Budget.BudgetID, TurnID: tid, DecisionDigest: verified.DecisionDigest,
+				MaxRequests: decision.Budget.TurnCap.Requests, MaxOutputTokens: decision.Budget.TurnCap.OutputTokens,
+				Deadline: time.Unix(decision.Budget.TurnDeadlineUnix, 0).UTC(),
+			})
 		}
 		if turn.Decision.Run != original.Run || turn.Decision.ClusterID != original.ClusterID || turn.Decision.Parent == nil || turn.Decision.Parent.Incarnation != original.Parent.Incarnation || turn.TurnID != tid {
 			return fail(ReasonForbidden, 403, nil)

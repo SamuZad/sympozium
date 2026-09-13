@@ -43,10 +43,13 @@ rules:
   # CRDs
   - apiGroups: ["sympozium.ai"]
     resources: ["agentrunturns"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list", "watch", "update", "patch"]
   - apiGroups: ["sympozium.ai"]
     resources: ["agentrunturns/status"]
     verbs: ["get", "update", "patch"]
+  - apiGroups: ["sympozium.ai"]
+    resources: ["agentrunturns/finalizers"]
+    verbs: ["update", "patch"]
   - apiGroups: ["sympozium.ai"]
     resources:
       - agents

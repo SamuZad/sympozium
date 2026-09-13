@@ -387,6 +387,7 @@ const (
 // AgentRunStatus defines the observed state of AgentRun.
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.cellnIssuance) || has(self.cellnIssuance)",message="saved Celln issuance cannot be removed"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.cellnParent) || has(self.cellnParent)",message="saved Celln parent cannot be removed"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.cellnScoped) || has(self.cellnScoped)",message="saved scoped Celln identity cannot be removed"
 type AgentRunStatus struct {
 	// CellnOnly records a new run's execution boundary before any finalizer or
 	// workload side effects. The controller refuses subsequent backend changes.
@@ -522,10 +523,97 @@ type AgentRunStatus struct {
 	// CellnParent binds enduring intent before any parent creation side effect.
 	// +optional
 	CellnParent *CellnParentStatus `json:"cellnParent,omitempty"`
+	// CellnScoped binds a shared-catalogue run to immutable protected
+	// preparation, final decision, and receiver ownership. Enduring roots also
+	// retain their namespace-aware parent incarnation here.
+	// +optional
+	CellnScoped *CellnScopedStatus `json:"cellnScoped,omitempty"`
 	// CellnReceipt retains the validated versioned terminal receipt as JSON.
 	// +kubebuilder:validation:MaxLength=131072
 	// +optional
 	CellnReceipt string `json:"cellnReceipt,omitempty"`
+}
+
+// CellnScopedStatus is the durable controller-side recovery record for the
+// separately authenticated /v1/scoped protocol. Identity fields are write-once.
+// +kubebuilder:validation:XValidation:rule="self.preparationName == oldSelf.preparationName && self.preparationUid == oldSelf.preparationUid && self.decisionName == oldSelf.decisionName && self.decisionUid == oldSelf.decisionUid",message="protected scoped preparation identity is immutable"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.receiverId) || (has(self.receiverId) && self.receiverId == oldSelf.receiverId && self.owner == oldSelf.owner)",message="scoped receiver owner identity is immutable"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.gatewayRegistrationAttempted) || !oldSelf.gatewayRegistrationAttempted || (has(self.gatewayRegistrationAttempted) && self.gatewayRegistrationAttempted)",message="gateway registration attempt cannot be forgotten"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.gatewayRegistered) || !oldSelf.gatewayRegistered || (has(self.gatewayRegistered) && self.gatewayRegistered)",message="gateway registration cannot regress"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.startAttempted) || !oldSelf.startAttempted || (has(self.startAttempted) && self.startAttempted)",message="scoped start attempt cannot be forgotten"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.cleanupConfirmed) || !oldSelf.cleanupConfirmed || (has(self.cleanupConfirmed) && self.cleanupConfirmed)",message="scoped cleanup confirmation cannot regress"
+type CellnScopedStatus struct {
+	// +kubebuilder:validation:MaxLength=75
+	PreparationName string `json:"preparationName"`
+	// +kubebuilder:validation:MaxLength=128
+	PreparationUID string `json:"preparationUid"`
+	// +kubebuilder:validation:MaxLength=76
+	DecisionName string `json:"decisionName"`
+	// +kubebuilder:validation:MaxLength=128
+	DecisionUID string `json:"decisionUid"`
+	// ReceiverID and Owner are returned by the enrolled native receiver and
+	// jointly identify the only execution this run may observe or clean up.
+	// +optional
+	// +kubebuilder:validation:MaxLength=256
+	ReceiverID string `json:"receiverId,omitempty"`
+	// +optional
+	// +kubebuilder:validation:MaxLength=256
+	Owner string `json:"owner,omitempty"`
+	// ParentIncarnation is present only for enduring initial/turn operations and
+	// must match the immutable prepared decision and receiver evidence.
+	// +optional
+	// +kubebuilder:validation:MaxLength=71
+	// +kubebuilder:validation:Pattern=`^blake3:[0-9a-f]{64}$`
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="scoped parent incarnation is immutable"
+	ParentIncarnation string `json:"parentIncarnation,omitempty"`
+	// TurnID is the actual AgentRunTurn UID for continuation work.
+	// +optional
+	// +kubebuilder:validation:MaxLength=128
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="scoped turn identity is immutable"
+	TurnID string `json:"turnId,omitempty"`
+	// GatewayRegistrationAttempted is persisted before registration so an
+	// ambiguous transport failure remains visible and cleanup still fences the
+	// original budget. It does not by itself prove registration succeeded.
+	// +optional
+	GatewayRegistrationAttempted bool `json:"gatewayRegistrationAttempted,omitempty"`
+	// GatewayRegistered is set only after the exact final decision is accepted.
+	// +optional
+	GatewayRegistered bool `json:"gatewayRegistered,omitempty"`
+	// StartAttempted is persisted before the non-idempotent start request. Once
+	// true, recovery reads the pinned owner before considering the exact start.
+	// +optional
+	StartAttempted bool `json:"startAttempted,omitempty"`
+	// +optional
+	// +kubebuilder:validation:MaxLength=32
+	NativePhase string `json:"nativePhase,omitempty"`
+	// +optional
+	// +kubebuilder:validation:MaxLength=256
+	ReceiptDigest string `json:"receiptDigest,omitempty"`
+	// Output is correlated receiver output for the initial or continuation turn.
+	// +optional
+	// +kubebuilder:validation:MaxLength=4194304
+	Output string `json:"output,omitempty"`
+	// Native IDs and provenance are copied from receiver evidence. They are
+	// observational and cannot select future execution authority.
+	// +optional
+	// +kubebuilder:validation:MaxLength=256
+	ParentID string `json:"parentId,omitempty"`
+	// +optional
+	// +kubebuilder:validation:MaxLength=256
+	ChildID string `json:"childId,omitempty"`
+	// +optional
+	// +kubebuilder:validation:MaxLength=256
+	CellID string `json:"cellId,omitempty"`
+	// +optional
+	// +kubebuilder:validation:MaxLength=65536
+	ExecutionProvenance string `json:"executionProvenance,omitempty"`
+	// +optional
+	// +kubebuilder:validation:MaxLength=65536
+	SubstrateProvenance string `json:"substrateProvenance,omitempty"`
+	// CleanupConfirmed means native teardown and, when applicable, gateway close
+	// both completed. It is the only condition allowing finalizer removal.
+	// +optional
+	CleanupConfirmed bool `json:"cleanupConfirmed,omitempty"`
 }
 
 // DelegateStatus tracks an in-flight delegation to another persona or ad-hoc sub-agent.

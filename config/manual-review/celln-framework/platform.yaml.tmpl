@@ -1,0 +1,54 @@
+# Public template. Filled only from the verified package metadata by
+# hack/generate-celln-framework-review.sh.
+apiVersion: sympozium.ai/v1alpha1
+kind: CellnRuntimeProfile
+metadata:
+  name: @@ONE_PROFILE@@
+  labels:
+    sympozium.ai/celln-review: "@@REVIEW@@"
+spec: @@ONE_SPEC@@
+---
+apiVersion: sympozium.ai/v1alpha1
+kind: CellnRuntimeProfile
+metadata:
+  name: @@END_PROFILE@@
+  labels: {sympozium.ai/celln-review: "@@REVIEW@@"}
+spec: @@END_SPEC@@
+---
+apiVersion: sympozium.ai/v1alpha1
+kind: ClusterCellnTool
+metadata:
+  name: @@TOOL@@
+  labels: {sympozium.ai/celln-review: "@@REVIEW@@"}
+spec: @@TOOL_SPEC@@
+---
+apiVersion: sympozium.ai/v1alpha1
+kind: CellnExecutionPolicy
+metadata:
+  name: celln-review-policy-@@REVIEW@@
+  labels: {sympozium.ai/celln-review: "@@REVIEW@@"}
+spec:
+  namespaceSelector:
+    matchLabels:
+      sympozium.ai/celln-review: "@@REVIEW@@"
+      sympozium.ai/celln-review-tenant: enabled
+  runtimeProfiles:
+    - ref: {name: @@ONE_PROFILE@@, revision: @@ONE_REVISION@@}
+    - ref: {name: @@END_PROFILE@@, revision: @@END_REVISION@@}
+  tools:
+    - ref: {name: @@TOOL@@, revision: @@TOOL_REVISION@@}
+  lifecycles: [direct-one-shot, harness-one-shot, enduring]
+  routes:
+    - provider: review-fixture
+      protocol: openai-chat
+      models: [review-uppercase]
+      endpointOrigins:
+        - https://review-provider-@@REVIEW@@.celln-review-a-@@REVIEW@@.svc:8443
+        - https://review-provider-@@REVIEW@@.celln-review-b-@@REVIEW@@.svc:8443
+      auth: secret
+  ceilings:
+    maxTurns: 2
+    maxModelRequests: 4
+    maxOutputTokens: 2048
+    maxParentLeaseSeconds: 600
+    maxTurnSeconds: 120

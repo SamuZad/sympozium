@@ -145,6 +145,9 @@ export interface AgentRuntime {
   spec: {
     image?: string;
     celln?: { contractVersion: string; revision: string; lifecycle: string; publisherKey: string };
+    /** Shared cluster catalogue profile. Distinct from legacy inline Celln authority. */
+    cellnProfileRef?: { name: string; revision: string };
+    cellnLimits?: { timeoutMillis: number; memoryBytes: number; taskBytes: number; outputBytes: number; workspace: "none" };
     contractVersion?: string;
     capabilities?: string[];
     session?: {
@@ -167,6 +170,8 @@ export interface AgentRuntime {
 export interface CellnSelection {
   runtimeRef?: string;
   toolRefs: { name: string; revision: string }[];
+  /** Exact shared cluster catalogue revisions; never legacy namespaced tools. */
+  clusterToolRefs?: { name: string; revision: string }[];
 }
 
 export interface CellnPermissionPreview {
@@ -263,6 +268,32 @@ export interface ParentRunRef {
   spawnDepth: number;
 }
 
+/** Durable, receiver-correlated status for the protected scoped Celln wire.
+ * Attempt flags describe persisted attempts, not successful delivery. Only
+ * cleanupConfirmed proves native (and, when applicable, gateway) teardown. */
+export interface CellnScopedStatus {
+  preparationName: string;
+  preparationUid: string;
+  decisionName: string;
+  decisionUid: string;
+  receiverId?: string;
+  owner?: string;
+  parentIncarnation?: string;
+  turnId?: string;
+  gatewayRegistrationAttempted?: boolean;
+  gatewayRegistered?: boolean;
+  startAttempted?: boolean;
+  nativePhase?: string;
+  receiptDigest?: string;
+  output?: string;
+  parentId?: string;
+  childId?: string;
+  cellId?: string;
+  executionProvenance?: string;
+  substrateProvenance?: string;
+  cleanupConfirmed?: boolean;
+}
+
 // A run's task is polymorphic, matching api/v1alpha1/taskspec.go: either the
 // prompt string (Path A) or an object naming an orchestration mode. Typing it
 // as `string` is what let an object reach a JSX child and unmount the app with
@@ -306,6 +337,7 @@ export interface DelegateStatus {
 }
 
 export interface AgentRunStatus {
+  cellnScoped?: CellnScopedStatus;
   cellnParent?: {
     binding: { incarnation: string; runUID: string };
     createAttempted: boolean;
@@ -353,7 +385,7 @@ export interface ParentTurnExecution {
 export interface AgentRunTurn {
   metadata: ObjectMeta;
   spec: { runName: string; runUID: string; message: string; cancelRequested?: boolean };
-  status?: { parentIncarnation?: string; execution?: ParentTurnExecution; conditions?: Condition[]; cancelAttempted?: boolean };
+  status?: { parentIncarnation?: string; execution?: ParentTurnExecution; cellnScoped?: CellnScopedStatus; conditions?: Condition[]; cancelAttempted?: boolean };
 }
 
 // ── SympoziumPolicy ──────────────────────────────────────────────────────────

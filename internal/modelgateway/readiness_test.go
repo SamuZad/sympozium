@@ -53,3 +53,37 @@ func TestAuthorityReadinessFailsClosed(t *testing.T) {
 		t.Fatal("nil authority accepted")
 	}
 }
+
+func TestAuthorityReadinessUsesExplicitNamespaces(t *testing.T) {
+	kube := fake.NewSimpleClientset()
+	want := map[string]bool{
+		"namespaces///tenant-a":                   true,
+		"modelconnections/sympozium.ai/tenant-a/": true,
+		"secrets//tenant-a/":                      true,
+		"namespaces///tenant-b":                   true,
+		"modelconnections/sympozium.ai/tenant-b/": true,
+		"secrets//tenant-b/":                      true,
+	}
+	seen := map[string]bool{}
+	kube.PrependReactor("create", "selfsubjectaccessreviews", func(action ktesting.Action) (bool, runtime.Object, error) {
+		review := action.(ktesting.CreateAction).GetObject().(*authv1.SelfSubjectAccessReview)
+		a := review.Spec.ResourceAttributes
+		key := a.Resource + "/" + a.Group + "/" + a.Namespace + "/" + a.Name
+		if a.Verb != "get" || !want[key] {
+			t.Fatalf("unexpected scoped authority query: %#v", a)
+		}
+		seen[key] = true
+		return true, &authv1.SelfSubjectAccessReview{Status: authv1.SubjectAccessReviewStatus{Allowed: true}}, nil
+	})
+	if err := AuthorityReadinessForNamespaces(kube.AuthorizationV1().SelfSubjectAccessReviews(), []string{"tenant-a", "tenant-b"})(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != len(want) {
+		t.Fatalf("saw %d checks, want %d", len(seen), len(want))
+	}
+	for _, invalid := range [][]string{{""}, {" tenant-a"}, {"tenant-a", "tenant-a"}} {
+		if err := AuthorityReadinessForNamespaces(kube.AuthorizationV1().SelfSubjectAccessReviews(), invalid)(context.Background()); err == nil {
+			t.Fatalf("accepted invalid namespaces %#v", invalid)
+		}
+	}
+}
