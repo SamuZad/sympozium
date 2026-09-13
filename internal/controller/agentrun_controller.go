@@ -1354,6 +1354,9 @@ func (r *AgentRunReconciler) reconcileCompleted(ctx context.Context, log logr.Lo
 			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 		}
 	}
+	if r.ScopedOnly {
+		return r.finishScopedOnly(ctx, agentRun)
+	}
 	// Clean up cluster-scoped RBAC created for skill sidecars.
 	r.cleanupSkillRBAC(ctx, log, agentRun)
 
@@ -2156,6 +2159,9 @@ func (r *AgentRunReconciler) reconcileDelete(ctx context.Context, log logr.Logge
 		}
 	}
 
+	if r.ScopedOnly {
+		return r.finishScopedOnly(ctx, agentRun)
+	}
 	// Clean up cluster-scoped RBAC resources created for skill sidecars.
 	r.cleanupSkillRBAC(ctx, log, agentRun)
 
