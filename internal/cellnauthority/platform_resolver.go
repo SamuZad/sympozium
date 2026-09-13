@@ -81,9 +81,10 @@ type PlatformObjectRevision struct {
 }
 
 type PlatformResolution struct {
-	Decision PlatformDecision         `json:"decision"`
-	ReadSet  []PlatformObjectRevision `json:"readSet"`
-	Request  PlatformResolveRequest   `json:"-"`
+	Execution *PlatformExecutionMaterial `json:"execution,omitempty"`
+	Decision  PlatformDecision           `json:"decision"`
+	ReadSet   []PlatformObjectRevision   `json:"readSet"`
+	Request   PlatformResolveRequest     `json:"-"`
 }
 
 // PlatformResolver must be constructed with the manager's APIReader, never a
@@ -130,7 +131,11 @@ func (r PlatformResolver) Resolve(ctx context.Context, runKey types.NamespacedNa
 	if !reflect.DeepEqual(readSet, secondReadSet) {
 		return nil, deny(ReasonPolicyContracted, "an authority object changed during resolution")
 	}
-	return &PlatformResolution{Decision: *decision, ReadSet: readSet, Request: request}, nil
+	material, err := executionMaterial(first, request, *decision)
+	if err != nil {
+		return nil, err
+	}
+	return &PlatformResolution{Decision: *decision, ReadSet: readSet, Request: request, Execution: material}, nil
 }
 
 func (r PlatformResolver) Revalidate(ctx context.Context, runKey types.NamespacedName, frozen PlatformResolution) error {
@@ -506,7 +511,10 @@ func resolveDecisionRoute(s platformSnapshot, required bool) (DecisionRouteBindi
 	var origin string
 	var err error
 	if auth == "secret" {
-		origin, err = api.ModelEndpointOrigin(c.Spec.Endpoint)
+		origin, err = api.ModelEndpointOriginInsecure(c.Spec.Endpoint, c.Spec.AllowInsecure)
+		if err == nil && !strings.HasPrefix(strings.ToLower(origin), "https://") {
+			err = fmt.Errorf("credential-bearing model endpoint must use HTTPS")
+		}
 	} else {
 		origin, err = api.ModelEndpointOriginInsecure(c.Spec.Endpoint, c.Spec.AllowInsecure)
 	}

@@ -1,0 +1,88 @@
+apiVersion: sympozium.ai/v1alpha1
+kind: AgentRuntime
+metadata:
+  name: review-runtime
+  namespace: celln-review-a-@@REVIEW@@
+  labels: {sympozium.ai/celln-review: "@@REVIEW@@"}
+spec:
+  image: ""
+  cellnProfileRef: {name: @@ONE_PROFILE@@, revision: @@ONE_REVISION@@}
+---
+apiVersion: sympozium.ai/v1alpha1
+kind: Agent
+metadata:
+  name: review-agent
+  namespace: celln-review-a-@@REVIEW@@
+  labels: {sympozium.ai/celln-review: "@@REVIEW@@"}
+spec:
+  runtimeRef: review-runtime
+  agents: {default: {model: review-uppercase}}
+---
+apiVersion: sympozium.ai/v1alpha1
+kind: ModelConnection
+metadata:
+  name: review-model
+  namespace: celln-review-a-@@REVIEW@@
+  labels: {sympozium.ai/celln-review: "@@REVIEW@@"}
+spec:
+  provider: review-fixture
+  protocol: openai-chat
+  endpoint: https://review-provider-@@REVIEW@@.celln-review-a-@@REVIEW@@.svc:8443/v1/chat/completions
+  secretRef: review-provider-credential
+  models: [review-uppercase]
+  allowInsecure: true
+---
+apiVersion: sympozium.ai/v1alpha1
+kind: AgentRuntime
+metadata:
+  name: review-runtime
+  namespace: celln-review-b-@@REVIEW@@
+  labels: {sympozium.ai/celln-review: "@@REVIEW@@"}
+spec:
+  image: ""
+  cellnProfileRef: {name: @@END_PROFILE@@, revision: @@END_REVISION@@}
+---
+apiVersion: sympozium.ai/v1alpha1
+kind: Agent
+metadata:
+  name: review-agent
+  namespace: celln-review-b-@@REVIEW@@
+  labels: {sympozium.ai/celln-review: "@@REVIEW@@"}
+spec:
+  runtimeRef: review-runtime
+  agents: {default: {model: review-uppercase}}
+---
+apiVersion: sympozium.ai/v1alpha1
+kind: ModelConnection
+metadata:
+  name: review-model
+  namespace: celln-review-b-@@REVIEW@@
+  labels: {sympozium.ai/celln-review: "@@REVIEW@@"}
+spec:
+  provider: review-fixture
+  protocol: openai-chat
+  endpoint: https://review-provider-@@REVIEW@@.celln-review-b-@@REVIEW@@.svc:8443/v1/chat/completions
+  secretRef: review-provider-credential
+  models: [review-uppercase]
+  allowInsecure: true
+---
+# Deliberately outside the policy selector.
+apiVersion: sympozium.ai/v1alpha1
+kind: AgentRuntime
+metadata:
+  name: review-runtime
+  namespace: celln-review-denied-@@REVIEW@@
+  labels: {sympozium.ai/celln-review: "@@REVIEW@@"}
+spec:
+  image: ""
+  cellnProfileRef: {name: @@ONE_PROFILE@@, revision: @@ONE_REVISION@@}
+---
+apiVersion: sympozium.ai/v1alpha1
+kind: Agent
+metadata:
+  name: review-agent
+  namespace: celln-review-denied-@@REVIEW@@
+  labels: {sympozium.ai/celln-review: "@@REVIEW@@"}
+spec:
+  runtimeRef: review-runtime
+  agents: {default: {model: review-uppercase}}
