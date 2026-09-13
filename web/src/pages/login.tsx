@@ -32,7 +32,7 @@ export function LoginPage() {
     setLoading(true);
     try {
       // Validate the token against the API before saving it.
-      const res = await fetch("/api/v1/agents?namespace=default", {
+      const res = await fetch(import.meta.env.VITE_CELLN_REVIEW === "true" ? "/api/v1/review/runs" : "/api/v1/agents?namespace=default", {
         headers: { Authorization: `Bearer ${safeToken}` },
       });
       if (res.status === 401) {
@@ -41,9 +41,11 @@ export function LoginPage() {
         );
         return;
       }
+      if (import.meta.env.VITE_CELLN_REVIEW === "true" && !res.ok) { setError("Review API unavailable. Login was not accepted."); return; }
       login(safeToken);
       navigate("/dashboard");
     } catch {
+      if (import.meta.env.VITE_CELLN_REVIEW === "true") { setError("Review API unavailable. Login was not accepted."); return; }
       // Network error — server might not be ready yet; allow login anyway.
       login(safeToken);
       navigate("/dashboard");

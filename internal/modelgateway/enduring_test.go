@@ -107,6 +107,39 @@ func exerciseEnduringLedger(t *testing.T, g *Gateway, issuer *cap.Issuer, origin
 	if err := register(third); modelbudget.Reason(err) != modelbudget.ReasonExhausted {
 		t.Fatalf("initial task did not consume maxTurns: %v", err)
 	}
+	closeUnregistered := func(decision cap.Decision) error {
+		decision.Operation = "execution.cleanup"
+		raw, _, err := cap.CanonicalDecision(decision)
+		if err != nil {
+			return err
+		}
+		token, err := issuer.Issue(decision, cap.IssueRequest{Audience: cap.AudienceExecution, Operation: "execution.cleanup"})
+		if err != nil {
+			return err
+		}
+		return g.Close(ctx, token, CloseRequest{Decision: raw})
+	}
+	widened := third
+	widened.Budget.RunCap.Requests++
+	if err := closeUnregistered(widened); Reason(err) != ReasonForbidden {
+		t.Fatalf("cleanup accepted changed parent authority: %v", err)
+	}
+	if _, err := g.budgets.Inspect(ctx, d.Budget.BudgetID, thirdID); modelbudget.Reason(err) != modelbudget.ReasonNotFound {
+		t.Fatal("unauthorised cleanup published a turn fence")
+	}
+	if err := closeUnregistered(third); err != nil {
+		t.Fatalf("unregistered turn cleanup: %v", err)
+	}
+	if err := closeUnregistered(third); err != nil {
+		t.Fatalf("unregistered turn cleanup replay: %v", err)
+	}
+	fenced, err := g.budgets.Inspect(ctx, d.Budget.BudgetID, thirdID)
+	if err != nil || !fenced.TurnClosed || fenced.RunClosed || fenced.RunReservedRequests != 2 || fenced.RunReservedOutputTokens != 1024 || fenced.TurnReservedRequests != 0 {
+		t.Fatalf("no-start fence changed original accounting: %+v %v", fenced, err)
+	}
+	if err := register(third); modelbudget.Reason(err) != modelbudget.ReasonRegisterConflict {
+		t.Fatalf("fenced registration restarted: %v", err)
+	}
 	next.Budget.RunCap.Requests++
 	if err := register(next); err == nil {
 		t.Fatal("fresh turn token topped up original parent")

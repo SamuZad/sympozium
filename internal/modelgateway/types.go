@@ -4,6 +4,7 @@ package modelgateway
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -71,6 +72,7 @@ type BudgetStore interface {
 	Inspect(context.Context, string, string) (modelbudget.Usage, error)
 	FenceRun(context.Context, string) error
 	FenceTurn(context.Context, string, string) error
+	FenceTurnRegistration(context.Context, modelbudget.TurnRegistration) error
 }
 
 type AuthorityStore interface {
@@ -137,6 +139,10 @@ type Config struct {
 	MaxConcurrent       int
 	MaxProviderDuration time.Duration
 	AllowPrivateOrigins map[string]bool
+	// ProviderRootCAs adds trust anchors only for explicitly allowlisted private
+	// providers. Public providers always use the host/public trust store.
+	// Certificate and hostname verification remain mandatory.
+	ProviderRootCAs *x509.CertPool
 }
 
 func (c *Config) defaults() error {

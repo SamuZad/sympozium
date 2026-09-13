@@ -145,7 +145,7 @@ export function AgentDetailPage() {
   const persistentHarness = selectedRuntime?.spec.contractVersion === "v1alpha2" && selectedRuntime.spec.session?.protocol === "openai-chat";
   // Native Celln conversations are enduring AgentRuns, not HarnessSessions.
   const nativeCellnEnduring =
-    selectedRuntime?.spec.celln?.contractVersion === "celln.json-tools/v1" &&
+    (selectedRuntime?.spec.celln?.contractVersion === "celln.json-tools/v1" || Boolean(selectedRuntime?.spec.cellnProfileRef)) &&
     inst.spec.execution?.backend === "celln" &&
     inst.spec.execution?.executionLifecycle === "enduring";
   const enduringParent = (allRuns || [])

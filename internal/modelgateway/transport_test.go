@@ -2,6 +2,7 @@ package modelgateway
 
 import (
 	"context"
+	"crypto/x509"
 	"io"
 	"net"
 	"net/http"
@@ -9,6 +10,17 @@ import (
 	"testing"
 	"time"
 )
+
+func TestPublicProviderDoesNotTrustFixtureCA(t *testing.T) {
+	c, err := clientForEndpoint("https://api.example.com/chat/completions", false, time.Second, x509.NewCertPool())
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := c.Transport.(*http.Transport)
+	if transport.TLSClientConfig.RootCAs != nil || transport.TLSClientConfig.InsecureSkipVerify || transport.Proxy != nil {
+		t.Fatal("public provider trust or transport was widened")
+	}
+}
 
 type fixedResolver []net.IP
 
@@ -51,14 +63,14 @@ func TestRealSocketPrivateDestinationAndRedirect(t *testing.T) {
 		_, _ = w.Write([]byte("ok"))
 	}))
 	defer provider.Close()
-	denied, err := clientForEndpoint(provider.URL, false, time.Second)
+	denied, err := clientForEndpoint(provider.URL, false, time.Second, nil)
 	if err == nil {
 		_, err = denied.Get(provider.URL)
 	}
 	if err == nil || calls != 0 {
 		t.Fatal("unapproved private destination connected")
 	}
-	approved, err := clientForEndpoint(provider.URL, true, time.Second)
+	approved, err := clientForEndpoint(provider.URL, true, time.Second, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,6 +88,18 @@ func TestRealSocketPrivateDestinationAndRedirect(t *testing.T) {
 	_, err = approved.Get(redirect.URL)
 	if err == nil || calls != 1 {
 		t.Fatal("redirect followed")
+	}
+}
+
+func TestProviderRootCAsKeepTLSVerificationEnabled(t *testing.T) {
+	roots := x509.NewCertPool()
+	client, err := clientForEndpoint("https://127.0.0.1:9443/v1", true, time.Second, roots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tlsConfig := client.Transport.(*http.Transport).TLSClientConfig
+	if tlsConfig.RootCAs != roots || tlsConfig.InsecureSkipVerify || tlsConfig.ServerName != "127.0.0.1" {
+		t.Fatalf("explicit roots weakened or lost TLS verification: %#v", tlsConfig)
 	}
 }
 func TestProviderRequestRefusals(t *testing.T) {

@@ -3,10 +3,25 @@ import { useInfiniteQuery } from "@tanstack/react-query";
 import { api, type AgentRun, type AgentRunTurn } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { CellnScopedExecution } from "@/components/celln-scoped-execution";
+import { taskText } from "@/lib/utils";
 
 type Pending = { name: string; requestId: string; message: string };
+const terminalNativePhases = new Set(["Succeeded", "Failed", "Refused", "Cancelled"]);
 
-export function CellnConversation({ run, observationUnavailable = false }: { run: AgentRun; observationUnavailable?: boolean }) {
+function currentTurnCondition(turn: AgentRunTurn) {
+  return turn.status?.conditions?.find((condition) => condition.type === "CellnTurnComplete" &&
+    turn.metadata.generation !== undefined && condition.observedGeneration === turn.metadata.generation);
+}
+
+function turnOutcomeCommitted(turn: AgentRunTurn) {
+  if (turn.status?.execution?.result) return true;
+  const scoped = turn.status?.cellnScoped;
+  const condition = currentTurnCondition(turn);
+  return Boolean(scoped?.nativePhase && terminalNativePhases.has(scoped.nativePhase) && condition?.status === "True" && condition.reason === "Committed");
+}
+
+export function CellnConversation({ run, observationUnavailable = false, retainEvidence = false, compactEvidence = false }: { run: AgentRun; observationUnavailable?: boolean; retainEvidence?: boolean; compactEvidence?: boolean }) {
   const uid = run.metadata.uid || "";
   const namespace = run.metadata.namespace || "default";
   const storageKey = `celln-turn:${namespace}:${uid}`;
@@ -42,7 +57,7 @@ export function CellnConversation({ run, observationUnavailable = false }: { run
   const turns = (history.data?.pages.flatMap((page) => page.items) || []).sort((a, b) =>
     (a.metadata.creationTimestamp || "").localeCompare(b.metadata.creationTimestamp || "") || a.metadata.name.localeCompare(b.metadata.name));
   const pendingTurn = turns.find((turn) => turn.metadata.name === pending?.name);
-  const completedPending = pendingTurn?.status?.execution?.result;
+  const completedPending = pendingTurn && turnOutcomeCommitted(pendingTurn);
   useEffect(() => {
     if (completedPending) {
       sessionStorage.removeItem(storageKey);
@@ -51,15 +66,29 @@ export function CellnConversation({ run, observationUnavailable = false }: { run
     }
   }, [completedPending, storageKey]);
   const parent = run.status?.cellnParent;
-  const parentCondition = run.status?.conditions?.find((condition) => condition.type === "CellnParentReady" && run.metadata.generation !== undefined && condition.observedGeneration === run.metadata.generation);
-  const admissionPending = !parent && parentCondition?.status === "False" && parentCondition.reason === "AdmissionPending";
+  const scopedParent = run.status?.cellnScoped;
+  const currentScopedCondition = run.status?.conditions?.find((condition) => condition.type === "CellnScopedExecution" &&
+    run.metadata.generation !== undefined && condition.observedGeneration === run.metadata.generation);
+  const scoped = Boolean(scopedParent || (!parent && currentScopedCondition));
+  const conditionType = scoped ? "CellnScopedExecution" : "CellnParentReady";
+  const parentCondition = run.status?.conditions?.find((condition) => condition.type === conditionType && run.metadata.generation !== undefined && condition.observedGeneration === run.metadata.generation);
+  const admissionPending = !scoped && !parent && parentCondition?.status === "False" && parentCondition.reason === "AdmissionPending";
   const deleting = deleteRequested || Boolean(run.metadata.deletionTimestamp);
-  const ready = !observationUnavailable && !deleting && run.status?.phase === "Running" && parentCondition?.status === "True";
+  const scopedReady = Boolean(scopedParent?.startAttempted && scopedParent.parentIncarnation && scopedParent.nativePhase === "Running" &&
+    parentCondition?.status === "True" && parentCondition.reason === "EnduringParentReady");
+  const legacyReady = Boolean(parent && parentCondition?.status === "True");
+  const ready = !observationUnavailable && !deleting && run.status?.phase === "Running" && (scoped ? scopedReady : legacyReady);
   const requestedTurns = run.spec.enduring?.maxTurns || 1;
-  const ceilingReached = Boolean(parent && parent.acceptedTurns >= requestedTurns - 1);
+  const ceilingReached = scoped ? turns.length >= requestedTurns - 1 : Boolean(parent && parent.acceptedTurns >= requestedTurns - 1);
   const initialFailed = parent?.initialTurn?.result?.succeeded === false;
+  const scopedActiveTurn = scoped ? turns.find((turn) => !turnOutcomeCommitted(turn) && !turn.status?.cellnScoped?.cleanupConfirmed) : undefined;
+  const activeTurn = Boolean(parent?.activeTurn || scopedActiveTurn);
   const unavailableReason = parentCondition?.status === "False" ? parentCondition.reason : undefined;
-  const lifecycleDetail = unavailableReason === "ContextLost"
+  const lifecycleDetail = scoped && parentCondition?.status === "Unknown"
+    ? parentCondition.message || "The scoped parent's outcome is unconfirmed. Sending remains disabled while the original owner is reconciled."
+    : scoped && parentCondition?.status === "False"
+    ? parentCondition.message || "Scoped parent admission or execution is not confirmed. No replacement work will be submitted."
+    : unavailableReason === "ContextLost"
     ? "Live harness context was lost. Recorded answers remain available, but this parent cannot resume. It will not be silently recreated."
     : unavailableReason === "Stopped"
     ? "The parent has stopped. Recorded answers remain available; this conversation cannot accept more turns."
@@ -69,14 +98,18 @@ export function CellnConversation({ run, observationUnavailable = false }: { run
     ? "The original parent's outcome is unconfirmed. Sending is paused while its owner is reconciled; no work will be replayed automatically."
     : ready && initialFailed
     ? "The initial turn failed. Sending is disabled; inspect the recorded failure before creating any new work."
-    : ready && parent?.activeTurn
+    : ready && activeTurn
     ? "One turn is already active or awaiting reconciliation. It must have a committed result before another turn can begin."
     : ready && ceilingReached
-    ? "The requested turn ceiling is exhausted, including the initial turn. Refreshing this page does not restore the budget."
+    ? scoped
+      ? "The loaded turn records reach the requested turn ceiling, including the initial turn. Sending is disabled; this is not host budget-usage telemetry."
+      : "The requested turn ceiling is exhausted, including the initial turn. Refreshing this page does not restore the budget."
     : "";
-  const canCompose = ready && !initialFailed && !parent?.activeTurn && !ceilingReached && !pending && !sending;
+  const completeHistory = Boolean(history.data) && !history.hasNextPage;
+  const canCompose = ready && !initialFailed && !activeTurn && !ceilingReached && !pending && !sending && completeHistory;
   const bytes = new TextEncoder().encode(draft).length;
-  const canSend = ready && parent?.initialTurn?.result?.succeeded && !parent.activeTurn && !pending && !sending && !history.isError && Boolean(history.data) &&
+  const initialConfirmed = scoped ? Boolean(scopedParent?.receiptDigest && scopedParent.output) : Boolean(parent?.initialTurn?.result?.succeeded);
+  const canSend = ready && initialConfirmed && !activeTurn && !pending && !sending && !history.isError && completeHistory &&
     !ceilingReached && draft.trim().length > 0 && bytes <= 2048 && !draft.includes("\0");
 
   async function send() {
@@ -105,9 +138,13 @@ export function CellnConversation({ run, observationUnavailable = false }: { run
   }
 
   function canCancel(turn: AgentRunTurn) {
-    return ready && !history.isError && Boolean(turn.metadata.uid) &&
-      parent?.activeTurn?.uid === turn.metadata.uid && parent?.activeTurn?.name === turn.metadata.name &&
-      Boolean(turn.status?.execution?.attempted) && !turn.status?.execution?.result && !cancellationPending(turn);
+    const turnScoped = turn.status?.cellnScoped;
+    const scopedBinding = scoped && Boolean(turn.metadata.uid && scopedParent?.parentIncarnation &&
+      turn.status?.parentIncarnation === scopedParent.parentIncarnation && turnScoped?.parentIncarnation === scopedParent.parentIncarnation &&
+      turnScoped.turnId === turn.metadata.uid && turnScoped.startAttempted && turnScoped.nativePhase && !terminalNativePhases.has(turnScoped.nativePhase));
+    const legacyBinding = Boolean(turn.metadata.uid && parent?.activeTurn?.uid === turn.metadata.uid && parent?.activeTurn?.name === turn.metadata.name &&
+      turn.status?.execution?.attempted && !turn.status.execution.result);
+    return ready && !history.isError && (scopedBinding || legacyBinding) && !cancellationPending(turn);
   }
 
   async function cancelTurn(turn: AgentRunTurn) {
@@ -140,25 +177,48 @@ export function CellnConversation({ run, observationUnavailable = false }: { run
 
   const initial = parent?.initialTurn;
   return <Card data-testid="celln-conversation">
-    <CardHeader><CardTitle>Persistent Celln conversation</CardTitle></CardHeader>
+    <CardHeader><CardTitle>{scoped ? "Enduring scoped Celln conversation" : "Persistent Celln conversation"}</CardTitle></CardHeader>
     <CardContent className="space-y-4">
-      <p className="text-sm text-muted-foreground">The parent retains live context. Each turn runs in a disposable child cell. A recorded answer does not mean the parent is still available.</p>
+      <p className="text-sm text-muted-foreground">This is an enduring parent, not a one-shot cell. The parent retains live context and each follow-up runs in a disposable child cell. A recorded answer does not mean the parent is still available.</p>
       <p role="status">{ready ? "Parent initialized" : admissionPending ? "Waiting for parent admission — sending disabled" : "Parent unavailable or starting — sending disabled"}</p>
       {observationUnavailable && <p role="alert">Run status could not be refreshed. Recorded history is shown, but sending is disabled until the current run can be checked.</p>}
-      {deleting && <p role="status" data-testid="celln-delete-pending">Deletion requested. Sending is disabled while the controller reconciles teardown. Acceptance of deletion is not confirmation that the parent has stopped.</p>}
+      {deleting && <p role="status" data-testid="celln-delete-pending">{scopedParent?.cleanupConfirmed ? "The original scoped owner confirmed cleanup. Sending remains disabled." : "Deletion requested. Sending is disabled while the controller reconciles teardown. Acceptance of deletion is not confirmation that the parent has stopped."}</p>}
       {lifecycleDetail && <p role="status" data-testid="celln-parent-lifecycle-detail">{lifecycleDetail}</p>}
       <p className="text-sm text-muted-foreground" data-testid="celln-parent-turn-limit">Requested ceiling: {requestedTurns} total turns, including the initial turn. The host may enforce stricter limits; this is not a guarantee of remaining capacity.</p>
       {admissionPending && <p className="text-sm" data-testid="celln-parent-admission">{parentCondition.message}</p>}
       {initial && <div className="space-y-2 rounded border p-3"><p className="whitespace-pre-wrap">You: {initial.message}</p><p className="whitespace-pre-wrap">{initial.result ? `${initial.result.succeeded ? "Agent" : "Initial turn failed"}: ${initial.result.answer}` : initial.attempted ? "Initial turn awaiting reconciliation" : "Initial turn queued"}</p></div>}
-      {turns.map((turn) => <div key={turn.metadata.uid || turn.metadata.name} className="space-y-2 rounded border p-3">
+      {scopedParent && <>
+        <div className="space-y-2 rounded border p-3">
+          <p className="whitespace-pre-wrap">You: {taskText(run.spec.task)}</p>
+          <p className="whitespace-pre-wrap">{scopedParent.output ? `Agent: ${scopedParent.output}` : scopedParent.startAttempted ? "Initial turn submitted — awaiting correlated output and receipt" : "Initial turn preparing"}</p>
+        </div>
+        <CellnScopedExecution status={scopedParent} condition={parentCondition} mode="enduring" label="Parent native execution" compact={compactEvidence} />
+      </>}
+      {turns.map((turn) => {
+        const turnScoped = turn.status?.cellnScoped;
+        const turnCondition = currentTurnCondition(turn);
+        const scopedCommitted = Boolean(turnScoped?.nativePhase && terminalNativePhases.has(turnScoped.nativePhase) && turnCondition?.status === "True" && turnCondition.reason === "Committed");
+        const turnComplete = turnOutcomeCommitted(turn);
+        const turnText = turn.status?.execution?.result
+          ? `${turn.status.execution.result.succeeded ? "Agent" : "Turn failed"}: ${turn.status.execution.result.answer}`
+          : scopedCommitted && turnScoped?.nativePhase === "Succeeded" && turnScoped.output
+          ? `Agent: ${turnScoped.output}`
+          : scopedCommitted
+          ? `Turn ${turnScoped?.nativePhase || "completed"}${turnScoped?.output ? `: ${turnScoped.output}` : ""}`
+          : turnScoped?.startAttempted
+          ? `Native phase: ${turnScoped.nativePhase || "start attempted; observation pending"}`
+          : turn.status?.execution?.attempted ? "Submitted — awaiting committed result" : "Queued";
+        const attempted = Boolean(turn.status?.execution?.attempted || turnScoped?.startAttempted);
+        return <div key={turn.metadata.uid || turn.metadata.name} className="space-y-2 rounded border p-3">
         <p className="whitespace-pre-wrap">You: {turn.spec.message}</p>
-        <p className="whitespace-pre-wrap">{turn.status?.execution?.result ? `${turn.status.execution.result.succeeded ? "Agent" : "Turn failed"}: ${turn.status.execution.result.answer}` : turn.status?.execution?.attempted ? "Submitted — awaiting committed result" : "Queued"}</p>
-        {!turn.status?.execution?.result && cancellationPending(turn) && <p role="status" data-testid="celln-turn-cancel-pending">Cancellation requested for this turn only. Waiting for the original parent's committed result; child teardown is not confirmed.</p>}
-        {!turn.status?.execution?.result && turn.status?.execution?.attempted && <Button variant="outline" data-testid="celln-turn-cancel" disabled={!canCancel(turn)} onClick={() => cancelTurn(turn)}>Cancel turn</Button>}
-        {!turn.status?.execution?.result && turn.status?.conditions?.some((condition) => condition.type === "CellnTurnComplete" && condition.status === "False" && condition.reason === "ReconciliationRequired" && turn.metadata.generation !== undefined && condition.observedGeneration === turn.metadata.generation) && <p role="status" data-testid="celln-turn-reconciliation">Turn admission or outcome is unconfirmed. The original request is retained; do not resubmit it. Ask the operator to reconcile this turn.</p>}
-      </div>)}
+        <p className="whitespace-pre-wrap">{turnText}</p>
+        {!turnComplete && cancellationPending(turn) && <p role="status" data-testid="celln-turn-cancel-pending">Cancellation requested for this turn only. Waiting for the original parent's committed result; child teardown is not confirmed.</p>}
+        {!turnComplete && attempted && <Button variant="outline" data-testid="celln-turn-cancel" disabled={!canCancel(turn)} onClick={() => cancelTurn(turn)}>Cancel turn</Button>}
+        {turnCondition?.status !== "True" && turnCondition?.reason === "ReconciliationRequired" && <p role="status" data-testid="celln-turn-reconciliation">Turn admission or outcome is unconfirmed. The original request is retained; do not resubmit it. Ask the operator to reconcile this turn.</p>}
+        {turnScoped && <CellnScopedExecution status={turnScoped} condition={turnCondition} mode="turn" label="Turn native execution" compact={compactEvidence} />}
+      </div>})}
       {history.isError && <p role="alert">Turn history unavailable. Sending is disabled until history can be checked.</p>}
-      {history.hasNextPage && <Button variant="outline" disabled={history.isFetchingNextPage} onClick={() => history.fetchNextPage()}>Load more turns</Button>}
+      {history.hasNextPage && <><p className="text-sm text-muted-foreground">Load the complete turn history before sending so this page can verify no prior turn is unresolved. This does not claim host budget usage.</p><Button variant="outline" disabled={history.isFetchingNextPage} onClick={() => history.fetchNextPage()}>Load more turns</Button></>}
       {pending && <p role="status">{pendingTurn ? "Waiting for the saved turn to complete." : `Checking unconfirmed request ${pending.requestId}. It will not be resubmitted automatically.`}</p>}
       {error && <p role="alert">{error}</p>}
       <label className="block space-y-2">Next message
@@ -168,8 +228,8 @@ export function CellnConversation({ run, observationUnavailable = false }: { run
       <p className="text-sm text-muted-foreground">Retained conversation context is also bounded by the selected harness. A message below this input limit may still exceed its remaining context capacity.</p>
       <Button data-testid="celln-turn-send" disabled={!canSend} onClick={send}>Send turn</Button>
       <div className="border-t pt-4">
-        <p className="text-sm text-muted-foreground">Deletion stops this parent and removes the Kubernetes run/turn history after cleanup. It is not pause/resume; privately retained host audit may remain.</p>
-        <Button variant="destructive" data-testid="celln-delete-run" disabled={!uid || deleting || sending} onClick={deleteRun}>Delete run and stop parent</Button>
+        <p className="text-sm text-muted-foreground">{retainEvidence ? "Stopping retains this review record for inspection. Remove it separately only after confirmed cleanup. It cannot resume." : "Deletion stops this parent and removes the Kubernetes run/turn history after cleanup. It is not pause/resume; privately retained host audit may remain."}</p>
+        <Button variant="destructive" data-testid="celln-delete-run" disabled={!uid || deleting || sending} onClick={deleteRun}>{retainEvidence ? "Stop parent and retain evidence" : "Delete run and stop parent"}</Button>
       </div>
     </CardContent>
   </Card>;

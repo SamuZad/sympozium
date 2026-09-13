@@ -6,6 +6,7 @@ import { DashboardPage } from "@/pages/dashboard";
 import { AgentsPage } from "@/pages/agents";
 import { AgentDetailPage } from "@/pages/agent-detail";
 import { RunsPage } from "@/pages/runs";
+import { CellnReviewPage } from "@/pages/celln-review";
 import { RunDetailPage } from "@/pages/run-detail";
 import { PoliciesPage } from "@/pages/policies";
 import { SkillsPage } from "@/pages/skills";
@@ -43,6 +44,8 @@ export default function App() {
       </Routes>
     );
   }
+
+  if (import.meta.env.VITE_CELLN_REVIEW === "true") return <CellnReviewPage />;
 
   return (
     <Routes>

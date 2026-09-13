@@ -157,7 +157,10 @@ journey or proof of least-privilege Kubernetes authorization.
 `make build-model-gateway` builds a TLS-only server. Pass `--config` with an
 operator-controlled JSON file containing `clusterId`, `issuer`, `listen`,
 `tlsCertificateFile`, `tlsKeyFile`, `verificationKeysFile`,
-`registrationTokenFile`, `databaseUrlFile`, and optional `privateOrigins`.
+`registrationTokenFile`, `databaseUrlFile`, and optional `privateOrigins`,
+`providerCaFile`, and `readinessNamespaces`. With explicit readiness namespaces,
+the live RBAC probe checks named Namespace identity plus namespaced `get` on
+ModelConnections and Secrets. Omission preserves the cluster-wide check.
 No bearer value is accepted on the command line. Registration/database files
 must be owner-only regular files. The keyset is public Ed25519 JWKS only;
 private keys and remote key references refuse. SIGHUP atomically reloads a valid

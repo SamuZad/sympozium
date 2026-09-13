@@ -25,6 +25,7 @@ type AgentRunTurnSpec struct {
 // AgentRunTurnStatus has the same durable attempt/result rules as the initial
 // turn. The enclosing AgentRun retains lifetime and tool/model authority.
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.execution) || has(self.execution)",message="turn execution record cannot be removed"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.cellnScoped) || has(self.cellnScoped)",message="scoped turn recovery record cannot be removed"
 type AgentRunTurnStatus struct {
 	// CancelAttempted is persisted before sending cancellation. An uncertain send
 	// is reconciled from original turn evidence, never automatically repeated.
@@ -38,6 +39,10 @@ type AgentRunTurnStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 	// +optional
 	Execution *CellnParentTurnStatus `json:"execution,omitempty"`
+	// CellnScoped is the protected per-turn preparation, decision and owner.
+	// It is independent of the root operation while retaining root authority.
+	// +optional
+	CellnScoped *CellnScopedStatus `json:"cellnScoped,omitempty"`
 	// ParentIncarnation is fixed before dispatch, not selected by the message.
 	// +kubebuilder:validation:MaxLength=71
 	// +kubebuilder:validation:Pattern=`^blake3:[0-9a-f]{64}$`
@@ -50,10 +55,11 @@ type AgentRunTurnStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=arturn
-// +kubebuilder:validation:XValidation:rule="!has(self.spec.cancelRequested) || !self.spec.cancelRequested || (has(self.status) && has(self.status.execution) && has(self.status.execution.attempted) && self.status.execution.attempted)",message="cancellation requires a recorded turn dispatch attempt"
+// +kubebuilder:validation:XValidation:rule="!has(self.spec.cancelRequested) || !self.spec.cancelRequested || (has(self.status) && ((has(self.status.execution) && has(self.status.execution.attempted) && self.status.execution.attempted) || (has(self.status.cellnScoped) && has(self.status.cellnScoped.startAttempted) && self.status.cellnScoped.startAttempted)))",message="cancellation requires a recorded turn dispatch attempt"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.cancelAttempted) || !oldSelf.status.cancelAttempted || (has(self.status) && has(self.status.cancelAttempted) && self.status.cancelAttempted)",message="cancellation attempt cannot be cleared"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.execution) || (has(self.status) && has(self.status.execution))",message="saved turn execution cannot be removed"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.parentIncarnation) || (has(self.status) && has(self.status.parentIncarnation))",message="saved turn parent cannot be removed"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.cellnScoped) || (has(self.status) && has(self.status.cellnScoped))",message="saved scoped turn cannot be removed"
 type AgentRunTurn struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
