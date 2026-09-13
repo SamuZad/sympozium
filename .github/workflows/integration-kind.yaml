@@ -136,18 +136,21 @@ jobs:
           EOF
           kubectl rollout status deployment/ollama --timeout=300s
           kubectl exec deployment/ollama -- ollama pull qwen2.5:1.5b
+          kubectl exec deployment/ollama -- ollama pull llama3.2:1b
 
       - name: Run persistent Pi and Hermes real-model smoke tests
         env:
           TEST_PROVIDER: openai
-          TEST_MODEL: qwen2.5:1.5b
           TEST_BASE_URL: http://ollama.default.svc.cluster.local:8080/v1
           TEST_API_KEY: ollama
         run: |
           set -euo pipefail
-          PERSISTENT_HARNESS_RUNTIME=pi-session-v0-84-4 \
+          TEST_MODEL=qwen2.5:1.5b PERSISTENT_HARNESS_RUNTIME=pi-session-v0-84-4 \
             bash ./test/integration/test-persistent-harness-session.sh
-          PERSISTENT_HARNESS_RUNTIME=hermes-session-v0-20-6 \
+          # Hermes Agent refuses models advertising under 64K context and
+          # qwen2.5:1.5b advertises 32K (issue #471). llama3.2:1b advertises
+          # 128K at ~1.3GB, inside the 3Gi ollama limit.
+          TEST_MODEL=llama3.2:1b PERSISTENT_HARNESS_RUNTIME=hermes-session-v0-20-6 \
             bash ./test/integration/test-persistent-harness-session.sh
 
       - name: Dump cluster state on failure
