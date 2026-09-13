@@ -12,6 +12,7 @@ import (
 	"github.com/sympozium-ai/sympozium/internal/cellnparent"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -77,21 +78,42 @@ func (s *Server) createRunTurn(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "turn storage unavailable", 503)
 		return
 	}
-	// This rejects a known occupied slot, not simultaneous admission races.
+	// This rejects a known occupied legacy slot, not simultaneous admission races.
 	// The controller's parent-status CAS remains the authoritative serializer.
 	// Original-request observation above stays available while another turn runs.
 	if run.Status.CellnParent != nil && run.Status.CellnParent.ActiveTurn != nil {
 		http.Error(w, "parent already owns an active turn; reconcile it before new work", http.StatusConflict)
 		return
 	}
-	if run.Status.Phase != api.AgentRunPhaseRunning || run.Status.CellnParent == nil || !run.Status.CellnParent.CreateAttempted || run.Status.CellnParent.InitialTurn == nil || run.Status.CellnParent.InitialTurn.Result == nil || !run.Status.CellnParent.InitialTurn.Result.Succeeded || run.Status.CellnParent.AcceptedTurns >= run.Spec.Enduring.MaxTurns-1 {
+	legacyReady := run.Status.CellnParent != nil && run.Status.CellnParent.CreateAttempted && run.Status.CellnParent.InitialTurn != nil && run.Status.CellnParent.InitialTurn.Result != nil && run.Status.CellnParent.InitialTurn.Result.Succeeded && run.Status.CellnParent.AcceptedTurns < run.Spec.Enduring.MaxTurns-1
+	scopedCondition := meta.FindStatusCondition(run.Status.Conditions, "CellnScopedExecution")
+	scopedReady := run.Status.CellnScoped != nil && run.Status.CellnScoped.StartAttempted && run.Status.CellnScoped.ParentIncarnation != "" && run.Status.CellnScoped.NativePhase == "Running" && scopedCondition != nil && scopedCondition.Status == metav1.ConditionTrue && scopedCondition.Reason == "EnduringParentReady" && scopedCondition.ObservedGeneration == run.Generation
+	if run.Status.Phase != api.AgentRunPhaseRunning || (!legacyReady && !scopedReady) {
 		http.Error(w, "parent is not ready for subsequent turns", 409)
 		return
 	}
-	ready := meta.FindStatusCondition(run.Status.Conditions, "CellnParentReady")
-	if ready == nil || ready.Status != "True" || run.Generation < 1 || ready.ObservedGeneration != run.Generation || cellnparent.ValidateAdmission(run, run.Status.CellnParent.Binding) != nil {
-		http.Error(w, "parent readiness does not match current run intent", http.StatusConflict)
-		return
+	if legacyReady {
+		ready := meta.FindStatusCondition(run.Status.Conditions, "CellnParentReady")
+		if ready == nil || ready.Status != "True" || run.Generation < 1 || ready.ObservedGeneration != run.Generation || cellnparent.ValidateAdmission(run, run.Status.CellnParent.Binding) != nil {
+			http.Error(w, "parent readiness does not match current run intent", http.StatusConflict)
+			return
+		}
+	} else {
+		var prior api.AgentRunTurnList
+		if err := s.client.List(r.Context(), &prior, client.InNamespace(run.Namespace), client.Limit(1024)); err != nil {
+			http.Error(w, "turn history unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		count := int32(0)
+		for i := range prior.Items {
+			if prior.Items[i].Spec.RunUID == string(run.UID) && prior.Items[i].Spec.RunName == run.Name {
+				count++
+			}
+		}
+		if count >= run.Spec.Enduring.MaxTurns-1 {
+			http.Error(w, "parent turn allowance is exhausted", http.StatusConflict)
+			return
+		}
 	}
 	if err := s.client.Create(r.Context(), turn); err != nil {
 		http.Error(w, "turn creation uncertain; query the original request", 409)
@@ -132,22 +154,27 @@ func (s *Server) cancelRunTurn(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "stale turn identity", http.StatusConflict)
 		return
 	}
-	if _, err := cellnparent.BindTurn(run, &turn); err != nil {
-		http.Error(w, "turn does not bind the original parent", http.StatusConflict)
-		return
+	scoped := run.Status.CellnScoped != nil && turn.Status.CellnScoped != nil && turn.Status.ParentIncarnation == run.Status.CellnScoped.ParentIncarnation && turn.Status.CellnScoped.ParentIncarnation == run.Status.CellnScoped.ParentIncarnation && turn.Status.CellnScoped.TurnID == string(turn.UID)
+	if !scoped {
+		if _, err := cellnparent.BindTurn(run, &turn); err != nil {
+			http.Error(w, "turn does not bind the original parent", http.StatusConflict)
+			return
+		}
 	}
-	if turn.Status.Execution == nil || !turn.Status.Execution.Attempted {
+	if (turn.Status.Execution == nil || !turn.Status.Execution.Attempted) && (turn.Status.CellnScoped == nil || !turn.Status.CellnScoped.StartAttempted) {
 		http.Error(w, "turn has no recorded dispatch attempt", http.StatusConflict)
 		return
 	}
-	if turn.Spec.CancelRequested || turn.Status.Execution.Result != nil {
+	if turn.Spec.CancelRequested || (turn.Status.Execution != nil && turn.Status.Execution.Result != nil) || (turn.Status.CellnScoped != nil && turn.Status.CellnScoped.CleanupConfirmed) {
 		writeJSON(w, turn)
 		return
 	}
-	active := run.Status.CellnParent.ActiveTurn
-	if active == nil || active.Name != turn.Name || active.UID != string(turn.UID) {
-		http.Error(w, "turn no longer owns the parent slot", http.StatusConflict)
-		return
+	if !scoped {
+		active := run.Status.CellnParent.ActiveTurn
+		if active == nil || active.Name != turn.Name || active.UID != string(turn.UID) {
+			http.Error(w, "turn no longer owns the parent slot", http.StatusConflict)
+			return
+		}
 	}
 	turn.Spec.CancelRequested = true
 	// ResourceVersion guards a concurrent replacement, completion or request.

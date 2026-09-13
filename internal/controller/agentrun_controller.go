@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"github.com/sympozium-ai/sympozium/internal/modelconnection"
 	"io"
 	"log/slog"
 	"os"
@@ -43,9 +42,11 @@ import (
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	sympoziumv1alpha1 "github.com/sympozium-ai/sympozium/api/v1alpha1"
+	"github.com/sympozium-ai/sympozium/internal/cellnscoped"
 	"github.com/sympozium-ai/sympozium/internal/controller/taskmodes"
 	"github.com/sympozium-ai/sympozium/internal/eventbus"
 	"github.com/sympozium-ai/sympozium/internal/ipc"
+	"github.com/sympozium-ai/sympozium/internal/modelconnection"
 	"github.com/sympozium-ai/sympozium/internal/orchestrator"
 	"github.com/sympozium-ai/sympozium/internal/pricing"
 	"github.com/sympozium-ai/sympozium/internal/sessionkey"
@@ -156,6 +157,11 @@ type AgentRunReconciler struct {
 	// CatalogueDispatcher is explicit operator wiring; nil refuses catalogue
 	// issuance rather than falling through to legacy forge or OCI execution.
 	CatalogueDispatcher CatalogueDispatcher
+	// ScopedDispatcher is the explicit operator-configured shared-catalogue
+	// one-shot/enduring path. Nil is disabled and never falls back to legacy.
+	ScopedDispatcher *cellnscoped.Dispatcher
+	// ScopedOnly ignores non-catalogue runs before finalizers or legacy side effects.
+	ScopedOnly bool
 	// ParentConfigPath explicitly enables experimental enduring-parent startup.
 	// Empty refuses new enduring runs; existing cleanup remains fail-closed.
 	ParentConfigPath string
@@ -294,6 +300,15 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if r.ParentOnly && !parentOnlyRun(agentRun) {
 		return ctrl.Result{}, nil
 	}
+	if r.ScopedOnly {
+		selected, err := r.sharedCatalogueSelected(ctx, agentRun)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if !selected {
+			return ctrl.Result{}, nil
+		}
+	}
 
 	// If the AgentRun carries a traceparent annotation (set by channel router),
 	// use it as parent context so this span joins the original trace.
@@ -345,6 +360,29 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "add finalizer failed")
 			return ctrl.Result{}, err
+		}
+	}
+
+	// Shared-catalogue one-shot selection is decided before model connection
+	// normalization and every legacy/OCI prerequisite. Once a scoped identity is
+	// present it remains on this path even if mutable intent is later edited.
+	sharedScoped, selectionErr := r.sharedCatalogueSelected(ctx, agentRun)
+	if selectionErr != nil {
+		return ctrl.Result{}, selectionErr
+	}
+	if sharedScoped {
+		if !scopedCatalogueSelected(agentRun) && !isTerminal {
+			return ctrl.Result{}, r.failRun(ctx, agentRun, "Scoped Celln run selection or lifecycle changed; create a new run")
+		}
+		switch agentRun.Status.Phase {
+		case "", sympoziumv1alpha1.AgentRunPhasePending:
+			return r.reconcilePendingScoped(ctx, log, agentRun)
+		case sympoziumv1alpha1.AgentRunPhaseRunning:
+			return r.reconcileRunningScoped(ctx, log, agentRun)
+		case sympoziumv1alpha1.AgentRunPhaseSucceeded, sympoziumv1alpha1.AgentRunPhaseFailed, sympoziumv1alpha1.AgentRunPhaseSkipped:
+			return r.reconcileCompleted(ctx, log, agentRun)
+		default:
+			return ctrl.Result{}, r.failRun(ctx, agentRun, "Scoped Celln run entered an unsupported controller phase")
 		}
 	}
 
@@ -1297,6 +1335,16 @@ func (r *AgentRunReconciler) reconcileCompleted(ctx context.Context, log logr.Lo
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
 	}
+	if agentRun.Status.CellnScoped != nil && controllerutil.ContainsFinalizer(agentRun, agentRunFinalizer) {
+		done, err := r.cleanupScoped(ctx, agentRun)
+		if err != nil {
+			_ = r.scopedProgress(ctx, agentRun, metav1.ConditionUnknown, "CleanupUnconfirmed", scopedOutcomeUnconfirmed)
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		}
+		if !done {
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		}
+	}
 	if agentRun.Status.CellnActionID != "" && controllerutil.ContainsFinalizer(agentRun, agentRunFinalizer) {
 		done, err := r.cancelCelln(ctx, agentRun)
 		if err != nil {
@@ -2085,6 +2133,17 @@ func (r *AgentRunReconciler) reconcileDelete(ctx context.Context, log logr.Logge
 	if err := r.stopCellnParent(ctx, agentRun); err != nil {
 		log.Error(err, "Celln parent deletion cleanup pending")
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+	if agentRun.Status.CellnScoped != nil {
+		done, err := r.cleanupScoped(ctx, agentRun)
+		if err != nil {
+			log.Error(err, "Scoped Celln deletion cleanup uncertain")
+			_ = r.scopedProgress(ctx, agentRun, metav1.ConditionUnknown, "CleanupUnconfirmed", scopedOutcomeUnconfirmed)
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		}
+		if !done {
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		}
 	}
 	if agentRun.Status.CellnActionID != "" {
 		done, err := r.cancelCelln(ctx, agentRun)
@@ -6446,7 +6505,7 @@ func (r *AgentRunReconciler) cleanupWorkspacePVC(ctx context.Context, log logr.L
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *AgentRunReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	if r.ParentOnly {
+	if r.ParentOnly || r.ScopedOnly {
 		return ctrl.NewControllerManagedBy(mgr).For(&sympoziumv1alpha1.AgentRun{}).Complete(r)
 	}
 	return ctrl.NewControllerManagedBy(mgr).

@@ -3,6 +3,7 @@ package modelgateway
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"net"
 	"net/http"
@@ -50,7 +51,7 @@ func (d restrictedDialer) DialContext(ctx context.Context, network, address stri
 	return d.dial(ctx, network, net.JoinHostPort(ips[0].String(), port))
 }
 
-func clientForEndpoint(endpoint string, allowPrivate bool, maxDuration time.Duration) (*http.Client, error) {
+func clientForEndpoint(endpoint string, allowPrivate bool, maxDuration time.Duration, roots *x509.CertPool) (*http.Client, error) {
 	u, err := url.Parse(endpoint)
 	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Hostname() == "" {
 		return nil, fail(ReasonDestination, 403, err)
@@ -63,7 +64,7 @@ func clientForEndpoint(endpoint string, allowPrivate bool, maxDuration time.Dura
 	transport := &http.Transport{
 		Proxy:                 nil,
 		DialContext:           dialer.DialContext,
-		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12, ServerName: u.Hostname()},
+		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12, ServerName: u.Hostname(), RootCAs: roots},
 		DisableKeepAlives:     true,
 		ForceAttemptHTTP2:     true,
 		ResponseHeaderTimeout: maxDuration,
