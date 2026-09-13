@@ -14,6 +14,7 @@ import (
 	api "github.com/sympozium-ai/sympozium/api/v1alpha1"
 	"github.com/sympozium-ai/sympozium/internal/cellnauthority"
 	"github.com/sympozium-ai/sympozium/internal/cellnscoped"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/retry"
@@ -56,12 +57,18 @@ func (r *AgentRunReconciler) sharedCatalogueSelected(ctx context.Context, run *a
 	if reader == nil {
 		reader = r.Client
 	}
-	var agent api.Agent
-	if err := reader.Get(ctx, client.ObjectKey{Namespace: run.Namespace, Name: run.Spec.AgentRef}, &agent); err != nil {
-		return false, err
-	}
 	runtimeName := selection.RuntimeRef
 	if runtimeName == "" {
+		var agent api.Agent
+		if err := reader.Get(ctx, client.ObjectKey{Namespace: run.Namespace, Name: run.Spec.AgentRef}, &agent); err != nil {
+			if apierrors.IsNotFound(err) {
+				// An unissued legacy selection without an agent has no shared
+				// wrapper to inspect. Its existing issuance gate still forbids
+				// dispatch; explicit shared intent was handled above.
+				return false, nil
+			}
+			return false, err
+		}
 		runtimeName = agent.Spec.RuntimeRef
 	}
 	if runtimeName == "" {
@@ -92,6 +99,15 @@ func (r *AgentRunReconciler) reconcilePendingScoped(ctx context.Context, log log
 	}
 	prepared, err := r.ScopedDispatcher.Prepare(ctx, client.ObjectKeyFromObject(run))
 	if err != nil {
+		if reason := cellnauthority.PlatformReason(err); reason != "" && run.Status.CellnScoped == nil {
+			// No external enrollment/start can precede the persisted scoped
+			// binding. A definitive policy refusal here is not lost VM context.
+			message := reason + ": scoped authority refused before receiver enrollment; no native execution started"
+			if err := r.scopedProgress(ctx, run, metav1.ConditionFalse, "AdmissionRefused", message); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{}, r.failRun(ctx, run, message)
+		}
 		return r.scopedUncertain(ctx, run, "PreparationUnconfirmed", err)
 	}
 	final, err := r.ScopedDispatcher.EnsureFinal(ctx, prepared)
@@ -445,6 +461,9 @@ func (r *AgentRunReconciler) cleanupScoped(ctx context.Context, run *api.AgentRu
 		s.NativePhase = status.Phase
 		return nil
 	}); err != nil {
+		return false, err
+	}
+	if err := r.scopedProgress(ctx, run, metav1.ConditionTrue, "CleanupConfirmed", "The original native owner confirmed cleanup and any model allowance was fenced; no replacement authority was created"); err != nil {
 		return false, err
 	}
 	return r.scopedChildrenFinalized(ctx, run)

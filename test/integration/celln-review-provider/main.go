@@ -82,7 +82,12 @@ func main() {
 			return
 		}
 		var request struct {
-			Model    string `json:"model"`
+			Model string `json:"model"`
+			Tools []struct {
+				Function struct {
+					Name string `json:"name"`
+				} `json:"function"`
+			} `json:"tools"`
 			Messages []struct {
 				Role    string          `json:"role"`
 				Content json.RawMessage `json:"content"`
@@ -109,14 +114,25 @@ func main() {
 		var message any
 		finish := "stop"
 		if result != "" {
-			message = map[string]any{"role": "assistant", "content": result}
+			var toolResult struct {
+				Text string `json:"text"`
+			}
+			if json.Unmarshal([]byte(result), &toolResult) != nil || toolResult.Text == "" || len(toolResult.Text) > 2048 {
+				http.Error(w, "bounded uppercase result required", 400)
+				return
+			}
+			message = map[string]any{"role": "assistant", "content": toolResult.Text}
 		} else {
+			if len(request.Tools) != 1 || request.Tools[0].Function.Name == "" || len(request.Tools[0].Function.Name) > 64 {
+				http.Error(w, "one declared uppercase tool required", 400)
+				return
+			}
 			if user == "" || len(user) > 2048 {
 				http.Error(w, "bounded user text required", 400)
 				return
 			}
 			args, _ := json.Marshal(map[string]string{"text": user})
-			message = map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{map[string]any{"id": "uppercase-review-1", "type": "function", "function": map[string]any{"name": "uppercase", "arguments": string(args)}}}}
+			message = map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{map[string]any{"id": "uppercase-review-1", "type": "function", "function": map[string]any{"name": request.Tools[0].Function.Name, "arguments": string(args)}}}}
 			finish = "tool_calls"
 		}
 		w.Header().Set("Content-Type", "application/json")

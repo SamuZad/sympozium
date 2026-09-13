@@ -14,6 +14,28 @@ signed `authority/` tree into a new private native root. It never merges into an
 existing Celln root. Generated public manifests contain no bearer, database
 password, TLS private key, CA signing key, or issuer private key.
 
+## Installed framework walkthrough
+
+Review 495 is installed. The deployed controller/native/gateway/PostgreSQL path
+has executed `CELLN`, continued an enduring parent with `VIOLET`, refused a third
+turn without dispatch, and confirmed parent/descendant cleanup and ledger closure.
+This is the **CLI walkthrough**; the new scoped UI code is not deployed here.
+
+On framework, select the isolated review context explicitly:
+
+```sh
+export KUBECONFIG=/tmp/celln-framework-495.BgIn4ega/kubeconfig
+export CELLN_REVIEW_KUBE_CONTEXT=kubernetes-admin@kubernetes
+kubectl() { command kubectl --kubeconfig "$KUBECONFIG" --context "$CELLN_REVIEW_KUBE_CONTEXT" "$@"; }
+cd /tmp/celln-framework-review-495-manifests
+```
+
+The `runs/` manifests below are ready for fresh manual runs. Verification used
+separate `verify-*` names. Successful one-shot examples remain available as
+`celln-review-a-495/verify-direct-v2` and `verify-model-v3`. The verified enduring
+parent was stopped, not left consuming authority. Operator evidence is in
+`/tmp/celln-framework-495.BgIn4ega/installed-enduring-verification.log`.
+
 ## Generate for review 495
 
 First regenerate the boot-compatible v2 package at the already allocated
@@ -64,8 +86,13 @@ kubectl -n celln-review-a-495 rollout status deploy/review-provider-495 --timeou
 kubectl -n celln-review-b-495 rollout status deploy/review-provider-495 --timeout=120s
 ```
 
-The native pod alone is privileged and pinned to node `framework`; it mounts
-only `/dev/kvm`, the new review root, public trust, and its own receiver tokens.
+The native pod alone is privileged and pinned to node `framework`. It mounts
+`/dev/kvm`, the new review root, public trust, its own receiver tokens, and the
+exact running host kernel/module directory read-only for native node eligibility.
+A bounded init container copies only the named receiver tokens and public inputs
+into regular files; native no-symlink checks are not disabled for Kubernetes
+projected volumes. PostgreSQL uses a dedicated 2Gi `local-path` PVC, not an
+`emptyDir`; never delete that claim while authority or cleanup is unresolved.
 Tenant provider pods are non-root, tokenless, read-only, and selected by a
 default-deny ingress/egress policy that admits only the review gateway. Whether
 the installed CNI enforces this correctly is outside this walkthrough.
@@ -99,7 +126,9 @@ kubectl -n celln-review-b-495 get agentrun enduring-uppercase -w
 kubectl -n celln-review-b-495 get agentrun enduring-uppercase -o yaml
 ```
 
-The parent lease is ten minutes. Policy and run ceilings are two turns, four
+The parent lease and new operator parent-template ceiling are ten minutes;
+the separate child deadline remains 120 seconds. Existing incarnations are never
+extended by changing the template. Policy and run ceilings are two turns, four
 total model requests, 2048 output tokens, and a 120-second turn deadline. The
 gateway accepts at most 512 reserved output tokens per provider request; the
 two-turn split gives each turn two requests/1024 tokens. The deterministic
@@ -117,9 +146,11 @@ kubectl -n celln-review-b-495 get agentrunturn violet-turn -o yaml
 ```
 
 To prove the original allowance refuses a third turn, use the supplied second
-concrete template with the same parent UID. It must become refused/failed
-without a fifth provider request; do not alter the parent or policy to make it
-pass:
+concrete template with the same parent UID. Its `CellnTurnComplete` condition must
+report `BudgetExhausted`, with `cellnScoped.cleanupConfirmed: true` and no native
+start attempt. The native `Cancelled` phase represents the confirmed never-started
+fence, not a cancelled running VM. There must be no fifth provider request; do not
+alter the parent or policy to make it pass:
 
 ```sh
 sed "s/@@RUN_UID@@/$run_uid/g" runs/third-turn-denied.yaml | kubectl create -f -
@@ -132,13 +163,27 @@ Deleting the run is the supported parent stop operation. Keep native,
 controller, gateway, and PostgreSQL running until authenticated native cleanup
 has completed and the controller itself removes the finalizer:
 
+Start a status watch **before** deletion if you want to observe the cleanup
+status transition; the controller can confirm cleanup and remove its finalizer
+within one reconciliation. Object absence alone is not teardown evidence.
+
 ```sh
+# In another terminal, with the same explicit kubeconfig/context:
+kubectl -n celln-review-b-495 get agentrun enduring-uppercase -w -o custom-columns='NAME:.metadata.name,NATIVE:.status.cellnScoped.nativePhase,CLEANUP:.status.cellnScoped.cleanupConfirmed'
+
 kubectl -n celln-review-b-495 delete agentrun enduring-uppercase --wait=false
-kubectl -n celln-review-b-495 get agentrun enduring-uppercase -w
 kubectl -n celln-review-b-495 get agentrunturns
 kubectl -n celln-review-system-495 get configmaps -l sympozium.ai/celln-prepared=true
 kubectl -n celln-review-system-495 get configmaps -l sympozium.ai/celln-final=true
 ```
+
+For an independent operator check, retain the original `receiverId` and `owner`
+before deletion and inspect only those fields plus `cleanupConfirmed` in the exact
+`native-root-495/scoped/status/<receiverId without sha256:>` record using `sudo jq`.
+The PostgreSQL `celln_model_budgets` row for the original run UID must also be
+`closed`, with its original request/token ceilings and counters unchanged. The
+installed proof observed four requests, 2048 reserved output tokens and 32 actual
+fixture output tokens; the third-turn fence charged nothing.
 
 Never patch/remove an AgentRun or AgentRunTurn finalizer. If deletion remains,
 retain the new host root, protected ConfigMaps, controller issuer material,

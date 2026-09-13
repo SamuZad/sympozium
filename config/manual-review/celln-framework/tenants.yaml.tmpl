@@ -16,7 +16,7 @@ metadata:
   labels: {sympozium.ai/celln-review: "@@REVIEW@@"}
 spec:
   runtimeRef: review-runtime
-  agents: {default: {}}
+  agents: {default: {model: review-uppercase}}
 ---
 apiVersion: sympozium.ai/v1alpha1
 kind: ModelConnection
@@ -50,7 +50,7 @@ metadata:
   labels: {sympozium.ai/celln-review: "@@REVIEW@@"}
 spec:
   runtimeRef: review-runtime
-  agents: {default: {}}
+  agents: {default: {model: review-uppercase}}
 ---
 apiVersion: sympozium.ai/v1alpha1
 kind: ModelConnection
@@ -85,4 +85,4 @@ metadata:
   labels: {sympozium.ai/celln-review: "@@REVIEW@@"}
 spec:
   runtimeRef: review-runtime
-  agents: {default: {}}
+  agents: {default: {model: review-uppercase}}

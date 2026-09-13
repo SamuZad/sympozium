@@ -13,9 +13,24 @@ import (
 	"strings"
 
 	"github.com/zeebo/blake3"
+	"sigs.k8s.io/yaml"
 )
 
 func main() {
+	if len(os.Args) == 3 && os.Args[1] == "--yaml-to-json" {
+		raw, err := os.ReadFile(os.Args[2])
+		if err != nil || len(raw) > 4<<20 {
+			fmt.Fprintln(os.Stderr, "invalid public YAML input")
+			os.Exit(1)
+		}
+		encoded, err := yaml.YAMLToJSONStrict(raw)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "invalid public YAML input")
+			os.Exit(1)
+		}
+		fmt.Println(string(encoded))
+		return
+	}
 	if len(os.Args) != 2 {
 		fmt.Fprintln(os.Stderr, "usage: celln-framework-package-verify ABSOLUTE_PACKAGE")
 		os.Exit(2)

@@ -42,10 +42,12 @@ digest_re='^[A-Za-z0-9._/:+-]+@sha256:[0-9a-f]{64}$'
 for path in "$package" "$private_state" "$output"; do
   [[ $path =~ ^/[A-Za-z0-9._/-]+$ ]] || { echo "paths must use only slash, letters, digits, dot, underscore, and hyphen" >&2; exit 2; }
 done
-for tool in jq kubectl openssl base64 install cp awk sed; do
+for tool in go jq kubectl openssl base64 install cp awk sed; do
   command -v "$tool" >/dev/null || { echo "required tool missing: $tool" >&2; exit 2; }
 done
 
+kernel_release=$(uname -r)
+[[ $kernel_release =~ ^[A-Za-z0-9._+-]+$ && -f /boot/vmlinuz-$kernel_release && -d /lib/modules/$kernel_release ]] || { echo "framework native eligibility requires the exact running kernel and modules" >&2; exit 2; }
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 native_root="$private_state/native-root-$review"
 private="$private_state/deployment-private-$review"
@@ -66,12 +68,13 @@ mkdir -m 0700 "$output" "$output/runs" "$private" "$private/ca-signing" "$privat
 cp -a "$package/authority/." "$native_root/"
 chmod 0700 "$native_root"
 
-# Parse each public package resource using kubectl's local YAML decoder only.
+# Parse public package resources entirely locally; kubectl dry-run can still
+# perform API discovery and must not choose an ambient Kubernetes context here.
 split_dir="$private/package-resources"
 mkdir -m 0700 "$split_dir"
 awk -v d="$split_dir" 'BEGIN{n=0} /^---[[:space:]]*$/{n++;next} {print > (d "/" n ".yaml")}' "$package/resources.yaml"
 for f in "$split_dir"/*.yaml; do
-  kubectl create --dry-run=client --validate=false -f "$f" -o json >"$f.json"
+  go run "$repo/hack/celln-framework-package-verify" --yaml-to-json "$f" >"$f.json"
 done
 one_json=$(jq -c 'select(.kind=="CellnRuntimeProfile" and .metadata.name=="celln-json-one-shot")' "$split_dir"/*.json)
 end_json=$(jq -c 'select(.kind=="CellnRuntimeProfile" and .metadata.name=="celln-json-enduring")' "$split_dir"/*.json)
@@ -85,7 +88,7 @@ tool_name="uppercase-review-$review"
 
 # Derive exactly the same bounded wrapper as the live helper, using only the
 # package's actual parent artifact fields. No descriptor is synthesized.
-parent_template=$(jq -c '{apiVersion:"celln.scoped-parent-template/v1",request:{apiVersion:"celln.dev/v1alpha1",id:"$parent",workload:{id:"$parent",caller:"$principal"},mote:.artifact.mote,tools:[{alias:.artifact.entryPoint,hash:.artifact.executable.hash,closure:.artifact.closure}],invocation:{alias:.artifact.entryPoint,args:[]},capabilities:{workspace:.limits.workspace,egress:.limits.egress,timeoutMs:120000,memoryBytes:.limits.memoryBytes,outputBytes:65536},execution:{lane:.artifact.lane,requireHardwareIsolation:true}},reservedMemoryBytes:(.limits.memoryBytes*4+67108864)}' "$package/parent-request.json")
+parent_template=$(jq -c '{apiVersion:"celln.scoped-parent-template/v1",request:{apiVersion:"celln.dev/v1alpha1",id:"$parent",workload:{id:"$parent",caller:"$principal"},mote:.artifact.mote,tools:[{alias:.artifact.entryPoint,hash:.artifact.executable.hash,closure:.artifact.closure}],invocation:{alias:.artifact.entryPoint,args:[]},capabilities:{workspace:.limits.workspace,egress:.limits.egress,timeoutMs:600000,memoryBytes:.limits.memoryBytes,outputBytes:65536},execution:{lane:.artifact.lane,requireHardwareIsolation:true}},reservedMemoryBytes:(.limits.memoryBytes*4+67108864)}' "$package/parent-request.json")
 
 random_token() { openssl rand -hex 32; }
 make_ca() {
@@ -117,8 +120,9 @@ jwks=$(jq -cn --arg x "$issuer_x" --arg kid "celln-review-$review-v1" '{keys:[{k
 printf '%s\n' "$(random_token)" >"$private/native-token"
 printf '%s\n' "$(random_token)" >"$private/scoped-token"
 printf '%s\n' "$(random_token)" >"$private/gateway-token"
-printf '%s\n' "$(random_token)" >"$private/provider-a-token"
-printf '%s\n' "$(random_token)" >"$private/provider-b-token"
+# Kubernetes Secret data is used verbatim in the provider header: no newline.
+printf '%s' "$(random_token)" >"$private/provider-a-token"
+printf '%s' "$(random_token)" >"$private/provider-b-token"
 printf '%s\n' "$(random_token)" >"$private/postgres-password"
 db_password=$(tr -d '\n' <"$private/postgres-password")
 printf 'postgresql://celln_review:%s@celln-postgres-%s.%s.svc:5432/celln_review?sslmode=verify-full&sslrootcert=/public/postgres-ca.pem\n' "$db_password" "$review" "$system_ns" >"$private/database-url"
@@ -222,7 +226,7 @@ spec:
     metadata: {labels: {app: review-provider-$review, sympozium.ai/celln-review: "$review"}}
     spec:
       automountServiceAccountToken: false
-      securityContext: {runAsUser: 65532, runAsGroup: 65532, fsGroup: 65532}
+      securityContext: {runAsUser: 65532, runAsGroup: 65532, fsGroup: 65532, seccompProfile: {type: RuntimeDefault}}
       containers:
         - name: fixture
           image: $image
@@ -249,7 +253,7 @@ spec:
 EOF
 done
 
-render_simple "$repo/config/manual-review/celln-framework/components.yaml.tmpl" "$output/30-components.stage" REVIEW "$review" IMAGE "$image" POSTGRES_IMAGE "$postgres_image" NATIVE_ROOT "$native_root" JWKS "$jwks" PARENT_TEMPLATE "$parent_template" GATEWAY_CONFIG "$gateway_config"
+render_simple "$repo/config/manual-review/celln-framework/components.yaml.tmpl" "$output/30-components.stage" REVIEW "$review" IMAGE "$image" POSTGRES_IMAGE "$postgres_image" NATIVE_ROOT "$native_root" KERNEL_RELEASE "$kernel_release" JWKS "$jwks" PARENT_TEMPLATE "$parent_template" GATEWAY_CONFIG "$gateway_config"
 expand="$private/expand.awk"
 cat >"$expand" <<'AWK'
 function emit(path,indent, line) { while ((getline line < path)>0) print indent line; close(path) }
@@ -269,6 +273,9 @@ rm "$output/30-components.stage"
 cat >"$private/create-secrets.sh" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
+: "\${KUBECONFIG:?explicit private kubeconfig required}"
+: "\${CELLN_REVIEW_KUBE_CONTEXT:?explicit Kubernetes context required}"
+kubectl() { command kubectl --kubeconfig "\$KUBECONFIG" --context "\$CELLN_REVIEW_KUBE_CONTEXT" "\$@"; }
 umask 077
 kubectl create secret generic celln-review-native-$review -n $system_ns --from-file=native-token='$private/native-token' --from-file=scoped-token='$private/scoped-token'
 kubectl create secret tls celln-review-receiver-tls-$review -n $system_ns --cert='$private/leaf/receiver/tls.crt' --key='$private/leaf/receiver/tls.key'
@@ -287,6 +294,9 @@ chmod 0700 "$private/create-secrets.sh"
 cat >"$output/deploy.sh" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
+: "\${KUBECONFIG:?explicit private kubeconfig required}"
+: "\${CELLN_REVIEW_KUBE_CONTEXT:?explicit Kubernetes context required}"
+kubectl() { command kubectl --kubeconfig "\$KUBECONFIG" --context "\$CELLN_REVIEW_KUBE_CONTEXT" "\$@"; }
 for ns in $a_ns $b_ns $denied_ns $system_ns; do
   test "\$(kubectl get namespace "\$ns" -o jsonpath='{.metadata.labels.sympozium\.ai/celln-review}')" = '$review' || { echo "namespace \$ns lacks exact review ownership" >&2; exit 1; }
 done

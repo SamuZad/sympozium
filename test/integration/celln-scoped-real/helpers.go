@@ -317,7 +317,7 @@ func writeParentTemplate(path string, pkg nativePackage) error {
 		"mote":         pkg.Parent.Artifact.Mote,
 		"tools":        []any{map[string]any{"alias": pkg.Parent.Artifact.EntryPoint, "hash": pkg.Parent.Artifact.Executable.Hash, "closure": pkg.Parent.Artifact.Closure}},
 		"invocation":   map[string]any{"alias": pkg.Parent.Artifact.EntryPoint, "args": []string{}},
-		"capabilities": map[string]any{"workspace": pkg.Parent.Limits.Workspace, "egress": pkg.Parent.Limits.Egress, "timeoutMs": 120000, "memoryBytes": pkg.Parent.Limits.MemoryBytes, "outputBytes": 65536},
+		"capabilities": map[string]any{"workspace": pkg.Parent.Limits.Workspace, "egress": pkg.Parent.Limits.Egress, "timeoutMs": 600000, "memoryBytes": pkg.Parent.Limits.MemoryBytes, "outputBytes": 65536},
 		"execution":    map[string]any{"lane": pkg.Parent.Artifact.Lane, "requireHardwareIsolation": true},
 	}
 	// The receiver requires retained parent/child substrate overhead beyond two
