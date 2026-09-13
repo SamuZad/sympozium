@@ -1,0 +1,72 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: celln-review-controller-@@REVIEW@@, namespace: celln-review-system-@@REVIEW@@, labels: {sympozium.ai/celln-review: "@@REVIEW@@"}}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: celln-review-gateway-@@REVIEW@@, namespace: celln-review-system-@@REVIEW@@, labels: {sympozium.ai/celln-review: "@@REVIEW@@"}}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: celln-review-native-@@REVIEW@@, namespace: celln-review-system-@@REVIEW@@, labels: {sympozium.ai/celln-review: "@@REVIEW@@"}}
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: celln-review-controller-@@REVIEW@@, labels: {sympozium.ai/celln-review: "@@REVIEW@@"}}
+rules:
+  - apiGroups: [""]
+    resources: [namespaces]
+    resourceNames: [celln-review-a-@@REVIEW@@, celln-review-b-@@REVIEW@@, celln-review-denied-@@REVIEW@@, celln-review-system-@@REVIEW@@]
+    verbs: [get]
+  - apiGroups: [sympozium.ai]
+    resources: [cellnruntimeprofiles, clustercellntools]
+    resourceNames: [@@ONE_PROFILE@@, @@END_PROFILE@@, @@TOOL@@]
+    verbs: [get]
+  - apiGroups: [sympozium.ai]
+    resources: [cellnexecutionpolicies]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: celln-review-controller-@@REVIEW@@, labels: {sympozium.ai/celln-review: "@@REVIEW@@"}}
+subjects: [{kind: ServiceAccount, name: celln-review-controller-@@REVIEW@@, namespace: celln-review-system-@@REVIEW@@}]
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: celln-review-controller-@@REVIEW@@}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: celln-review-gateway-@@REVIEW@@, labels: {sympozium.ai/celln-review: "@@REVIEW@@"}}
+rules:
+  - apiGroups: [authorization.k8s.io]
+    resources: [selfsubjectaccessreviews]
+    verbs: [create]
+  - apiGroups: [""]
+    resources: [namespaces]
+    resourceNames: [celln-review-a-@@REVIEW@@, celln-review-b-@@REVIEW@@]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: celln-review-gateway-@@REVIEW@@, labels: {sympozium.ai/celln-review: "@@REVIEW@@"}}
+subjects: [{kind: ServiceAccount, name: celln-review-gateway-@@REVIEW@@, namespace: celln-review-system-@@REVIEW@@}]
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: celln-review-gateway-@@REVIEW@@}
+---
+# The controller watches only these three Roles. It cannot read Secrets.
+@@CONTROLLER_ROLES@@
+---
+# Gateway authority is get-only in A/B; no Secret list/watch permission exists.
+@@GATEWAY_ROLES@@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: celln-review-prepared-@@REVIEW@@, namespace: celln-review-system-@@REVIEW@@, labels: {sympozium.ai/celln-review: "@@REVIEW@@"}}
+rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, create, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: celln-review-prepared-@@REVIEW@@, namespace: celln-review-system-@@REVIEW@@, labels: {sympozium.ai/celln-review: "@@REVIEW@@"}}
+subjects: [{kind: ServiceAccount, name: celln-review-controller-@@REVIEW@@, namespace: celln-review-system-@@REVIEW@@}]
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: celln-review-prepared-@@REVIEW@@}

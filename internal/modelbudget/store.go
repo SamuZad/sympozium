@@ -392,6 +392,39 @@ func (s *Store) reconcile(ctx context.Context, budgetID, turnID, requestID strin
 	return nil
 }
 
+// FenceTurnRegistration forecloses an authenticated exact turn even if its
+// registration never finished. A closed tombstone grants nothing, charges no
+// attempt, and never changes the original run's ceilings or turns_registered.
+func (s *Store) FenceTurnRegistration(ctx context.Context, in TurnRegistration) error {
+	if err := validateTurnRegistration(in); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return reasonError(ReasonUnavailable, err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	var id string
+	if err = tx.QueryRow(ctx, `SELECT budget_id FROM celln_model_budgets WHERE budget_id=$1 FOR UPDATE`, in.BudgetID).Scan(&id); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return reasonError(ReasonNotFound, err)
+		}
+		return reasonError(ReasonUnavailable, err)
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO celln_model_turn_budgets (budget_id,turn_id,decision_digest,max_requests,max_output_tokens,deadline,closed,closed_at)
+	 VALUES ($1,$2,$3,$4,$5,$6,TRUE,now()) ON CONFLICT (budget_id,turn_id)
+	 DO UPDATE SET closed=TRUE,closed_at=COALESCE(celln_model_turn_budgets.closed_at,now()),updated_at=now()`, in.BudgetID, in.TurnID, in.DecisionDigest, in.MaxRequests, in.MaxOutputTokens, in.Deadline.UTC())
+	if err != nil {
+		return reasonError(ReasonUnavailable, err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return reasonError(ReasonUnavailable, err)
+	}
+	return nil
+}
+
 func (s *Store) FenceTurn(ctx context.Context, budgetID, turnID string) error {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()

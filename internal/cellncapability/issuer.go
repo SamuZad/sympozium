@@ -49,8 +49,8 @@ type Issuer struct {
 }
 
 func NewIssuer(issuer string, key SigningKey, clock Clock) (*Issuer, error) {
-	if issuer == "" {
-		return nil, fmt.Errorf("issuer is required")
+	if issuer != "sympozium-control-plane" {
+		return nil, fmt.Errorf("issuer must match the authorisation credential contract")
 	}
 	if err := validateSigningKey(key); err != nil {
 		return nil, err

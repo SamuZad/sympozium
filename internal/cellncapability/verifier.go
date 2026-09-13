@@ -311,7 +311,11 @@ func validateDecisionSemantics(decision Decision) string {
 			return ReasonLifecycleInvalid
 		}
 	}
-	if decision.Budget.TurnDeadlineUnix <= decision.Windows.IssuedAt {
+	// Owner read/cleanup decisions intentionally retain the original work
+	// deadline while receiving fresh short credential windows. Recovery and
+	// teardown must remain possible after work admission closes; they do not
+	// authorize launch or model use.
+	if (decision.Operation == "execution.start" || decision.Operation == "execution.turn") && decision.Budget.TurnDeadlineUnix <= decision.Windows.IssuedAt {
 		return ReasonLifecycleInvalid
 	}
 	for _, tool := range decision.Tools {

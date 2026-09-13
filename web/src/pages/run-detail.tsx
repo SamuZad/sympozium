@@ -4,6 +4,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { CellnResult } from "@/components/celln-result";
 import { CellnConversation } from "@/components/celln-conversation";
+import { CellnScopedExecution } from "@/components/celln-scoped-execution";
 import { ApiError } from "@/lib/api";
 import { useRun, useGateVerdict, useRuntimes } from "@/hooks/use-api";
 import { StatusBadge } from "@/components/status-badge";
@@ -68,9 +69,14 @@ export function RunDetailPage() {
     : "—";
   const est = effectiveCost(run);
   const taskMode = typeof run.spec.task === "object" ? run.spec.task : undefined;
-  const runtimeName = (taskMode?.mode === "harness" ? taskMode.parameters?.runtime : undefined) || run.status?.harnessRuntimeRef;
+  const runtimeName = (taskMode?.mode === "harness" ? taskMode.parameters?.runtime : undefined) || run.spec.cellnSelection?.runtimeRef || run.status?.harnessRuntimeRef;
   const runtime = runtimeName ? runtimes.data?.find((item) => item.metadata.name === runtimeName) : undefined;
   const isHarnessRun = Boolean(runtimeName || run.status?.harnessImageDigest);
+  const scopedCondition = run.status?.conditions?.find((condition) =>
+    condition.type === "CellnScopedExecution" &&
+    run.metadata.generation !== undefined &&
+    condition.observedGeneration === run.metadata.generation);
+  const scopedIntent = Boolean(run.status?.cellnScoped || scopedCondition || run.spec.cellnSelection?.clusterToolRefs?.length || runtime?.spec.cellnProfileRef);
 
   return (
     <div className="space-y-6">
@@ -238,10 +244,22 @@ export function RunDetailPage() {
       )}
 
       {run.spec.executionLifecycle === "enduring" && <CellnConversation key={run.metadata.uid} run={run} observationUnavailable={Boolean(error)} />}
-      {run.spec.cellnSelection && run.spec.executionLifecycle !== "enduring" && <div className="space-y-2 rounded-lg border border-amber-500/30 p-3 text-sm" data-testid="catalogue-run-summary">
+      {run.status?.cellnScoped && run.spec.executionLifecycle !== "enduring" && <CellnScopedExecution
+        status={run.status.cellnScoped}
+        condition={scopedCondition}
+        mode="one-shot"
+        label="Scoped one-shot execution"
+      />}
+      {scopedIntent && !run.status?.cellnScoped && run.spec.executionLifecycle !== "enduring" && <div className="space-y-2 rounded-lg border border-amber-500/30 p-3 text-sm" data-testid="celln-scoped-pending">
+        <p className="font-medium">Scoped Celln — one-shot request</p>
+        <p>{scopedCondition?.message || "No current scoped controller observation is recorded."}</p>
+        <p className="text-muted-foreground">Receiver ownership and native execution are not yet confirmed. The UI will not infer them from catalogue selection or legacy grant status.</p>
+      </div>}
+      {run.spec.cellnSelection && !scopedIntent && run.spec.executionLifecycle !== "enduring" && <div className="space-y-2 rounded-lg border border-amber-500/30 p-3 text-sm" data-testid="catalogue-run-summary">
         <p className="font-medium">Harness in Celln — catalogue request</p>
         <p className="text-muted-foreground">Runtime: {run.spec.cellnSelection.runtimeRef || "Agent default (resolved by trusted issuance)"}</p>
         <p className="text-muted-foreground">Borrowed tools: {run.spec.cellnSelection.toolRefs.map((ref) => `${ref.name}@${ref.revision}`).join(" → ") || "none"}</p>
+        {!!run.spec.cellnSelection.clusterToolRefs?.length && <p className="text-muted-foreground">Shared catalogue tools: {run.spec.cellnSelection.clusterToolRefs.map((ref) => `${ref.name}@${ref.revision}`).join(" → ")}</p>}
         <p>{run.status?.conditions?.find((condition) => condition.type === "CellnIssuanceCommitted")?.message || "Waiting for a catalogue issuance observation. A submitted request does not establish readiness."}</p>
 		{run.status?.conditions?.find((condition) => condition.type === "CellnExecutionObserved")?.message && <p>{run.status.conditions.find((condition) => condition.type === "CellnExecutionObserved")?.message}</p>}
       </div>}

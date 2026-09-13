@@ -1,0 +1,18 @@
+# Replace only @@RUN_UID@@ with the live enduring AgentRun UID. This owner
+# reference makes the data-only turn follow the parent lifecycle.
+apiVersion: sympozium.ai/v1alpha1
+kind: AgentRunTurn
+metadata:
+  name: violet-turn
+  namespace: celln-review-b-@@REVIEW@@
+  labels: {sympozium.ai/celln-review: "@@REVIEW@@"}
+  ownerReferences:
+    - apiVersion: sympozium.ai/v1alpha1
+      kind: AgentRun
+      name: enduring-uppercase
+      uid: "@@RUN_UID@@"
+      controller: true
+spec:
+  runName: enduring-uppercase
+  runUID: "@@RUN_UID@@"
+  message: violet

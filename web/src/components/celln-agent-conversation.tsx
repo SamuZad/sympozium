@@ -33,6 +33,7 @@ export function CellnAgentConversation({
   const runtimeRef =
     agent.spec.runtimeRef || execution?.cellnSelection?.runtimeRef || "";
   const toolRefs = execution?.cellnSelection?.toolRefs || [];
+  const clusterToolRefs = execution?.cellnSelection?.clusterToolRefs || [];
   const model = execution?.model || agent.spec.agents?.default?.model || "";
   const modelConnectionRef = execution?.modelConnectionRef;
   const provider = modelConnectionRef ? undefined : execution?.provider;
@@ -56,7 +57,7 @@ export function CellnAgentConversation({
         model: model || undefined,
         modelConnectionRef,
         provider,
-        cellnSelection: { runtimeRef: runtimeRef || undefined, toolRefs },
+        cellnSelection: { runtimeRef: runtimeRef || undefined, toolRefs, ...(clusterToolRefs.length ? { clusterToolRefs } : {}) },
         timeout: `${limits.leaseSeconds}s`,
         executionLifecycle: "enduring",
         enduring: limits,
@@ -77,7 +78,7 @@ export function CellnAgentConversation({
     <Card data-testid="celln-agent-conversation">
       <CardHeader>
         <CardTitle className="text-base">
-          Persistent Celln conversation
+          Enduring Celln conversation
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">

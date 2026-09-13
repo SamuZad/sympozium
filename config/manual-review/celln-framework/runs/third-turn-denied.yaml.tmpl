@@ -1,0 +1,18 @@
+# Replace @@RUN_UID@@ with the same enduring parent UID. Create only after the
+# initial turn and violet-turn are terminal; this third turn must be refused.
+apiVersion: sympozium.ai/v1alpha1
+kind: AgentRunTurn
+metadata:
+  name: third-turn-must-deny
+  namespace: celln-review-b-@@REVIEW@@
+  labels: {sympozium.ai/celln-review: "@@REVIEW@@"}
+  ownerReferences:
+    - apiVersion: sympozium.ai/v1alpha1
+      kind: AgentRun
+      name: enduring-uppercase
+      uid: "@@RUN_UID@@"
+      controller: true
+spec:
+  runName: enduring-uppercase
+  runUID: "@@RUN_UID@@"
+  message: must-not-run
