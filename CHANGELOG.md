@@ -1,5 +1,60 @@
 # Changelog
 
+## [0.10.62](https://github.com/sympozium-ai/sympozium/compare/v0.10.61...v0.10.62) (2026-09-13)
+
+
+### Features
+
+* **celln:** add durable atomic model-budget ledger ([#503](https://github.com/sympozium-ai/sympozium/issues/503)) ([b6349b5](https://github.com/sympozium-ai/sympozium/commit/b6349b5d5e88d58dbd81230dad1c942567dcc4f9))
+* **celln:** add read-only migration identity inventory and drain boundaries ([c9a4bf2](https://github.com/sympozium-ai/sympozium/commit/c9a4bf2972543a93db237941f622f62dbec50089))
+* **celln:** add shared catalogue and execution-policy API ([#497](https://github.com/sympozium-ai/sympozium/issues/497)) ([d7419d5](https://github.com/sympozium-ai/sympozium/commit/d7419d502b884b1ab1456be2d7b9f25ee1fcce13))
+* **celln:** add TLS gateway process and PostgreSQL isolation tests ([9108629](https://github.com/sympozium-ai/sympozium/commit/910862916f70046bc071179a13531ff14c7acef0))
+* **celln:** cancel fenced model work and verify live gateway readiness ([46388ed](https://github.com/sympozium-ai/sympozium/commit/46388ed9702a71807153531493c269582100a1e9))
+* **celln:** enforce original parent lease with terminal expiry visibility ([#464](https://github.com/sympozium-ai/sympozium/issues/464)) ([37e0e47](https://github.com/sympozium-ai/sympozium/commit/37e0e47c61230748060cd30894ebd12f59882b57))
+* **celln:** freeze controller preparation before native side effects ([f04284c](https://github.com/sympozium-ai/sympozium/commit/f04284c4e994659bd72bd22133333afe3cdb6174))
+* **celln:** implement scoped capability issuer and verifier ([#499](https://github.com/sympozium-ai/sympozium/issues/499)) ([0981bac](https://github.com/sympozium-ai/sympozium/commit/0981bac047f0a5a7b9e289c044dd2aa2af5360cf))
+* **celln:** resolve platform policy into immutable decisions ([#498](https://github.com/sympozium-ai/sympozium/issues/498)) ([a3920e0](https://github.com/sympozium-ai/sympozium/commit/a3920e0abf5cb85ed7c864bf29bc0ffb11b62302))
+* **celln:** ship real-provider framework workspace with concurrent conversation evidence ([eb0501c](https://github.com/sympozium-ai/sympozium/commit/eb0501ce26008373a75f229fa7215c448cb13714))
+* **celln:** validate release evidence matrix and bounded artifact integrity ([6657cd1](https://github.com/sympozium-ai/sympozium/commit/6657cd196a93ba0d642dfec663ce654895b2d312))
+* **controller:** dispatch scoped one-shot runs through native receiver and gateway ([7cc797f](https://github.com/sympozium-ai/sympozium/commit/7cc797f57d82e533bf40abecb1422f5da37863cc))
+* **controller:** reconcile scoped enduring parents and fresh bounded turns ([16b4880](https://github.com/sympozium-ai/sympozium/commit/16b4880f966128fa02a3e1e0cd7135cb80be9ba6))
+* **helm:** package dedicated rootless model gateway with explicit trust dependencies ([cf27393](https://github.com/sympozium-ai/sympozium/commit/cf273937a0ebe18a110d3764998fc54c421e8f1a))
+* **install:** generate isolated scoped native manual-review deployment ([cf86695](https://github.com/sympozium-ai/sympozium/commit/cf86695d1465ed2b518ce3c3646f40452955b201))
+* **review:** add namespace-isolated scoped manager and deterministic TLS provider ([59454ce](https://github.com/sympozium-ai/sympozium/commit/59454cec84bfd18a3185ecc5ec5ff77d4601b133))
+* **review:** configure verified provider CA and scoped TLS frontend ([4851fbd](https://github.com/sympozium-ai/sympozium/commit/4851fbda56f91addbdf44178c28984127c2d2e27))
+* **ui:** expose scoped native runs and enduring turn lifecycle ([4f2d777](https://github.com/sympozium-ai/sympozium/commit/4f2d7779fdd9d7dcb5ba4ee3d91f13ab4b425f0f))
+
+
+### Bug Fixes
+
+* **api:** preserve explicit Celln preview lifecycle and catalogue scope ([5bd5a3b](https://github.com/sympozium-ai/sympozium/commit/5bd5a3b0764e5e7348f5cd688f871787ec4fa41d))
+* **authority:** enforce published decision schema before issuance and verification ([41e0cb3](https://github.com/sympozium-ai/sympozium/commit/41e0cb3cedafd054ed71e191b163f57c6c0c1f3c))
+* **budget:** atomically bind reservation and recovery to verified ownership ([db6dafa](https://github.com/sympozium-ai/sympozium/commit/db6dafac1c4dd9d1545110061f9b413986bae150))
+* **budget:** retain unknown provider usage without fabricating measured zero ([8cf463c](https://github.com/sympozium-ai/sympozium/commit/8cf463c46bb347b015f78a4c0352d309c8f16039))
+* **celln:** align parent refusal with published contract ([edc9c73](https://github.com/sympozium-ai/sympozium/commit/edc9c737a1f71a4dfd5c98c86544724c7e2b65a4))
+* **celln:** claim provider dispatch after bounded gateway admission ([61434e1](https://github.com/sympozium-ai/sympozium/commit/61434e1a72304b8e0952851a1a4b1ad68a72a009))
+* **celln:** correct namespace authorisation contract ([6bd6638](https://github.com/sympozium-ai/sympozium/commit/6bd66383523944cd0065ad8b7d383cc606885e8d))
+* **celln:** fence and atomically claim model provider dispatch ([be60e8e](https://github.com/sympozium-ai/sympozium/commit/be60e8e6c2d1d7fb4f04a2e273e9808e292bd702))
+* **celln:** guard optional cluster tool validation ([6083c23](https://github.com/sympozium-ai/sympozium/commit/6083c23b57465522f85fff7a4b373557c327a731))
+* **celln:** make accepted tool-free fixtures conform to schema ([8b69b03](https://github.com/sympozium-ai/sympozium/commit/8b69b039c682697bbe5d5160d1896969296af376))
+* **celln:** prefer work-deadline expiry for model verification ([dcb5037](https://github.com/sympozium-ai/sympozium/commit/dcb503767e70586df185bb643ff66b58bf5b4e43))
+* **celln:** prevent shared-tool intent entering legacy parent issuance ([97f3243](https://github.com/sympozium-ai/sympozium/commit/97f32431ea03590e0f98c60cca59efeb97b97154))
+* **celln:** refuse shared-tool intent in legacy one-shot issuance ([943e524](https://github.com/sympozium-ai/sympozium/commit/943e5249721659b513d4b230af6c0ed2f8912b5c))
+* **celln:** serialize ledger reconciliation across replicas ([bf28a11](https://github.com/sympozium-ai/sympozium/commit/bf28a11d6ffa3800a572d0a05e842d8219239af1))
+* **celln:** use published protocol refusal reason ([24be045](https://github.com/sympozium-ai/sympozium/commit/24be045f005f472bcdc148d9d1c806c7dbc1b124))
+* **ci:** publish dedicated gateway and repair inherited workflow YAML ([3bd649e](https://github.com/sympozium-ai/sympozium/commit/3bd649e850530a425477664fff935e9fd452dfa3))
+* **ci:** verify the reviewed contract without rewriting or pushing PR source ([3777b31](https://github.com/sympozium-ai/sympozium/commit/3777b31f2ec82a1e31c28ddcc0978c51579d94a7))
+* **controller:** fence cancelled turns and stop completed cleanup loops ([3c78f6c](https://github.com/sympozium-ai/sympozium/commit/3c78f6c899a65446c4cafb2ff07e4cabe9b795d0))
+* **controller:** revalidate frozen policy before first scoped dispatch ([29447e7](https://github.com/sympozium-ai/sympozium/commit/29447e785b929f89f9ab0deb3753fe3b26b95f86))
+* **deps:** mark go-jose as direct dependency ([12f4cbd](https://github.com/sympozium-ai/sympozium/commit/12f4cbdf85c5bb7cbc02ee599b78d6eed81d579c))
+* **enduring:** reserve retained substrate capacity and preserve uncertain owner state ([ce67ad1](https://github.com/sympozium-ai/sympozium/commit/ce67ad153f503aec045004f10d112163a0fe61f8))
+* **gateway:** align request canonicalization and decision fixtures with Rust receiver ([8d01032](https://github.com/sympozium-ai/sympozium/commit/8d010323f0596b8d84c303308145f93317eb7a91))
+* **gateway:** bind durable admission, preserve unknown usage and scope turn cleanup ([04ef174](https://github.com/sympozium-ai/sympozium/commit/04ef1748f9f8f367c077821c67ed53880e84ac81))
+* **install:** qualify framework KVM packaging, persistent ledger and bounded manual workflows ([5e61e22](https://github.com/sympozium-ai/sympozium/commit/5e61e224174bd7c5a7d00608ed330035750846e3))
+* **integration:** preserve recovery authority and enforce the contract issuer ([44cc86d](https://github.com/sympozium-ai/sympozium/commit/44cc86de8a39e4104118679ad175c882965ddb03))
+* **integration:** retain protected record identities before run deletion ([5d3eeb9](https://github.com/sympozium-ai/sympozium/commit/5d3eeb92b243329c946cf3bf54d07e612183d4f0))
+* **scoped:** fence exhausted turn registration and complete retained-root cleanup ([98e8107](https://github.com/sympozium-ai/sympozium/commit/98e8107e39a1cdbe8fd2ee279c7e432e3dbf7034))
+
 ## [0.10.61](https://github.com/sympozium-ai/sympozium/compare/v0.10.60...v0.10.61) (2026-09-11)
 
 
