@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"regexp"
 	"slices"
 	"time"
@@ -380,9 +379,9 @@ func (r *AgentRunReconciler) applyScopedStatus(ctx context.Context, log logr.Log
 		if observed.Phase == "Succeeded" {
 			current.Status.Phase, current.Status.Result, current.Status.Error = api.AgentRunPhaseSucceeded, observed.Output, ""
 		} else {
-			// Receiver details may contain operator topology or guest-controlled
-			// diagnostics. Persist only the bounded phase in tenant-visible status.
-			current.Status.Phase, current.Status.Error = api.AgentRunPhaseFailed, fmt.Sprintf("Celln scoped execution %s", observed.Phase)
+			// Never expose raw native diagnostics. Only mapped public refusal
+			// codes are safe for tenant-visible, actionable explanations.
+			current.Status.Phase, current.Status.Error = api.AgentRunPhaseFailed, scopedFailureSummary(observed.Phase, observed.Reason)
 		}
 		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{Type: "CellnScopedExecution", Status: metav1.ConditionTrue, Reason: "TerminalOwnerRecordObserved", Message: "The original prepared owner returned a terminal record; cleanup confirmation is pending", ObservedGeneration: current.Generation})
 	}); err != nil {

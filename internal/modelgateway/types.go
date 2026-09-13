@@ -139,9 +139,9 @@ type Config struct {
 	MaxConcurrent       int
 	MaxProviderDuration time.Duration
 	AllowPrivateOrigins map[string]bool
-	// ProviderRootCAs adds operator-selected trust anchors to the provider
-	// transport. Nil uses the host trust store. Certificate and hostname
-	// verification remain mandatory.
+	// ProviderRootCAs adds trust anchors only for explicitly allowlisted private
+	// providers. Public providers always use the host/public trust store.
+	// Certificate and hostname verification remain mandatory.
 	ProviderRootCAs *x509.CertPool
 }
 
