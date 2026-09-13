@@ -1,5 +1,8 @@
 # Framework: installed scoped Celln review 495
 
+> Historical fixture epoch. The current real-provider workspace and browser
+> verification are documented in [the workspace installed review](celln-workspace-installed-review.md).
+
 The isolated **CLI manual walkthrough is deployed and verified**. This is a
 bounded deterministic-provider review, not completion of epic #495, the A01–A12
 acceptance bundle, or production enablement. The scoped UI code is merged but
