@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	api "github.com/sympozium-ai/sympozium/api/v1alpha1"
@@ -89,13 +90,15 @@ func (r *AgentRunReconciler) reconcileCellnParent(ctx context.Context, run *api.
 			condition.Reason = observed.Owner.Status
 			condition.Message = "Native parent initialized; turn completion is tracked separately"
 		case "ContextLost", "Stopped", "TeardownUncertain":
-			meta.SetStatusCondition(&fresh.Status.Conditions, metav1.Condition{Type: "CellnParentReady", Status: metav1.ConditionFalse, Reason: observed.Owner.Status, Message: "Parent context unavailable; no automatic reconstruction", ObservedGeneration: fresh.Generation})
+			outcome := recordOwnerOutcome(&fresh, observed.Owner.Status)
+			meta.SetStatusCondition(&fresh.Status.Conditions, metav1.Condition{Type: "CellnParentReady", Status: metav1.ConditionFalse, Reason: observed.Owner.Status, Message: outcome, ObservedGeneration: fresh.Generation})
+			slog.WarnContext(ctx, "celln.parent.owner-lost", "agent_run", fresh.Name, "ownerStatus", observed.Owner.Status, "detail", outcome)
 			// failRun rereads status and applies only terminal fields. Persist
 			// these independent turn/owner observations before that fresh read.
 			if err := r.Status().Update(ctx, &fresh); err != nil {
 				return ctrl.Result{}, err
 			}
-			return ctrl.Result{}, r.failRun(ctx, &fresh, "Celln parent context lost or stopped; reconcile recorded turns")
+			return ctrl.Result{}, r.failRun(ctx, &fresh, "Celln parent context lost or stopped; reconcile recorded turns: "+outcome)
 		}
 	}
 	meta.SetStatusCondition(&fresh.Status.Conditions, condition)
@@ -124,6 +127,30 @@ func (r *AgentRunReconciler) recordParentAdmissionPending(ctx context.Context, o
 		return nil
 	}
 	return r.Status().Update(ctx, &fresh)
+}
+
+// recordOwnerOutcome freezes the first terminal owner observation on the run
+// status and returns the human-readable failure signature. The broker reports
+// only a bare status, so the signature is built from what the controller saw:
+// whether Ready was ever live, how long after admission the loss landed, and
+// the frozen incarnation and launch-profile hashes that identify the worker
+// the owner failed to prepare. Recording grants no replay authority.
+func recordOwnerOutcome(run *api.AgentRun, status string) string {
+	reachedReady := meta.IsStatusConditionTrue(run.Status.Conditions, "CellnParentReady")
+	now := metav1.Now()
+	if run.Status.CellnParent == nil {
+		return fmt.Sprintf("owner=%s reachedReady=%t; parent context unavailable; no automatic reconstruction", status, reachedReady)
+	}
+	if run.Status.CellnParent.OwnerOutcome == nil {
+		run.Status.CellnParent.OwnerOutcome = &api.CellnParentOwnerOutcome{Status: status, ReachedReady: reachedReady, ObservedAt: now}
+	}
+	outcome := run.Status.CellnParent.OwnerOutcome
+	age := "unknown"
+	if run.Status.CellnParent.AdmittedAt != nil {
+		age = now.Sub(run.Status.CellnParent.AdmittedAt.Time).Truncate(time.Second).String()
+	}
+	return fmt.Sprintf("owner=%s reachedReady=%t admittedAge=%s incarnation=%s launchProfile=%s; parent context unavailable; no automatic reconstruction",
+		outcome.Status, outcome.ReachedReady, age, run.Status.CellnParent.Binding.Incarnation, run.Status.CellnParent.Binding.LaunchProfile)
 }
 
 func (r *AgentRunReconciler) stopCellnParent(ctx context.Context, run *api.AgentRun) error {

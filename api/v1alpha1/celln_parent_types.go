@@ -27,6 +27,7 @@ type CellnParentBinding struct {
 }
 
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.initialTurn) || has(self.initialTurn)",message="initial parent turn cannot be removed"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.ownerOutcome) || self.ownerOutcome == oldSelf.ownerOutcome",message="recorded owner outcome is immutable"
 // CellnParentStatus freezes admission before creation. AdmittedAt is set
 // once with the first creation attempt and can never change after that.
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.admittedAt) || (has(self.admittedAt) && self.admittedAt == oldSelf.admittedAt)",message="parent admission time is immutable"
@@ -53,6 +54,27 @@ type CellnParentStatus struct {
 	// ActiveTurn remains until that exact child record contains a committed result.
 	// +optional
 	ActiveTurn *CellnActiveTurn `json:"activeTurn,omitempty"`
+	// OwnerOutcome records the first terminal owner observation
+	// (ContextLost, Stopped, TeardownUncertain) with the failure signature
+	// the broker itself does not report: whether the parent ever reached
+	// Ready and when the loss was observed. Set once; it grants no replay
+	// authority and never authorizes reconstruction.
+	// +optional
+	OwnerOutcome *CellnParentOwnerOutcome `json:"ownerOutcome,omitempty"`
+}
+
+// CellnParentOwnerOutcome is the immutable failure signature for a parent
+// incarnation the owner reports lost or stopped. Hashes stay in Binding;
+// this carries only the observed status and its timing.
+type CellnParentOwnerOutcome struct {
+	// +kubebuilder:validation:Enum=ContextLost;Stopped;TeardownUncertain
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=32
+	Status string `json:"status"`
+	// ReachedReady reports whether a live Ready (or TurnActive) observation
+	// preceded the loss. False means the parent died during warm preparation.
+	ReachedReady bool        `json:"reachedReady"`
+	ObservedAt   metav1.Time `json:"observedAt"`
 }
 
 type CellnActiveTurn struct {
