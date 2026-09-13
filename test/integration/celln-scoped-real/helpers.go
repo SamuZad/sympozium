@@ -268,10 +268,35 @@ type managedProcess struct {
 	done chan error
 }
 
+type brokerDiagnostics struct {
+	line    []byte
+	discard bool
+}
+
+func (d *brokerDiagnostics) Write(data []byte) (int, error) {
+	for _, b := range data {
+		if b == '\n' {
+			if !d.discard {
+				switch string(d.line) {
+				case "CELLN_BROKER_REFUSAL ENDPOINT", "CELLN_BROKER_REFUSAL MODEL", "CELLN_BROKER_REFUSAL OUTPUT_BUDGET", "CELLN_BROKER_REFUSAL GATEWAY", "CELLN_BROKER_REFUSAL CANCELLED", "CELLN_BROKER_REFUSAL PARAMETERS", "CELLN_BROKER_REFUSAL REQUEST", "CELLN_BROKER_REFUSAL REQUEST_BUDGET", "CELLN_BROKER_REFUSAL POLICY":
+					fmt.Fprintln(os.Stderr, string(d.line))
+				}
+			}
+			d.line = nil
+			d.discard = false
+		} else if len(d.line) < 128 {
+			d.line = append(d.line, b)
+		} else {
+			d.discard = true
+		}
+	}
+	return len(data), nil
+}
+
 func startCelln(ctx context.Context, o options, address, jwks, gateway, gatewayCA, parentTemplate string) (*managedProcess, error) {
 	args := []string{"--root", o.cellnRoot, "dispatcher", "--mote-store", filepath.Join(o.cellnRoot, "motes"), "--tool-store", filepath.Join(o.cellnRoot, "tools"), "--max-cells", "6", "--memory-bytes", "1073741824", "--egress-slots", "4", "--listen", address, "--token-file", o.cellnTokenFile, "--scoped-operator-token-file", o.scopedOperatorTokenFile, "--scoped-jwks-file", jwks, "--scoped-issuer", issuerName, "--scoped-gateway-origin", gateway, "--scoped-gateway-ca", gatewayCA, "--scoped-parent-request-file", parentTemplate}
 	cmd := exec.CommandContext(ctx, o.cellnBinary, args...)
-	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
+	cmd.Stdout, cmd.Stderr = io.Discard, &brokerDiagnostics{}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Env = []string{"PATH=/usr/bin:/bin", "RUST_BACKTRACE=0"}
 	if o.cellnRuntimeDir != "" {
