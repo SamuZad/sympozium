@@ -73,8 +73,8 @@ type CellnParentOwnerOutcome struct {
 	Status string `json:"status"`
 	// ReachedReady reports whether a live Ready (or TurnActive) observation
 	// preceded the loss. False means the parent died during warm preparation.
-	ReachedReady bool `json:"reachedReady"`
-	ObservedAt metav1.Time `json:"observedAt"`
+	ReachedReady bool        `json:"reachedReady"`
+	ObservedAt   metav1.Time `json:"observedAt"`
 }
 
 type CellnActiveTurn struct {
