@@ -20,6 +20,8 @@ Review 495 is installed. The deployed controller/native/gateway/PostgreSQL path
 has executed `CELLN`, continued an enduring parent with `VIOLET`, refused a third
 turn without dispatch, and confirmed parent/descendant cleanup and ledger closure.
 This is the **CLI walkthrough**; the new scoped UI code is not deployed here.
+See [the installed review record](../design/celln-framework-installed-review.md)
+for image identities, actual results, evidence, and remaining acceptance limits.
 
 On framework, select the isolated review context explicitly:
 
