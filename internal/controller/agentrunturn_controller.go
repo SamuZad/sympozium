@@ -57,7 +57,7 @@ func (r *AgentRunTurnReconciler) Reconcile(ctx context.Context, request ctrl.Req
 			return ctrl.Result{}, nil
 		}
 		done, err := cellnparent.ReconcileTurn(ctx, r.Client, reader, request.NamespacedName, r.ParentConfigPath)
-		if statusErr := r.recordTurnObservation(ctx, reader, &turn, err != nil); statusErr != nil {
+		if statusErr := r.recordTurnObservation(ctx, reader, &turn, err); statusErr != nil {
 			return ctrl.Result{}, statusErr
 		}
 		if err != nil {
@@ -321,7 +321,7 @@ func (r *AgentRunTurnReconciler) applyTurnStatus(ctx context.Context, turn *api.
 		return ctrl.Result{}, err
 	}
 	if slices.Contains(active, observed.Phase) {
-		_ = r.recordTurnObservation(ctx, r.APIReader, turn, false)
+		_ = r.recordTurnObservation(ctx, r.APIReader, turn, nil)
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 	if observed.Phase == "Succeeded" && (observed.ReceiptDigest == "" || observed.Output == "") {
@@ -480,10 +480,15 @@ func (r *AgentRunTurnReconciler) turnUncertain(ctx context.Context, turn *api.Ag
 	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 }
 
-func (r *AgentRunTurnReconciler) recordTurnObservation(ctx context.Context, reader client.Reader, observed *api.AgentRunTurn, failed bool) error {
+func (r *AgentRunTurnReconciler) recordTurnObservation(ctx context.Context, reader client.Reader, observed *api.AgentRunTurn, reconcileErr error) error {
 	reason := "Pending"
-	if failed {
+	if reconcileErr != nil {
 		reason = "ReconciliationRequired"
+	}
+	// An expired original lease is terminal for new turns, not a transient
+	// failure: say so explicitly instead of reporting generic reconciliation.
+	if errors.Is(reconcileErr, cellnparent.ErrParentLeaseExpired) {
+		reason = "LeaseExpired"
 	}
 	return r.recordTurnObservationReason(ctx, observed, reason)
 }
@@ -502,6 +507,9 @@ func (r *AgentRunTurnReconciler) recordTurnObservationReason(ctx context.Context
 	}
 	before := fresh.DeepCopy()
 	condition := metav1.Condition{Type: "CellnTurnComplete", Status: metav1.ConditionFalse, Reason: reason, Message: "Waiting for the original scoped turn owner; refusal or uncertainty cannot create replacement work.", ObservedGeneration: fresh.Generation}
+	if reason == "LeaseExpired" {
+		condition.Message = "The parent's original execution lease has elapsed; new turns are refused without spending budget. In-flight turns may still reconcile. Create a new run for further work."
+	}
 	if fresh.Status.CellnScoped != nil && slices.Contains([]string{"Succeeded", "Failed", "Refused", "Cancelled"}, fresh.Status.CellnScoped.NativePhase) {
 		condition.Status, condition.Reason, condition.Message = metav1.ConditionTrue, "Committed", "The original scoped turn owner returned a terminal correlated result."
 	}

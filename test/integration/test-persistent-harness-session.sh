@@ -28,6 +28,53 @@ pass() { echo -e "${GREEN}PASS $*${NC}"; }
 fail() { echo -e "${RED}FAIL $*${NC}"; exit 1; }
 info() { echo -e "${YELLOW}---- $*${NC}"; }
 
+# Directory for sanitized failure evidence (issue #471). Overridable for tests
+# via TEST_EVIDENCE_DIR. CI uploads it on failure; see integration-kind.yaml.
+EVIDENCE_DIR="${TEST_EVIDENCE_DIR:-/tmp/sympozium-persistent-harness-evidence-${STAMP}}"
+
+sed_escape() { printf '%s' "$1" | sed -e 's/[][\\/$*.^&]/\\&/g'; }
+
+# Redact credential material from diagnostics. The memory token is the
+# assertion subject and is deliberately preserved; provider keys, the API
+# server token, and auth headers are not.
+sanitize_stream() {
+  local -a exprs=(
+    -e 's/"apiKey"[[:space:]]*:[[:space:]]*"[^"]*"/"apiKey":"[REDACTED]"/g'
+    -e 's/[Bb]earer [A-Za-z0-9._~+/=-]\+/Bearer [REDACTED]/g'
+  )
+  [[ -n "${APISERVER_TOKEN:-}" ]] && exprs+=(-e "s/$(sed_escape "$APISERVER_TOKEN")/[REDACTED-APISERVER-TOKEN]/g")
+  [[ -n "${MODEL_API_KEY:-}" ]] && exprs+=(-e "s/$(sed_escape "$MODEL_API_KEY")/[REDACTED-MODEL-KEY]/g")
+  sed "${exprs[@]}"
+}
+
+# Best-effort retention of conversation-state and provider-payload evidence
+# when a model-dependent recall assertion fails. Must never mask the failure
+# itself, so every fallible step is guarded. Chat request bodies carry no
+# credentials; the agent-creation body (which holds the provider apiKey) is
+# deliberately never written here.
+dump_persistence_evidence() {
+  local label="$1" file
+  mkdir -p "$EVIDENCE_DIR" || true
+  file="${EVIDENCE_DIR}/${label}.log"
+  {
+    echo "=== label: ${label} ==="
+    echo "--- chat request bodies sent ---"
+    printf 'FIRST_BODY=%s\n' "${FIRST_BODY:-}"
+    printf 'SECOND_BODY=%s\n' "${SECOND_BODY:-}"
+    echo "--- last chat responses ---"
+    printf 'SECOND_RESPONSE=%s\n' "${SECOND_RESPONSE:-}"
+    printf 'RESUMED_RESPONSE=%s\n' "${RESUMED_RESPONSE:-}"
+    echo "--- harnesssession resource ---"
+    kubectl get harnesssession "$SESSION_NAME" -n "$NAMESPACE" -o yaml 2>&1 || true
+    echo "--- session adapter logs (tail) ---"
+    kubectl logs "deployment/${SESSION_NAME}" -n "$NAMESPACE" --tail=200 2>&1 || true
+    echo "--- durable claim identity ---"
+    kubectl get pvc "$SESSION_NAME" -n "$NAMESPACE" -o jsonpath='{.metadata.uid}' 2>&1 || true
+    echo
+  } 2>&1 | sanitize_stream >"$file" || true
+  echo "persistence evidence retained at ${file}" >&2 || true
+}
+
 PF_PID=""
 APISERVER_TOKEN="${APISERVER_TOKEN:-}"
 # shellcheck source=lib/resolve-token.sh
@@ -153,7 +200,10 @@ for _ in $(seq 1 10); do
 done
 [[ -n "$SECOND_RESPONSE" ]] || fail "session adapter remained unavailable after pod restart"
 SECOND_TEXT="$(jq -r '.choices[0].message.content // ""' <<<"$SECOND_RESPONSE")"
-[[ "$SECOND_TEXT" == *"$MEMORY_TOKEN"* ]] || fail "conversation state did not survive restart; response: ${SECOND_TEXT}"
+if [[ "$SECOND_TEXT" != *"$MEMORY_TOKEN"* ]]; then
+  dump_persistence_evidence "post-restart-recall"
+  fail "conversation state did not survive restart; response: ${SECOND_TEXT}"
+fi
 [[ "$(kubectl get pvc "$SESSION_NAME" -n "$NAMESPACE" -o jsonpath='{.metadata.uid}')" == "$PVC_UID" ]] || fail "pod restart replaced the durable state claim"
 pass "conversation state survived pod restart"
 
@@ -200,7 +250,10 @@ done
 [[ -n "$RESUMED_RESPONSE" ]] || fail "session adapter remained unavailable after resume"
 RESUMED_TEXT="$(jq -r '.choices[0].message.content // ""' <<<"$RESUMED_RESPONSE")"
 [[ -n "$RESUMED_TEXT" ]] || fail "session adapter returned no content after resume"
-[[ "$RESUMED_TEXT" == *"$MEMORY_TOKEN"* ]] || fail "resume lost conversation token: ${RESUMED_TEXT}"
+if [[ "$RESUMED_TEXT" != *"$MEMORY_TOKEN"* ]]; then
+  dump_persistence_evidence "post-resume-recall"
+  fail "resume lost conversation token: ${RESUMED_TEXT}"
+fi
 [[ "$(kubectl get pvc "$SESSION_NAME" -n "$NAMESPACE" -o jsonpath='{.metadata.uid}')" == "$PVC_UID" ]] || fail "resume replaced the durable state claim"
 pass "conversation state survived explicit stop/resume"
 

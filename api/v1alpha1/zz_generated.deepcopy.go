@@ -1758,6 +1758,10 @@ func (in *CellnParentBinding) DeepCopy() *CellnParentBinding {
 func (in *CellnParentStatus) DeepCopyInto(out *CellnParentStatus) {
 	*out = *in
 	out.Binding = in.Binding
+	if in.AdmittedAt != nil {
+		in, out := &in.AdmittedAt, &out.AdmittedAt
+		*out = (*in).DeepCopy()
+	}
 	if in.InitialTurn != nil {
 		in, out := &in.InitialTurn, &out.InitialTurn
 		*out = new(CellnParentTurnStatus)

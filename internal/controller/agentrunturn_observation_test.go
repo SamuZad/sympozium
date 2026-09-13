@@ -2,10 +2,17 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	api "github.com/sympozium-ai/sympozium/api/v1alpha1"
+	"github.com/sympozium-ai/sympozium/internal/cellnparent"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -52,7 +59,7 @@ func TestTurnObservationPreservesIdentityAndEvidence(t *testing.T) {
 		} else {
 			stale.Generation++
 		}
-		if err := r.recordTurnObservation(ctx, store, stale, false); err != nil {
+		if err := r.recordTurnObservation(ctx, store, stale, nil); err != nil {
 			t.Fatal(err)
 		}
 		if err := store.Get(ctx, key, fresh); err != nil {
@@ -66,7 +73,7 @@ func TestTurnObservationPreservesIdentityAndEvidence(t *testing.T) {
 	if err := store.Status().Update(ctx, fresh); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.recordTurnObservation(ctx, store, turn, true); err != nil {
+	if err := r.recordTurnObservation(ctx, store, turn, errors.New("unconfirmed outcome")); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Get(ctx, key, fresh); err != nil {
@@ -75,5 +82,86 @@ func TestTurnObservationPreservesIdentityAndEvidence(t *testing.T) {
 	condition = meta.FindStatusCondition(fresh.Status.Conditions, "CellnTurnComplete")
 	if condition == nil || condition.Status != "True" || condition.Reason != "Committed" || fresh.Status.Execution.Result.Succeeded || !fresh.Status.Execution.Attempted {
 		t.Fatal("observation overwrote committed failure or attempt")
+	}
+}
+
+func TestTurnObservationReportsExpiredLease(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := api.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	// Direct observation: an expired-lease refusal is terminal for new turns,
+	// not a transient reconciliation failure.
+	turn := &api.AgentRunTurn{ObjectMeta: metav1.ObjectMeta{Name: "turn", Namespace: "test", UID: "original", Generation: 1}, Spec: api.AgentRunTurnSpec{RunName: "missing", RunUID: "parent", Message: "data"}}
+	store := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&api.AgentRunTurn{}).WithObjects(turn).Build()
+	r := &AgentRunTurnReconciler{Client: store, APIReader: store}
+	expired := fmt.Errorf("slot claim: %w", cellnparent.ErrParentLeaseExpired)
+	if err := r.recordTurnObservation(ctx, store, turn, expired); err != nil {
+		t.Fatal(err)
+	}
+	fresh := &api.AgentRunTurn{}
+	if err := store.Get(ctx, client.ObjectKeyFromObject(turn), fresh); err != nil {
+		t.Fatal(err)
+	}
+	condition := meta.FindStatusCondition(fresh.Status.Conditions, "CellnTurnComplete")
+	if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != "LeaseExpired" || !strings.Contains(condition.Message, "lease") {
+		t.Fatalf("expiry not visible: %+v", condition)
+	}
+	// Full reconcile: an expired original lease refuses the claim, spends no
+	// budget, and still records the terminal reason on the turn.
+	admittedAt := time.Now().UTC().Add(-time.Hour)
+	run := &api.AgentRun{ObjectMeta: metav1.ObjectMeta{Name: "lease-run", Namespace: "tenant", UID: "lease-run-uid", Generation: 1}, Spec: api.AgentRunSpec{
+		Backend: "celln", ExecutionLifecycle: "enduring", Task: api.NewStringTask("remember violet"),
+		Enduring:       &api.EnduringRunSpec{LeaseSeconds: 60, MaxTurns: 4},
+		CellnSelection: &api.CellnCatalogueSelection{ToolRefs: []api.CellnCatalogueToolRef{}},
+	}}
+	digest, err := cellnparent.SpecDigest(run.Spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	incarnation := "blake3:" + strings.Repeat("c", 64)
+	binding := api.CellnParentBinding{Target: "https://owner.example", Principal: "tenant/lease-run-uid", RunUID: string(run.UID), SpecSHA256: digest, LaunchProfile: incarnation, Incarnation: incarnation}
+	run.Status.Phase = api.AgentRunPhaseRunning
+	run.Status.CellnParent = &api.CellnParentStatus{Binding: binding, CreateAttempted: true, AdmittedAt: &metav1.Time{Time: admittedAt},
+		InitialTurn: &api.CellnParentTurnStatus{ID: "initial", Message: "hello", Child: "blake3:" + strings.Repeat("d", 64), Attempted: true, Result: &api.CellnParentTurnResult{Succeeded: true, Answer: "ready"}}}
+	next, err := cellnparent.NewTurn(run, "turn-one", "follow up")
+	if err != nil {
+		t.Fatal(err)
+	}
+	next.UID = "turn-one-uid"
+	live := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&api.AgentRun{}, &api.AgentRunTurn{}).WithObjects(run, next).Build()
+	root := t.TempDir()
+	token := filepath.Join(root, "token")
+	if err := os.WriteFile(token, []byte("lease-expiry-observation-credential-long-enough"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(cellnparent.ApprovalConfig{APIVersion: "sympozium.ai/celln-parent-controller-v1", Approvals: []cellnparent.RunApproval{{Namespace: run.Namespace, Name: run.Name, Binding: binding, TokenFile: token}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "config.json")
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	liveReconciler := &AgentRunTurnReconciler{Client: live, APIReader: live, ParentConfigPath: path}
+	result, err := liveReconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(next)})
+	if err != nil || result.RequeueAfter == 0 {
+		t.Fatalf("expired lease did not requeue cleanly: %+v %v", result, err)
+	}
+	observed := &api.AgentRunTurn{}
+	if err := live.Get(ctx, client.ObjectKeyFromObject(next), observed); err != nil {
+		t.Fatal(err)
+	}
+	condition = meta.FindStatusCondition(observed.Status.Conditions, "CellnTurnComplete")
+	if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != "LeaseExpired" {
+		t.Fatalf("reconciled expiry not visible: %+v", condition)
+	}
+	var saved api.AgentRun
+	if err := live.Get(ctx, client.ObjectKeyFromObject(run), &saved); err != nil {
+		t.Fatal(err)
+	}
+	if saved.Status.CellnParent.AcceptedTurns != 0 {
+		t.Fatal("expired claim spent turn budget")
 	}
 }

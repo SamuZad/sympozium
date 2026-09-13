@@ -3174,6 +3174,14 @@ spec:
                     - name
                     - uid
                     type: object
+                  admittedAt:
+                    description: |-
+                      AdmittedAt records when parent creation was first attempted. It anchors
+                      the original execution lease: later tokens, turns or reconciles cannot
+                      extend it, and expiry disables new turns. Immutability is enforced by
+                      the CellnParentStatus-level validation rule.
+                    format: date-time
+                    type: string
                   binding:
                     description: |-
                       CellnParentBinding freezes operator-approved routing and run intent before
@@ -3284,6 +3292,9 @@ spec:
                 x-kubernetes-validations:
                 - message: initial parent turn cannot be removed
                   rule: '!has(oldSelf.initialTurn) || has(self.initialTurn)'
+                - message: parent admission time is immutable
+                  rule: '!has(oldSelf.admittedAt) || (has(self.admittedAt) && self.admittedAt
+                    == oldSelf.admittedAt)'
               cellnReceipt:
                 description: CellnReceipt retains the validated versioned terminal
                   receipt as JSON.

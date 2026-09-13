@@ -1,5 +1,7 @@
 package v1alpha1
 
+import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 // CellnParentBinding freezes operator-approved routing and run intent before
 // creation. It contains no credential and is not itself execution authority.
 // +kubebuilder:validation:XValidation:rule="self == oldSelf",message="parent binding is immutable"
@@ -25,12 +27,21 @@ type CellnParentBinding struct {
 }
 
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.initialTurn) || has(self.initialTurn)",message="initial parent turn cannot be removed"
+// CellnParentStatus freezes admission before creation. AdmittedAt is set
+// once with the first creation attempt and can never change after that.
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.admittedAt) || (has(self.admittedAt) && self.admittedAt == oldSelf.admittedAt)",message="parent admission time is immutable"
 type CellnParentStatus struct {
 	Binding CellnParentBinding `json:"binding"`
 	// CreateAttempted must be persisted before POST. A lost response cannot clear
 	// this bit; reconciliation must inspect the same owner instead of replaying.
 	// +kubebuilder:validation:XValidation:rule="!oldSelf || self",message="parent creation attempt cannot be cleared"
 	CreateAttempted bool `json:"createAttempted"`
+	// AdmittedAt records when parent creation was first attempted. It anchors
+	// the original execution lease: later tokens, turns or reconciles cannot
+	// extend it, and expiry disables new turns. Immutability is enforced by
+	// the CellnParentStatus-level validation rule.
+	// +optional
+	AdmittedAt *metav1.Time `json:"admittedAt,omitempty"`
 	// +optional
 	InitialTurn *CellnParentTurnStatus `json:"initialTurn,omitempty"`
 	// AcceptedTurns counts subsequent turns; the initial turn uses one additional
