@@ -17,6 +17,7 @@ import (
 	"github.com/sympozium-ai/sympozium/internal/cellnparent"
 	"github.com/zeebo/blake3"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -215,5 +216,98 @@ func proveCellnParentController(t *testing.T, loseReply bool) {
 	}
 	if len(current.Finalizers) != 1 || !current.Status.CellnParent.CreateAttempted {
 		t.Fatal("uncertain parent was forgotten")
+	}
+}
+
+// TestCellnParentWarmPrepLossRecordsOwnerOutcome reproduces the #525 signature:
+// create accepted, owner reports Initializing, then ContextLost before Ready
+// is ever observed, with no turn submitted. The run must fail without replay
+// and freeze the observable failure signature on the status.
+func TestCellnParentWarmPrepLossRecordsOwnerOutcome(t *testing.T) {
+	ctx := context.Background()
+	id := "blake3:" + strings.Repeat("b", 64)
+	run := newTestCellnRun(t, "warm-prep-loss", "warm-prep-uid")
+	run.Spec.Celln = nil
+	run.Spec.CellnSelection = &api.CellnCatalogueSelection{}
+	run.Spec.ExecutionLifecycle = "enduring"
+	run.Spec.Enduring = &api.EnduringRunSpec{LeaseSeconds: 60, MaxTurns: 2, MaxModelRequests: 2, MaxOutputTokens: 1024}
+	run.Finalizers = []string{agentRunFinalizer}
+	var creates, polls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path == "/v1/parents" {
+			creates.Add(1)
+			w.WriteHeader(202)
+			fmt.Fprintf(w, `{"incarnation":%q,"initializationPending":true,"retryAuthorized":false}`, id)
+			return
+		}
+		if polls.Add(1) <= 2 {
+			fmt.Fprintf(w, `{"incarnation":%q,"status":"Initializing","statusIsLiveOwnerObservation":true,"retryAuthorized":false}`, id)
+			return
+		}
+		fmt.Fprintf(w, `{"incarnation":%q,"status":"ContextLost","statusIsLiveOwnerObservation":false,"retryAuthorized":false}`, id)
+	}))
+	defer server.Close()
+	digest, err := cellnparent.SpecDigest(run.Spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	token := filepath.Join(root, "token")
+	if err := os.WriteFile(token, []byte("controller-parent-only-test-token"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	config := cellnparent.ApprovalConfig{APIVersion: "sympozium.ai/celln-parent-controller-v1", Approvals: []cellnparent.RunApproval{{Namespace: run.Namespace, Name: run.Name, TokenFile: token,
+		Binding: api.CellnParentBinding{Target: server.URL, Principal: "tenant/warm-prep-uid", RunUID: string(run.UID), SpecSHA256: digest, LaunchProfile: id, Incarnation: id}}}}
+	raw, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "config.json")
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	r := newAgentRunTestReconciler(t, run)
+	r.ParentConfigPath = path
+	admissions := 0
+	r.ParentAdmission = parentAdmissionFunc(func(context.Context, types.NamespacedName) error {
+		admissions++
+		if admissions > 1 {
+			return fmt.Errorf("bound parent must not be readmitted")
+		}
+		return nil
+	})
+	var current api.AgentRun
+	for range 8 {
+		if err := r.Get(ctx, client.ObjectKeyFromObject(run), &current); err != nil {
+			t.Fatal(err)
+		}
+		if current.Status.Phase == api.AgentRunPhaseFailed {
+			break
+		}
+		if _, err := r.reconcilePending(ctx, logr.Discard(), &current); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(run), &current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.Phase != api.AgentRunPhaseFailed {
+		t.Fatalf("warm-prep loss did not fail the run: %+v", current.Status)
+	}
+	if creates.Load() != 1 {
+		t.Fatalf("lost parent was replayed: creates=%d", creates.Load())
+	}
+	ready := meta.FindStatusCondition(current.Status.Conditions, "CellnParentReady")
+	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "ContextLost" {
+		t.Fatalf("loss condition missing: %+v", current.Status.Conditions)
+	}
+	outcome := current.Status.CellnParent.OwnerOutcome
+	if outcome == nil || outcome.Status != "ContextLost" || outcome.ReachedReady || outcome.ObservedAt.IsZero() {
+		t.Fatalf("owner outcome not frozen: %+v", current.Status.CellnParent)
+	}
+	for _, text := range []string{ready.Message, current.Status.Error} {
+		if !strings.Contains(text, "reachedReady=false") || !strings.Contains(text, id) {
+			t.Fatalf("failure signature missing from %q", text)
+		}
 	}
 }
