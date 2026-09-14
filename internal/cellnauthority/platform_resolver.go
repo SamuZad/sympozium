@@ -42,6 +42,10 @@ func deny(reason, format string, args ...any) error {
 	return &PlatformResolutionError{Reason: reason, Detail: fmt.Sprintf(format, args...)}
 }
 
+// Refuse builds a platform refusal with a stable reason code for callers that
+// extend the resolver's authority (plan construction, issuance gates).
+func Refuse(reason, format string, args ...any) error { return deny(reason, format, args...) }
+
 func PlatformReason(err error) string {
 	var target *PlatformResolutionError
 	if errors.As(err, &target) {
@@ -599,7 +603,12 @@ func resolveBudget(s platformSnapshot, request PlatformResolveRequest, modelRequ
 	}
 	turnDeadline := request.Now.Unix() + turnSeconds
 	turnCap := runCap
-	if maxTurns > 1 {
+	if native := s.Profile.Spec.Native; native != nil && native.TurnModelRequests > 0 && native.TurnOutputTokens > 0 {
+		// A native profile's per-turn allowance is what the owner enforces for
+		// every turn; the run's total still caps the sum.
+		turnCap.Requests = min(turnCap.Requests, native.TurnModelRequests)
+		turnCap.OutputTokens = min(turnCap.OutputTokens, native.TurnOutputTokens)
+	} else if maxTurns > 1 {
 		turnCap.Requests = min(turnCap.Requests, max(int64(1), turnCap.Requests/maxTurns))
 		turnCap.OutputTokens = min(turnCap.OutputTokens, max(int64(1), turnCap.OutputTokens/maxTurns))
 	}

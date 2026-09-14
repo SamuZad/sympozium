@@ -49,7 +49,7 @@ func TestPlatformResolverBindsHostProfileRouteToRuntimeNative(t *testing.T) {
 		t.Fatal(err)
 	}
 	raw := func(s string) apiextensionsv1.JSON { return apiextensionsv1.JSON{Raw: []byte(s)} }
-	profile.Spec.Native = &api.CellnNativeProvisioning{AdmissionWindowMs: 60000, Parent: raw(`{"workload":{"caller":"sympozium:celln"}}`), Worker: raw(`{"workload":{"caller":"sympozium:celln"}}`), Template: raw(`{"contract":"celln.json-tools/v1"}`), ModelProfile: "blake3:" + strings.Repeat("c", 64), CredentialProfile: "starter", ReservedMemoryBytes: 1, TurnModelRequests: 1, TurnOutputTokens: 1}
+	profile.Spec.Native = &api.CellnNativeProvisioning{AdmissionWindowMs: 60000, Parent: raw(`{"workload":{"caller":"sympozium:celln"}}`), Worker: raw(`{"workload":{"caller":"sympozium:celln"}}`), Template: raw(`{"contract":"celln.json-tools/v1"}`), ModelProfile: "blake3:" + strings.Repeat("c", 64), CredentialProfile: "starter", ReservedMemoryBytes: 1, TurnModelRequests: 3, TurnOutputTokens: 1536}
 	if err := f.client.Update(ctx, &profile); err != nil {
 		t.Fatal(err)
 	}
@@ -63,6 +63,10 @@ func TestPlatformResolverBindsHostProfileRouteToRuntimeNative(t *testing.T) {
 	}
 	if err := f.resolver.Revalidate(ctx, f.runKey, *resolution); err != nil {
 		t.Fatalf("stable host-profile route failed revalidation: %v", err)
+	}
+	// The per-turn cap is the profile's reviewed allowance, bounded by the run.
+	if cap := resolution.Decision.Budget.TurnCap; cap.Requests != 3 || cap.OutputTokens != 1536 {
+		t.Fatalf("turn cap does not follow the native per-turn allowance: %+v", cap)
 	}
 	// The controller freezes the connection's route into spec.model; a mirror is
 	// not an override, a different profile is.

@@ -31,7 +31,22 @@ type PlatformProvisioner struct {
 	CAFile    string `json:"caFile,omitempty"`
 }
 
-const platformAdmissionWindow = 60 * time.Second
+const (
+	platformAdmissionWindow = 60 * time.Second
+	platformChoiceVersion   = "sympozium.ai/celln-parent-platform-choice-v2"
+	platformRecordLimit     = 262144
+)
+
+// platformChoice is the durable record pinned before the owner is contacted:
+// the host that decided, the digests it committed to, and the frozen
+// resolution a retry must revalidate instead of resolving afresh.
+type platformChoice struct {
+	APIVersion     string                  `json:"apiVersion"`
+	Host           PlatformProvisioner     `json:"host"`
+	DecisionSHA256 string                  `json:"decisionSHA256"`
+	PlanSHA256     string                  `json:"planSHA256"`
+	Frozen         frozenPlatformAuthority `json:"frozen"`
+}
 
 // platformRecordName is the frozen resolution retained beside the approval so
 // every later turn revalidates the same authority the parent was issued from.
@@ -72,34 +87,48 @@ func (p PlatformProvisioner) Admit(ctx context.Context, reader client.Reader, ke
 		return err
 	}
 	resolver := cellnauthority.PlatformResolver{Reader: reader}
-	request := cellnauthority.PlatformResolveRequest{ClusterID: p.ClusterID, Now: time.Now().UTC(), AdmissionWindow: platformAdmissionWindow, Operation: "execution.start", ParentIncarnation: incarnation}
-	resolution, err := resolver.Resolve(ctx, key, request)
-	if err != nil {
-		return err
+	// The first attempt resolves and pins; every retry revalidates the pinned
+	// resolution and re-sends the identical plan, so the gateway's owner
+	// affinity and the owner's issuance ledger see one plan per incarnation.
+	choiceName := "provision-" + approvalFileName(string(run.UID))
+	var resolution *cellnauthority.PlatformResolution
+	var choice []byte
+	var pinned platformChoice
+	if existing, err := boundedFile(filepath.Join(p.Journal, choiceName), platformRecordLimit); err == nil {
+		if json.Unmarshal(existing, &pinned) != nil || pinned.APIVersion != platformChoiceVersion || pinned.Host != p || pinned.Frozen.Resolution.Decision.Run.UID != string(run.UID) || pinned.Frozen.Request.ClusterID != p.ClusterID {
+			return fmt.Errorf("pinned platform choice is unreadable or foreign; preserve issuance state")
+		}
+		pinned.Frozen.Resolution.Request = pinned.Frozen.Request
+		if err := resolver.Revalidate(ctx, key, pinned.Frozen.Resolution); err != nil {
+			return err
+		}
+		resolution, choice = &pinned.Frozen.Resolution, existing
+	} else if !strings.Contains(err.Error(), "unavailable") {
+		return fmt.Errorf("pinned platform choice unreadable: %w", err)
+	} else {
+		request := cellnauthority.PlatformResolveRequest{ClusterID: p.ClusterID, Now: time.Now().UTC(), AdmissionWindow: platformAdmissionWindow, Operation: "execution.start", ParentIncarnation: incarnation}
+		if resolution, err = resolver.Resolve(ctx, key, request); err != nil {
+			return err
+		}
 	}
 	plan, principal, err := BuildPlatformProvisionPlan(run, *resolution, scope)
 	if err != nil {
 		return err
 	}
-	decisionDigest, err := resolution.Decision.Digest()
-	if err != nil {
-		return err
-	}
-	planSum := sha256.Sum256(plan)
-	choice, err := json.Marshal(struct {
-		APIVersion     string              `json:"apiVersion"`
-		Host           PlatformProvisioner `json:"host"`
-		DecisionSHA256 string              `json:"decisionSHA256"`
-		PlanSHA256     string              `json:"planSHA256"`
-	}{"sympozium.ai/celln-parent-platform-choice-v1", p, decisionDigest, fmt.Sprintf("sha256:%x", planSum)})
-	if err != nil {
-		return err
-	}
-	if err := publishParentRecord(p.Journal, "provision-"+approvalFileName(string(run.UID)), choice); err != nil {
-		return fmt.Errorf("preserve original provision host/plan: %w", err)
-	}
-	if err := resolver.Revalidate(ctx, key, *resolution); err != nil {
-		return err
+	planSum := fmt.Sprintf("sha256:%x", sha256.Sum256(plan))
+	if choice == nil {
+		decisionDigest, err := resolution.Decision.Digest()
+		if err != nil {
+			return err
+		}
+		if choice, err = json.Marshal(platformChoice{APIVersion: platformChoiceVersion, Host: p, DecisionSHA256: decisionDigest, PlanSHA256: planSum, Frozen: frozenPlatformAuthority{Resolution: *resolution, Request: resolution.Request}}); err != nil {
+			return err
+		}
+		if err := publishBoundedRecord(p.Journal, choiceName, choice, platformRecordLimit); err != nil {
+			return fmt.Errorf("preserve original provision host/plan: %w", err)
+		}
+	} else if pinned.PlanSHA256 != planSum {
+		return fmt.Errorf("pinned provision plan no longer reproducible; preserve issuance state")
 	}
 	remote := RemoteProvisioner{Journal: p.Journal, Approvals: p.Approvals, Target: p.Target, TokenFile: p.TokenFile, CAFile: p.CAFile}
 	issued, err := remote.issue(ctx, plan, principal, incarnation)
@@ -118,7 +147,7 @@ func (p PlatformProvisioner) Admit(ctx context.Context, reader client.Reader, ke
 	if err != nil {
 		return err
 	}
-	if err := publishBoundedRecord(p.Approvals, platformRecordName(string(run.UID)), frozen, 262144); err != nil {
+	if err := publishBoundedRecord(p.Approvals, platformRecordName(string(run.UID)), frozen, platformRecordLimit); err != nil {
 		return fmt.Errorf("preserve frozen platform authority: %w", err)
 	}
 	digest, err := SpecDigest(run.Spec)
@@ -194,6 +223,12 @@ func BuildPlatformProvisionPlan(run api.AgentRun, resolution cellnauthority.Plat
 	if d.Budget.MaxTurns < 1 || d.Budget.RunCap.Requests < 1 || d.Budget.RunCap.OutputTokens < 1 || int64(run.Spec.Enduring.MaxTurns) != d.Budget.MaxTurns {
 		return nil, "", fmt.Errorf("decision budget does not bound an enduring parent")
 	}
+	// The owner admits a parent only when every turn may spend the model
+	// profile's reviewed allowance; a run whose budget affords less is refused
+	// here with a tenant-visible reason rather than by an opaque owner 409.
+	if d.Budget.TurnCap.Requests < native.TurnModelRequests || d.Budget.TurnCap.OutputTokens < native.TurnOutputTokens {
+		return nil, "", cellnauthority.Refuse(cellnauthority.ReasonLimitRange, "run budget affords less than one turn of the runtime profile's model allowance (%d requests, %d output tokens)", native.TurnModelRequests, native.TurnOutputTokens)
+	}
 	plan := HostProvisionPlan{APIVersion: "celln.parent-provision-plan/v1", Scope: scope, RunUID: string(run.UID), IntentSHA256: mustDecisionDigest(d), NativeProvisionConfig: NativeProvisionConfig{
 		AdmissionWindowMs:   uint64(native.AdmissionWindowMs),
 		Parent:              parent,
@@ -202,8 +237,8 @@ func BuildPlatformProvisionPlan(run api.AgentRun, resolution cellnauthority.Plat
 		ModelProfile:        native.ModelProfile,
 		ReservedMemoryBytes: uint64(native.ReservedMemoryBytes),
 		MaxTurns:            uint64(d.Budget.MaxTurns),
-		TurnModelRequests:   uint64(min(native.TurnModelRequests, d.Budget.TurnCap.Requests)),
-		TurnOutputTokens:    uint64(min(native.TurnOutputTokens, d.Budget.TurnCap.OutputTokens)),
+		TurnModelRequests:   uint64(d.Budget.TurnCap.Requests),
+		TurnOutputTokens:    uint64(d.Budget.TurnCap.OutputTokens),
 		TotalModelRequests:  uint64(d.Budget.RunCap.Requests),
 		TotalOutputTokens:   uint64(d.Budget.RunCap.OutputTokens),
 	}}
@@ -269,7 +304,7 @@ func revalidatePlatformAuthority(ctx context.Context, reader client.Reader, conf
 	if err != nil || !info.IsDir() || !filepath.IsAbs(config) {
 		return nil
 	}
-	raw, err := boundedFile(filepath.Join(config, platformRecordName(string(run.UID))), 262144)
+	raw, err := boundedFile(filepath.Join(config, platformRecordName(string(run.UID))), platformRecordLimit)
 	if err != nil {
 		if strings.Contains(err.Error(), "unavailable") {
 			return nil

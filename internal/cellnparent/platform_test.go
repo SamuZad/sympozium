@@ -86,11 +86,19 @@ func TestPlatformAdmissionIssuesParentFromDecisionWithoutNamespaceGrants(t *test
 	scope, _ := cellnauthority.ScopedParentScope("cluster", "tenant-a-uid")
 	launch := "blake3:" + strings.Repeat("e", 64)
 	var issued atomic.Int32
+	var refuse atomic.Bool
 	var lastPlan HostProvisionPlan
+	var bodies []string
 	owner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(io.LimitReader(r.Body, 65537))
 		if r.URL.Path != "/v1/parents/provision" || r.Header.Get("X-Celln-Parent-Incarnation") != expected || json.Unmarshal(body, &lastPlan) != nil {
 			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		bodies = append(bodies, string(body))
+		if refuse.Load() {
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"error":"parent provisioning refused; preserve issuance state","retryAuthorized":false}`))
 			return
 		}
 		issued.Add(1)
@@ -108,10 +116,20 @@ func TestPlatformAdmissionIssuesParentFromDecisionWithoutNamespaceGrants(t *test
 			t.Fatal(err)
 		}
 	}
+	// A refused issuance leaves the pinned choice; the retry re-sends the same
+	// bytes instead of resolving a new decision under a new clock.
+	refuse.Store(true)
+	if err := p.Admit(ctx, store, key); err == nil || !strings.Contains(err.Error(), "owner answered 409") {
+		t.Fatalf("owner refusal not surfaced with its status: %v", err)
+	}
+	refuse.Store(false)
 	if err := p.Admit(ctx, store, key); err != nil {
 		t.Fatal(err)
 	}
-	if issued.Load() != 1 || lastPlan.Scope != scope || lastPlan.RunUID != "tenant-a-run" || lastPlan.MaxTurns != 8 || lastPlan.TotalModelRequests != 24 || lastPlan.TotalOutputTokens != 8192 || lastPlan.TurnModelRequests != 3 || lastPlan.ModelProfile != "blake3:"+strings.Repeat("d", 64) || !strings.HasPrefix(lastPlan.IntentSHA256, "sha256:") {
+	if len(bodies) != 2 || bodies[0] != bodies[1] {
+		t.Fatalf("retry after refusal did not re-send the pinned plan (%d bodies)", len(bodies))
+	}
+	if issued.Load() != 1 || lastPlan.Scope != scope || lastPlan.RunUID != "tenant-a-run" || lastPlan.MaxTurns != 8 || lastPlan.TotalModelRequests != 24 || lastPlan.TotalOutputTokens != 8192 || lastPlan.TurnModelRequests != 3 || lastPlan.TurnOutputTokens != 1536 || lastPlan.ModelProfile != "blake3:"+strings.Repeat("d", 64) || !strings.HasPrefix(lastPlan.IntentSHA256, "sha256:") {
 		t.Fatalf("plan did not carry the policy-capped decision: %+v", lastPlan)
 	}
 	var parent struct {
@@ -136,7 +154,7 @@ func TestPlatformAdmissionIssuesParentFromDecisionWithoutNamespaceGrants(t *test
 	if err := revalidatePlatformAuthority(ctx, store, p.Approvals, &run); err != nil {
 		t.Fatalf("frozen authority did not revalidate: %v", err)
 	}
-	if err := p.Admit(ctx, store, key); err != nil || issued.Load() != 2 {
+	if err := p.Admit(ctx, store, key); err != nil || issued.Load() != 2 || bodies[2] != bodies[0] {
 		t.Fatalf("identical retry not idempotent: %v issued=%d", err, issued.Load())
 	}
 	// Policy withdrawal after issuance stops new turns without touching the parent.
@@ -180,6 +198,17 @@ func TestPlatformAdmissionRefusesUnauthorisedNamespacePersonaAndConfig(t *testin
 	store = platformStore(t, authorised...)
 	if err := p.Admit(ctx, store, types.NamespacedName{Namespace: "tenant-c", Name: "conversation"}); err == nil || !strings.Contains(err.Error(), "persona") {
 		t.Fatalf("foreign persona reached issuance: %v", err)
+	}
+	// A budget below one turn of the profile's model allowance is refused with
+	// a tenant-visible reason before anything is pinned.
+	starved := platformObjects("tenant-d")
+	starved[len(starved)-1].(*api.AgentRun).Spec.Enduring.MaxOutputTokens = 1000
+	store = platformStore(t, starved...)
+	if err := p.Admit(ctx, store, types.NamespacedName{Namespace: "tenant-d", Name: "conversation"}); cellnauthority.PlatformReason(err) != cellnauthority.ReasonLimitRange {
+		t.Fatalf("starved run budget reached issuance: %v", err)
+	}
+	if entries, _ := os.ReadDir(root); len(entries) != 1 {
+		t.Fatal("budget refusal left durable records")
 	}
 	config := RegistrationConfig{APIVersion: "sympozium.ai/celln-parent-registrations-v1", Journal: root, Approvals: root, Platform: &p}
 	path := filepath.Join(t.TempDir(), "platform.json")

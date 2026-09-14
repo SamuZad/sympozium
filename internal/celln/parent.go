@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -110,7 +111,7 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body any, outp
 		}
 	}
 	if res.StatusCode != http.StatusOK && res.StatusCode != http.StatusAccepted {
-		return res.StatusCode, ErrReconcile
+		return res.StatusCode, fmt.Errorf("%w: owner answered %d %s", ErrReconcile, res.StatusCode, refusalText(data))
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
@@ -342,4 +343,25 @@ func (c *Client) ParentTurn(ctx context.Context, id, turn string) (ParentTurnEvi
 		return ParentTurnEvidence{}, ErrReconcile
 	}
 	return result, nil
+}
+
+// refusalText is the owner's bounded, printable error field for logs; the
+// body is never interpreted beyond that.
+func refusalText(data []byte) string {
+	var refusal struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(data, &refusal) != nil {
+		return "(no error field)"
+	}
+	text := strings.Map(func(r rune) rune {
+		if r < 32 || r > 126 {
+			return -1
+		}
+		return r
+	}, refusal.Error)
+	if len(text) > 200 {
+		text = text[:200]
+	}
+	return strconv.Quote(text)
 }
