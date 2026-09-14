@@ -148,6 +148,34 @@ else
 	pass "$second hashed to $first_node and was refused there (one parent per node); not re-placed"
 fi
 
+log "Follow-up turn keeps live context on the same owner"
+uid="$(kc -n "$NAMESPACE" get agentrun "$first" -o jsonpath='{.metadata.uid}')"
+kc -n "$NAMESPACE" create -f - >/dev/null <<EOF
+apiVersion: sympozium.ai/v1alpha1
+kind: AgentRunTurn
+metadata:
+  name: $first-turn-2
+  ownerReferences:
+    - {apiVersion: sympozium.ai/v1alpha1, kind: AgentRun, name: $first, uid: "$uid", controller: true, blockOwnerDeletion: true}
+spec:
+  runName: $first
+  runUID: "$uid"
+  message: Read notes.txt with workspace-read and reply with exactly its content and revision.
+EOF
+wait_for "follow-up turn" 240 bash -c "kubectl --context kind-$CLUSTER -n $NAMESPACE get agentrunturn $first-turn-2 -o jsonpath='{.status.conditions[?(@.type==\"CellnTurnComplete\")].status}' | grep -q True"
+answer="$(kc -n "$NAMESPACE" get agentrunturn "$first-turn-2" -o jsonpath='{.status.execution.result.answer}')"
+echo "$answer" | grep -qi violet || fail "follow-up turn lost context: $answer"
+[ "$(kc -n "$NAMESPACE" get agentrunturn "$first-turn-2" -o jsonpath='{.status.execution.child}')" != "$(kc -n "$NAMESPACE" get agentrun "$first" -o jsonpath='{.status.cellnParent.initialTurn.child}')" ] || fail "turn reused the initial child"
+pass "distinct child read back: $(echo "$answer" | tr '\n' ' ')"
+
+# One parent per node: release the fleet before another namespace is tried,
+# and prove a live parent can be stopped through the gateway on the way.
+kc -n "$NAMESPACE" delete agentrun "$first" --timeout=120s >/dev/null || fail "$first could not be deleted while its owner was live"
+if run_ready "$second"; then
+	kc -n "$NAMESPACE" delete agentrun "$second" --timeout=120s >/dev/null || fail "$second could not be deleted while its owner was live"
+fi
+pass "$first deleted through the gateway; fleet released"
+
 log "A second namespace needs only wrapper objects; an unlabeled one is refused"
 tenant="$NAMESPACE-b"
 denied="$NAMESPACE-denied"
@@ -170,7 +198,9 @@ wait_for "parent $tenant_run ready in $tenant" 240 run_ready "$tenant_run" "$ten
 wait_for "initial turn of $tenant_run" 240 bash -c "kubectl --context kind-$CLUSTER -n $tenant get agentrun $tenant_run -o jsonpath='{.status.cellnParent.initialTurn.result.succeeded}' | grep -q true"
 [ "$(kc -n "$tenant" get configmap -o name | grep -c grant-)" = 0 ] || fail "grant ConfigMaps appeared in $tenant"
 [ "$(kc -n "$tenant" get cellntool -o name | wc -l)" = 0 ] || fail "namespaced tools appeared in $tenant"
-pass "$tenant_run ran in $tenant from wrapper objects only (no install, no grants, no copied tools)"
+tenant_node="$(node_of "$(kc -n "$tenant" get agentrun "$tenant_run" -o jsonpath='{.status.cellnParent.binding.launchProfile}')")"
+[ -n "$tenant_node" ] || fail "owner of $tenant_run not found"
+pass "$tenant_run ran in $tenant on $tenant_node from wrapper objects only (no install, no grants, no copied tools)"
 denied_run="$(python3 -c "
 import json, sys
 r = json.load(open(sys.argv[1])); r['metadata']['namespace'] = sys.argv[2]; print(json.dumps(r))" "$WORK/fleet-out/installation/run.json" "$denied" | kc create -f - -o jsonpath='{.metadata.name}')"
@@ -178,38 +208,13 @@ wait_for "policy refusal for $denied_run" 90 bash -c "kubectl --context kind-$CL
 [ -z "$(kc -n "$denied" get agentrun "$denied_run" -o jsonpath='{.status.cellnParent}')" ] || fail "$denied_run was issued a parent without policy"
 pass "$denied_run in unlabeled $denied refused with AUTH_POLICY_WITHDRAWN and no parent"
 
-log "Follow-up turn keeps live context on the same owner"
-uid="$(kc -n "$NAMESPACE" get agentrun "$first" -o jsonpath='{.metadata.uid}')"
-kc -n "$NAMESPACE" create -f - >/dev/null <<EOF
-apiVersion: sympozium.ai/v1alpha1
-kind: AgentRunTurn
-metadata:
-  name: $first-turn-2
-  ownerReferences:
-    - {apiVersion: sympozium.ai/v1alpha1, kind: AgentRun, name: $first, uid: "$uid", controller: true, blockOwnerDeletion: true}
-spec:
-  runName: $first
-  runUID: "$uid"
-  message: Read notes.txt with workspace-read and reply with exactly its content and revision.
-EOF
-wait_for "follow-up turn" 240 bash -c "kubectl --context kind-$CLUSTER -n $NAMESPACE get agentrunturn $first-turn-2 -o jsonpath='{.status.conditions[?(@.type==\"CellnTurnComplete\")].status}' | grep -q True"
-answer="$(kc -n "$NAMESPACE" get agentrunturn "$first-turn-2" -o jsonpath='{.status.execution.result.answer}')"
-echo "$answer" | grep -qi violet || fail "follow-up turn lost context: $answer"
-[ "$(kc -n "$NAMESPACE" get agentrunturn "$first-turn-2" -o jsonpath='{.status.execution.child}')" != "$(kc -n "$NAMESPACE" get agentrun "$first" -o jsonpath='{.status.cellnParent.initialTurn.child}')" ] || fail "turn reused the initial child"
-pass "distinct child read back: $(echo "$answer" | tr '\n' ' ')"
-
 log "Removing a node's label drains its owner and reports context loss"
-kc label node "$first_node" celln.dev/kvm- >/dev/null
-wait_for "owner drain on $first_node" 120 bash -c "[ \$(kubectl --context kind-$CLUSTER -n celln-system get pods -l app.kubernetes.io/name=celln-node --field-selector spec.nodeName=$first_node -o name | wc -l) = 0 ]"
-wait_for "context loss report for $first" 180 bash -c "kubectl --context kind-$CLUSTER -n $NAMESPACE get agentrun $first -o jsonpath='{.status.error}' | grep -q 'context lost or stopped'"
-if [ "$second_node" != "$first_node" ]; then
-	run_ready "$second" || fail "$second on $second_node was affected by draining $first_node"
-	pass "$first reports ContextLost with owner outcome; $second on $second_node still Ready"
-else
-	pass "$first reports ContextLost with owner outcome after its owner left"
-fi
-kc -n "$NAMESPACE" delete agentrun "$first" --timeout=120s >/dev/null || fail "$first could not be deleted after its owner left"
-pass "$first deleted; cleanup released after owner removal"
+kc label node "$tenant_node" celln.dev/kvm- >/dev/null
+wait_for "owner drain on $tenant_node" 120 bash -c "[ \$(kubectl --context kind-$CLUSTER -n celln-system get pods -l app.kubernetes.io/name=celln-node --field-selector spec.nodeName=$tenant_node -o name | wc -l) = 0 ]"
+wait_for "context loss report for $tenant_run" 180 bash -c "kubectl --context kind-$CLUSTER -n $tenant get agentrun $tenant_run -o jsonpath='{.status.error}' | grep -q 'context lost or stopped'"
+pass "$tenant_run reports ContextLost with owner outcome after its owner left"
+kc -n "$tenant" delete agentrun "$tenant_run" --timeout=120s >/dev/null || fail "$tenant_run could not be deleted after its owner left"
+pass "$tenant_run deleted; cleanup released after owner removal"
 
-kc label node --overwrite "$first_node" celln.dev/kvm=true >/dev/null
+kc label node --overwrite "$tenant_node" celln.dev/kvm=true >/dev/null
 pass "celln fleet integration complete (work dir: $WORK)"
