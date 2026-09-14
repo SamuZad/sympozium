@@ -1,7 +1,12 @@
 {{- $enduring := and .Values.celln.enabled .Values.celln.dispatcher.enduring.enabled }}
 {{- $parent := .Values.celln.dispatcher.enduring }}
+{{- $fleet := .Values.celln.fleet | default dict }}
+{{- $fleetParents := and .Values.celln.enabled $fleet.enabled ($fleet.parentConfigSecret | default "") }}
 {{- if and .Values.controller.watchNamespace .Values.controller.excludeWatchNamespaces }}
 {{- fail "choose either controller.watchNamespace or controller.excludeWatchNamespaces" }}
+{{- end }}
+{{- if and $fleetParents (ne (int .Values.controller.replicas) 1) }}
+{{- fail "celln.fleet.parentConfigSecret requires one controller replica sharing one journal claim" }}
 {{- end }}
 apiVersion: apps/v1
 kind: Deployment
@@ -32,6 +37,25 @@ spec:
         runAsUser: {{ $parent.uid }}
         runAsGroup: {{ $parent.gid }}
         {{- end }}
+      {{- if $fleetParents }}
+      # The manager refuses to create its journal/approval directories, so a
+      # root step prepares them on the claim for the non-root manager.
+      initContainers:
+        - name: prepare-parent-journal
+          image: {{ printf "%s:%s" (.Values.celln.image.repository | default "ghcr.io/sympozium-ai/sympozium/celln-installer") (.Values.celln.image.tag | default .Chart.AppVersion) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/bin/install", "-d", "-m", "0700", "-o", "65532", "-g", "65532", "/var/lib/sympozium/celln-parent/journal", "/var/lib/sympozium/celln-parent/approvals"]
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN", "DAC_OVERRIDE", "FOWNER"]
+          volumeMounts:
+            - name: celln-parent-journal
+              mountPath: /var/lib/sympozium/celln-parent
+      {{- end }}
       containers:
         - name: manager
           image: {{ include "sympozium.controllerImage" . }}
@@ -167,6 +191,14 @@ spec:
             - name: CELLN_PARENT_REGISTRATIONS
               value: /etc/sympozium/celln-parent/registrations.json
             {{- end }}
+            {{- if $fleetParents }}
+            # Fleet parents are issued by their gateway-bound owner; the
+            # controller keeps only its own journal/approvals on a claim.
+            - name: CELLN_PARENT_CONFIG
+              value: /var/lib/sympozium/celln-parent/approvals
+            - name: CELLN_PARENT_REGISTRATIONS
+              value: /etc/sympozium/celln-parent/registrations.json
+            {{- end }}
             {{- end }}
             {{- if .Values.pricing.enabled }}
             - name: SYMPOZIUM_PRICING_CONFIGMAP
@@ -197,7 +229,7 @@ spec:
             {{- toYaml .Values.controller.resources | nindent 12 }}
           securityContext:
             {{- toYaml .Values.containerSecurityContext | nindent 12 }}
-          {{- if and .Values.celln.enabled (or .Values.celln.tokenSecret .Values.celln.catalogueConfigSecret .Values.celln.caConfigMap (and .Values.celln.dispatcher .Values.celln.dispatcher.enduring .Values.celln.dispatcher.enduring.enabled .Values.celln.dispatcher.enduring.parentConfigSecret)) }}
+          {{- if and .Values.celln.enabled (or .Values.celln.tokenSecret .Values.celln.catalogueConfigSecret .Values.celln.caConfigMap $fleetParents (and .Values.celln.dispatcher .Values.celln.dispatcher.enduring .Values.celln.dispatcher.enduring.enabled .Values.celln.dispatcher.enduring.parentConfigSecret)) }}
           volumeMounts:
             {{- if .Values.celln.caConfigMap }}
             - name: celln-router-ca
@@ -221,8 +253,15 @@ spec:
               mountPath: /etc/sympozium/celln-parent
               readOnly: true
             {{- end }}
+            {{- if $fleetParents }}
+            - name: celln-parent-journal
+              mountPath: /var/lib/sympozium/celln-parent
+            - name: celln-parent-config
+              mountPath: /etc/sympozium/celln-parent
+              readOnly: true
+            {{- end }}
           {{- end }}
-      {{- if and .Values.celln.enabled (or .Values.celln.tokenSecret .Values.celln.catalogueConfigSecret .Values.celln.caConfigMap (and .Values.celln.dispatcher .Values.celln.dispatcher.enduring .Values.celln.dispatcher.enduring.enabled .Values.celln.dispatcher.enduring.parentConfigSecret)) }}
+      {{- if and .Values.celln.enabled (or .Values.celln.tokenSecret .Values.celln.catalogueConfigSecret .Values.celln.caConfigMap $fleetParents (and .Values.celln.dispatcher .Values.celln.dispatcher.enduring .Values.celln.dispatcher.enduring.enabled .Values.celln.dispatcher.enduring.parentConfigSecret)) }}
       volumes:
         {{- if .Values.celln.caConfigMap }}
         - name: celln-router-ca
@@ -250,6 +289,14 @@ spec:
         - name: celln-parent-config
           secret:
             secretName: {{ .Values.celln.dispatcher.enduring.parentConfigSecret | quote }}
+        {{- end }}
+        {{- if $fleetParents }}
+        - name: celln-parent-journal
+          persistentVolumeClaim:
+            claimName: {{ ($fleet.journal | default dict).claim | default "celln-parent-journal" | quote }}
+        - name: celln-parent-config
+          secret:
+            secretName: {{ $fleet.parentConfigSecret | quote }}
         {{- end }}
       {{- end }}
       {{- if $enduring }}

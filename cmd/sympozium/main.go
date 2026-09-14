@@ -1259,6 +1259,7 @@ func newInstallCmd() *cobra.Command {
 	var cellnNativeApprove bool
 	var nativeOpts cellninstall.Options
 	var nativePlane cellninstall.PlaneOptions
+	var fleet cellnFleetFlags
 	cmd := &cobra.Command{
 		Use:   "install",
 		Short: "Install Sympozium into the current Kubernetes cluster",
@@ -1285,6 +1286,16 @@ Use --celln-native to also install the native Celln starter catalogue and grant
 layers (enduring native parents); it requires the operator-reviewed
 --celln-native-* inputs and --celln-native-approve-starter-tools.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if fleet.enabled {
+				if noCelln || cellnHostInstaller || cellnNative || len(cellnBackends) != 0 {
+					return fmt.Errorf("--celln-fleet replaces the single dispatcher and cannot combine with --no-celln, --celln-host-installer, --celln-native or --celln-backend")
+				}
+				cellnValues, err := cellnInstallSetValues(cmd.Context(), cellnRouterImage, cellnInstallerImage, nil, cellnRouterReplicas, false)
+				if err != nil {
+					return err
+				}
+				return installCellnFleet(cmd.Context(), fleet, imageTag, append(setValues, cellnValues...), cellnNativeApprove)
+			}
 			if cellnNative {
 				if noCelln || cellnHostInstaller || len(cellnBackends) != 0 {
 					return fmt.Errorf("--celln-native requires the managed in-cluster dispatcher")
@@ -1355,6 +1366,7 @@ layers (enduring native parents); it requires the operator-reviewed
 	cmd.Flags().StringVar(&nativeOpts.OwnerTarget, "celln-native-owner-target", "", "Stable owner origin. HTTPS is required for external owners; a cluster-local owner may use http:// when the plane's insecure acknowledgement is set")
 	cmd.Flags().StringVar(&nativeOpts.Scope, "celln-native-scope", "", "Stable installation identity; never change to renew consumed authority")
 	cmd.Flags().StringVar(&nativeOpts.PackageHash, "celln-native-package-hash", "", "Exact operator-approved package BLAKE3 identity")
+	fleet.register(cmd)
 	return cmd
 }
 

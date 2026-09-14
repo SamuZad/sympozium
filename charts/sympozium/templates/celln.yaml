@@ -18,6 +18,7 @@
 {{- end }}
 {{- end }}
 {{- $dispatcher := .Values.celln.dispatcher | default dict }}
+{{- $fleet := .Values.celln.fleet | default dict }}
 {{- $parent := $dispatcher.enduring }}
 {{- if $parent.enabled }}
 {{- if or .Values.celln.router.external (ne (len .Values.celln.router.backends) 1) }}
@@ -62,7 +63,7 @@
 {{- fail "external Celln router cannot enable the legacy host installer" }}
 {{- end }}
 {{- else }}
-{{- if not .Values.celln.router.backends }}
+{{- if and (not .Values.celln.router.backends) (not $fleet.enabled) }}
 {{- fail "celln.router.backends must contain the complete stable dispatcher endpoint list" }}
 {{- end }}
 {{- range .Values.celln.router.backends }}
@@ -496,8 +497,15 @@ spec:
         - route
         - --listen
         - 0.0.0.0:8788
+        {{- if .Values.celln.router.backends }}
         - --backends
         - {{ join "," .Values.celln.router.backends | quote }}
+        {{- end }}
+        {{- if $fleet.enabled }}
+        # Every ready fleet owner, resolved through the headless Service.
+        - --backends-srv
+        - celln-node.celln-system.svc.cluster.local:8787
+        {{- end }}
         - --token-file
         - /etc/celln/backend/token
         - --client-token-file

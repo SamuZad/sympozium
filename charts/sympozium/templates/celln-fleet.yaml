@@ -1,0 +1,349 @@
+{{- $fleet := .Values.celln.fleet | default dict }}
+{{- if and .Values.celln.enabled $fleet.enabled }}
+{{- if or .Values.celln.dispatcher.enabled .Values.celln.installer.enabled .Values.celln.nativeParent.enabled .Values.celln.router.external }}
+{{- fail "celln.fleet replaces the single in-cluster dispatcher and cannot combine with installer, nativeParent or an external router" }}
+{{- end }}
+{{- if not (regexMatch "^[a-z0-9][a-z0-9-]{0,62}$" ($fleet.scope | default "")) }}
+{{- fail "celln.fleet.scope must be a stable DNS-label installation identity" }}
+{{- end }}
+{{- $package := $fleet.package | default dict }}
+{{- if not (regexMatch "^[^@:[:space:]]+(:[0-9]+)?(/[^@[:space:]]+)?@sha256:[a-f0-9]{64}$" ($package.image | default "")) }}
+{{- fail "celln.fleet.package.image must be a digest-pinned OCI reference (repository@sha256:...)" }}
+{{- end }}
+{{- if not (regexMatch "^blake3:[a-f0-9]{64}$" ($package.hash | default "")) }}
+{{- fail "celln.fleet.package.hash must be the reviewed blake3 package hash" }}
+{{- end }}
+{{- if or (not $fleet.publisher) (not $fleet.principal) (not $fleet.parentClientsConfigMap) (not $fleet.configurationConfigMap) }}
+{{- fail "celln.fleet requires publisher, principal, parentClientsConfigMap and configurationConfigMap" }}
+{{- end }}
+{{- if not .Values.celln.router.parentTokenSecret }}
+{{- fail "celln.fleet requires router.parentTokenSecret for gateway parent routing" }}
+{{- end }}
+{{- $model := $fleet.modelCredential | default dict }}
+{{- $credential := $model.path | default "" }}
+{{- if or (not $model.secret) (not (hasPrefix "/" $credential)) (contains ".." $credential) (eq (dir $credential) "/") (hasSuffix "/" $credential) }}
+{{- fail "celln.fleet.modelCredential requires a Secret and a clean absolute file path in a dedicated directory" }}
+{{- end }}
+{{- if lt (int $fleet.maxCells) 2 }}
+{{- fail "celln.fleet.maxCells must allow a parent and a child" }}
+{{- end }}
+{{- $state := printf "/var/lib/sympozium-celln/%s" $fleet.scope }}
+{{- $root := printf "%s/authority" $state }}
+{{- $image := printf "%s:%s" (.Values.celln.image.repository | default "ghcr.io/sympozium-ai/sympozium/celln-installer") (.Values.celln.image.tag | default .Chart.AppVersion) }}
+{{- $backendSecret := (.Values.celln.bootstrap | default dict).backendTokenSecret | default "celln-dispatcher-backend" }}
+{{- $journal := $fleet.journal | default dict }}
+{{- if and $fleet.parentConfigSecret $journal.create }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $journal.claim | default "celln-parent-journal" | quote }}
+  namespace: {{ include "sympozium.namespace" . }}
+  labels:
+    app.kubernetes.io/part-of: sympozium
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: {{ $journal.storage | default "1Gi" | quote }}
+  {{- with $journal.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+{{- end }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: celln-node
+  namespace: celln-system
+  labels:
+    app.kubernetes.io/part-of: sympozium
+automountServiceAccountToken: false
+---
+# The preparing node publishes the scope's starter configuration once; later
+# nodes only read and compare it. Nothing else in the namespace is reachable.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: celln-node-configuration
+  namespace: celln-system
+  labels:
+    app.kubernetes.io/part-of: sympozium
+rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [create]
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [{{ $fleet.configurationConfigMap | quote }}]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: celln-node-configuration
+  namespace: celln-system
+  labels:
+    app.kubernetes.io/part-of: sympozium
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: celln-node-configuration
+subjects:
+  - kind: ServiceAccount
+    name: celln-node
+    namespace: celln-system
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: celln-fleet-prepare
+  namespace: celln-system
+  labels:
+    app.kubernetes.io/part-of: sympozium
+data:
+  prepare.sh: |
+{{ .Files.Get "files/celln/fleet-prepare.sh" | indent 4 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: celln-node
+  namespace: celln-system
+  labels:
+    app.kubernetes.io/name: celln-node
+    app.kubernetes.io/part-of: sympozium
+spec:
+  # Headless: the router resolves every ready owner's address itself and keeps
+  # each parent bound to the address that issued it.
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: celln-node
+  ports:
+    - name: http
+      port: 8787
+      targetPort: 8787
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: celln-node
+  namespace: celln-system
+  labels:
+    app.kubernetes.io/name: celln-node
+    app.kubernetes.io/part-of: sympozium
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: celln-node
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: celln-node
+      annotations:
+        celln.sympozium.ai/package: {{ $package.hash | quote }}
+    spec:
+      serviceAccountName: celln-node
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      nodeSelector:
+        celln.dev/kvm: "true"
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      initContainers:
+        - name: prepare
+          image: {{ $image | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/bash", "/etc/celln-fleet/prepare.sh"]
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: FLEET_STATE
+              value: {{ $state | quote }}
+            - name: FLEET_PACKAGE_IMAGE
+              value: {{ $package.image | quote }}
+            - name: FLEET_PACKAGE_HASH
+              value: {{ $package.hash | quote }}
+            - name: FLEET_PUBLISHER
+              value: {{ $fleet.publisher | quote }}
+            - name: FLEET_PRINCIPAL
+              value: {{ $fleet.principal | quote }}
+            - name: FLEET_MODEL_CREDENTIAL_FILE
+              value: {{ $credential | quote }}
+            - name: FLEET_PARENT_CLIENTS
+              value: /etc/celln-fleet/clients/trusted-parent-clients.json
+            - name: FLEET_CONFIGURATION_CONFIGMAP
+              value: {{ $fleet.configurationConfigMap | quote }}
+            - name: FLEET_NAMESPACE
+              value: celln-system
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: prepare
+              mountPath: /etc/celln-fleet/prepare.sh
+              subPath: prepare.sh
+              readOnly: true
+            - name: parent-clients
+              mountPath: /etc/celln-fleet/clients
+              readOnly: true
+            {{- if $package.pullSecret }}
+            - name: registry
+              mountPath: /etc/celln-fleet/registry
+              readOnly: true
+            {{- end }}
+            - name: publisher-credentials
+              mountPath: /var/run/secrets/celln-fleet
+              readOnly: true
+            - name: state
+              mountPath: {{ $state | quote }}
+            - name: kvm
+              mountPath: /dev/kvm
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "2Gi"
+              cpu: "2000m"
+      containers:
+        - name: dispatcher
+          image: {{ $image | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/celln"]
+          args:
+            - dispatcher
+            - --listen
+            - 0.0.0.0:8787
+            - --unsafe-non-loopback
+            - --token-file
+            - /etc/celln/backend/token
+            - --root
+            - {{ $root | quote }}
+            - --mote-store
+            - {{ printf "%s/motes" $root | quote }}
+            - --tool-store
+            - {{ printf "%s/tools" $root | quote }}
+            - --node-name
+            - $(NODE_NAME)
+            {{- range $fleet.allowEgressHosts | default (list "api.deepseek.com") }}
+            - --allow-egress-host
+            - {{ . | quote }}
+            {{- end }}
+            - --max-cells
+            - {{ $fleet.maxCells | int | quote }}
+            - --memory-bytes
+            - {{ $fleet.memoryBytes | int64 | quote }}
+            - --egress-slots
+            - {{ $fleet.egressSlots | default 1 | quote }}
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          ports:
+            - name: http
+              containerPort: 8787
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /v1/health
+              port: 8787
+            periodSeconds: 2
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -ec
+                  - |
+                    printf 'Authorization: Bearer %s\n' "$(cat /etc/celln/backend/token)" | curl --fail --silent --show-error --max-time 50 --header @- --request POST http://127.0.0.1:8787/v1/drain
+          securityContext:
+            privileged: true
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: backend
+              mountPath: /etc/celln/backend
+              readOnly: true
+            - name: state
+              mountPath: {{ $state | quote }}
+            - name: model-credential
+              mountPath: {{ dir $credential | quote }}
+              readOnly: true
+            - name: kvm
+              mountPath: /dev/kvm
+            - name: boot
+              mountPath: /boot
+              readOnly: true
+            - name: modules
+              mountPath: /lib/modules
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: prepare
+          configMap:
+            name: celln-fleet-prepare
+            defaultMode: 0555
+        - name: parent-clients
+          configMap:
+            name: {{ $fleet.parentClientsConfigMap | quote }}
+        {{- if $package.pullSecret }}
+        - name: registry
+          secret:
+            secretName: {{ $package.pullSecret | quote }}
+            defaultMode: 0400
+        {{- end }}
+        # Only the preparing step may reach the API; the dispatcher gets no token.
+        - name: publisher-credentials
+          projected:
+            defaultMode: 0400
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3600
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+        - name: backend
+          secret:
+            secretName: {{ $backendSecret | quote }}
+            defaultMode: 0440
+        - name: model-credential
+          secret:
+            secretName: {{ $model.secret | quote }}
+            defaultMode: 0400
+            items:
+              - key: token
+                path: {{ base $credential | quote }}
+        - name: state
+          hostPath:
+            path: {{ $state | quote }}
+            type: DirectoryOrCreate
+        - name: kvm
+          hostPath:
+            path: /dev/kvm
+            type: CharDevice
+        - name: boot
+          hostPath:
+            path: /boot
+            type: Directory
+        - name: modules
+          hostPath:
+            path: /lib/modules
+            type: Directory
+        - name: tmp
+          emptyDir: {}
+{{- end }}
