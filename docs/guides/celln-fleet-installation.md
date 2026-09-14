@@ -40,8 +40,10 @@ controller mounts no host state at all, and no node is ever named in values.
 
 ## Prerequisites
 
-1. Nodes with `/dev/kvm`, a readable `/boot` and `/lib/modules`, and an
-   enforcing CNI if you rely on the rendered NetworkPolicies.
+1. Nodes with `/dev/kvm`, a readable kernel under `/boot` with its
+   `/lib/modules` directory (the dispatcher's readiness gate checks for one;
+   Kind nodes ship without a kernel, so copy the host's in for development),
+   and an enforcing CNI if you rely on the rendered NetworkPolicies.
 2. A reviewed starter package, built **once** on any Linux host with the
    pinned Celln release (`config/celln/release.json`):
 
@@ -113,10 +115,15 @@ kubectl -n celln-system logs -l app.kubernetes.io/name=celln-router | grep backe
 ```
 
 Then create an enduring run in the installed namespace with the three starter
-tools, as in the [native installation guide](celln-native-installation.md).
+tools, as in the [native installation guide](celln-native-installation.md);
+the installer leaves a ready-made `run.json` under the output directory.
 The run's `status.cellnParent.binding.target` is the gateway; the gateway's
 `provisions` and `parents` ledgers on the ownership claim record which owner
-holds it.
+holds it, and that owner's `authority/parent-journal` carries the incarnation.
+Follow-up turns created by hand must carry the run's controller
+`ownerReference` (the API server adds it for you); a turn without one is
+refused as unbound. `test/integration/test-celln-fleet.sh` runs the whole
+journey on a three-node Kind cluster, including a node-leave drain.
 
 ## Operations
 
