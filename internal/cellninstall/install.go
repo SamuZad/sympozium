@@ -249,7 +249,7 @@ func Install(ctx context.Context, store client.Client, o Options) error {
 	if err := write("preview.json", map[string]any{"apiVersion": "sympozium.ai/celln-permission-preview-v1", "bindings": []any{map[string]any{"agent": client.ObjectKeyFromObject(agent), "operatorSource": ref("operator"), "runtimeSource": ref("runtime"), "agentSource": ref("agent")}}}); err != nil {
 		return err
 	}
-	run := &api.AgentRun{TypeMeta: metav1.TypeMeta{APIVersion: "sympozium.ai/v1alpha1", Kind: "AgentRun"}, ObjectMeta: metav1.ObjectMeta{GenerateName: "celln-starter-", Namespace: o.Namespace}, Spec: api.AgentRunSpec{AgentRef: agent.Name, Backend: "celln", ExecutionLifecycle: "enduring", CellnSelection: &api.CellnCatalogueSelection{RuntimeRef: runtime.Name, ToolRefs: refs}, Model: configured.Model, SystemPrompt: cat.SystemPrompt, Enduring: &configured.HostLimits, Task: api.NewStringTask("Write violet to notes.txt using workspace-write with revision 0.")}}
+	run := &api.AgentRun{TypeMeta: metav1.TypeMeta{APIVersion: "sympozium.ai/v1alpha1", Kind: "AgentRun"}, ObjectMeta: metav1.ObjectMeta{GenerateName: "celln-starter-", Namespace: o.Namespace}, Spec: api.AgentRunSpec{AgentRef: agent.Name, Backend: "celln", ExecutionLifecycle: "enduring", CellnSelection: &api.CellnCatalogueSelection{RuntimeRef: runtime.Name, ToolRefs: refs}, Model: configured.Model, SystemPrompt: cat.SystemPrompt, Enduring: &configured.HostLimits, Task: api.NewStringTask("Write violet to notes.txt using workspace-write with revision 0. Make exactly that one tool call, then reply done.")}}
 	if err := write("run.json", run); err != nil {
 		return err
 	}
