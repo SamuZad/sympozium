@@ -506,11 +506,17 @@ func resolveDecisionRoute(s platformSnapshot, required bool) (DecisionRouteBindi
 		auth = "secret"
 	}
 	if c.Spec.CredentialProfile != "" {
-		return empty, deny(ReasonRouteMismatch, "shared namespace execution requires gateway Secret custody, not a host credential profile")
+		// An owner-installed credential profile is an explicit operator route
+		// (policy auth "host-profile"), never tenant custody: the runtime
+		// profile's native material names the only profile a wrapper may use.
+		if s.Profile.Spec.Native == nil || s.Profile.Spec.Native.CredentialProfile != c.Spec.CredentialProfile {
+			return empty, deny(ReasonRouteMismatch, "host credential profile is not the runtime profile's installed model credential")
+		}
+		auth = "host-profile"
 	}
 	var origin string
 	var err error
-	if auth == "secret" {
+	if auth != "none" {
 		origin, err = api.ModelEndpointOriginInsecure(c.Spec.Endpoint, c.Spec.AllowInsecure)
 		if err == nil && !strings.HasPrefix(strings.ToLower(origin), "https://") {
 			err = fmt.Errorf("credential-bearing model endpoint must use HTTPS")
