@@ -7,6 +7,7 @@ import (
 
 	"github.com/go-logr/logr"
 	api "github.com/sympozium-ai/sympozium/api/v1alpha1"
+	"github.com/sympozium-ai/sympozium/internal/cellnscoped"
 	batchv1 "k8s.io/api/batch/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -55,6 +56,30 @@ func TestLegacyNamespacedCatalogueSelectionIsNotMisrepresentedAsScoped(t *testin
 		t.Fatalf("legacy selection classified as scoped: shared=%v err=%v", shared, err)
 	}
 }
+
+func TestLegacyEnduringSelectionReachesParentDispatcherWithoutScopedReceiver(t *testing.T) {
+	legacy := &api.AgentRun{Spec: api.AgentRunSpec{ExecutionLifecycle: "enduring", CellnSelection: &api.CellnCatalogueSelection{RuntimeRef: "celln-native", ToolRefs: []api.CellnCatalogueToolRef{{Name: "workspace-read", Revision: "v1"}}}}}
+	shared := &api.AgentRun{Spec: api.AgentRunSpec{ExecutionLifecycle: "enduring", CellnSelection: &api.CellnCatalogueSelection{ClusterToolRefs: []api.ClusterCellnToolRef{{Name: "shared-tool", Revision: "v1"}}}}}
+	prepared := &AgentRunReconciler{ParentAdmission: stubParentAdmission{}}
+	if scoped, err := prepared.sharedCatalogueSelected(context.Background(), legacy); err != nil || scoped {
+		t.Fatalf("legacy enduring selection held although the parent path is prepared: scoped=%v err=%v", scoped, err)
+	}
+	if scoped, err := prepared.sharedCatalogueSelected(context.Background(), shared); err != nil || !scoped {
+		t.Fatalf("shared enduring intent reached the legacy parent path: scoped=%v err=%v", scoped, err)
+	}
+	for name, r := range map[string]*AgentRunReconciler{
+		"nothing-configured": {},
+		"scoped-receiver":    {ScopedDispatcher: &cellnscoped.Dispatcher{}, ParentAdmission: stubParentAdmission{}},
+	} {
+		if scoped, err := r.sharedCatalogueSelected(context.Background(), legacy); err != nil || !scoped {
+			t.Fatalf("%s: enduring selection escaped to legacy issuance: scoped=%v err=%v", name, scoped, err)
+		}
+	}
+}
+
+type stubParentAdmission struct{}
+
+func (stubParentAdmission) Admit(context.Context, types.NamespacedName) error { return nil }
 
 func TestScopedTerminalRetainsFinalizerWhenCleanupIsUnconfirmed(t *testing.T) {
 	run := &api.AgentRun{

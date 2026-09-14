@@ -40,10 +40,13 @@ func (r *AgentRunReconciler) sharedCatalogueSelected(ctx context.Context, run *a
 	if selection == nil {
 		return false, nil
 	}
-	// Explicit enduring catalogue intent is owned exclusively by the scoped
-	// lifecycle wire. Unsupported wrappers are refused by its resolver; they may
-	// never fall through to the older parent dispatcher.
-	if run.Spec.ExecutionLifecycle == "enduring" {
+	// A configured scoped receiver owns every enduring catalogue selection;
+	// unsupported wrappers are refused by its resolver rather than falling
+	// through. Without one, an enduring selection is still held for it unless
+	// the prepared native parent path is actually configured, and even then
+	// explicit shared intent (cluster tools, a platform profile) never reaches
+	// legacy parent issuance.
+	if run.Spec.ExecutionLifecycle == "enduring" && (r.ScopedDispatcher != nil || r.ParentAdmission == nil) {
 		return true, nil
 	}
 	if len(selection.ClusterToolRefs) != 0 {
