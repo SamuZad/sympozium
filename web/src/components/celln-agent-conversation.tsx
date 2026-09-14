@@ -13,21 +13,25 @@ const DEFAULT_ENDURING = {
 };
 
 /**
- * Interactive chat for a native Celln Agent. The conversation is an enduring
- * AgentRun (the host-native parent); the first message is the initial turn and
- * follow-up turns are durable AgentRunTurn records. This mirrors Run detail,
- * but starts or resumes the parent directly from the Agent's Harness tab.
+ * Interactive chat for a native Celln Agent. Each conversation is an enduring
+ * AgentRun (its own host-native parent with its own context); the first message
+ * is the initial turn and follow-up turns are durable AgentRunTurn records. An
+ * Agent may hold any number of conversations at once; the platform, not this
+ * view, decides capacity.
  */
 export function CellnAgentConversation({
   agent,
-  parent,
+  parents = [],
 }: {
   agent: Agent;
-  parent?: AgentRun;
+  /** This Agent's enduring runs, newest first. */
+  parents?: AgentRun[];
 }) {
   const createRun = useCreateRun();
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [selected, setSelected] = useState<string>("");
+  const [composing, setComposing] = useState(false);
 
   const execution = agent.spec.execution;
   const runtimeRef =
@@ -39,11 +43,8 @@ export function CellnAgentConversation({
   const provider = modelConnectionRef ? undefined : execution?.provider;
   const limits = execution?.enduring || DEFAULT_ENDURING;
 
-  // The newest live parent is the conversation; a terminal one is surfaced by
-  // CellnConversation so the operator can reconcile or delete it.
-  if (parent) {
-    return <CellnConversation run={parent} />;
-  }
+  const current = parents.find((run) => run.metadata.name === selected) || parents[0];
+  const showComposer = composing || parents.length === 0;
 
   function start() {
     const text = message.trim();
@@ -63,7 +64,11 @@ export function CellnAgentConversation({
         enduring: limits,
       },
       {
-        onSuccess: () => setMessage(""),
+        onSuccess: (run) => {
+          setMessage("");
+          setComposing(false);
+          if (run?.metadata?.name) setSelected(run.metadata.name);
+        },
         onError: (err) =>
           setError(
             err instanceof Error
@@ -74,7 +79,41 @@ export function CellnAgentConversation({
     );
   }
 
+  const conversationList = parents.length > 0 && (
+    <div className="flex flex-wrap items-center gap-2" data-testid="celln-agent-conversations">
+      {parents.map((run) => {
+        const active = !showComposer && run.metadata.name === current?.metadata.name;
+        return (
+          <Button
+            key={run.metadata.uid || run.metadata.name}
+            size="sm"
+            variant={active ? "default" : "outline"}
+            onClick={() => { setSelected(run.metadata.name); setComposing(false); }}
+            title={run.spec.task ? String(run.spec.task).slice(0, 200) : undefined}
+          >
+            {run.metadata.name}
+            <span className="ml-2 text-xs opacity-70">{run.status?.phase || "Pending"}</span>
+          </Button>
+        );
+      })}
+      <Button size="sm" variant={showComposer ? "default" : "secondary"} data-testid="celln-agent-new-conversation" onClick={() => setComposing(true)}>
+        New conversation
+      </Button>
+    </div>
+  );
+
+  if (!showComposer && current) {
+    return (
+      <div className="space-y-3">
+        {conversationList}
+        <CellnConversation run={current} />
+      </div>
+    );
+  }
+
   return (
+    <div className="space-y-3">
+    {conversationList}
     <Card data-testid="celln-agent-conversation">
       <CardHeader>
         <CardTitle className="text-base">
@@ -84,8 +123,9 @@ export function CellnAgentConversation({
       <CardContent className="space-y-3">
         <p className="text-sm text-muted-foreground">
           Start an enduring native parent. The first message runs as the initial
-          turn; each follow-up turn runs in a disposable child cell. This creates
-          a request — the host operator's parent registration must admit it.
+          turn; each follow-up turn runs in a disposable child cell. Every
+          conversation is its own parent with its own context, so you can keep
+          several open for this Agent at once.
         </p>
         <label className="block space-y-2">
           <span className="text-sm font-medium">First message</span>
@@ -110,7 +150,13 @@ export function CellnAgentConversation({
             {error}
           </p>
         )}
+        {parents.length > 0 && (
+          <Button size="sm" variant="ghost" onClick={() => setComposing(false)}>
+            Back to conversations
+          </Button>
+        )}
       </CardContent>
     </Card>
+    </div>
   );
 }
