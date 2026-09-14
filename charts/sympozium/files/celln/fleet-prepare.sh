@@ -35,11 +35,14 @@ package="$FLEET_STATE/package-$hex"
 if [ ! -f "$package/package.json" ]; then
 	staging="$(mktemp -d "$FLEET_STATE/.package-XXXXXX")"
 	trap 'rm -rf "$staging"' EXIT
-	authfile=()
+	pull=()
 	if [ -f /etc/celln-fleet/registry/.dockerconfigjson ]; then
-		authfile=(--authfile /etc/celln-fleet/registry/.dockerconfigjson)
+		pull+=(--authfile /etc/celln-fleet/registry/.dockerconfigjson)
 	fi
-	skopeo copy --override-os linux --override-arch amd64 "${authfile[@]}" \
+	if [ "${FLEET_PACKAGE_INSECURE:-false}" = true ]; then
+		pull+=(--src-tls-verify=false)
+	fi
+	skopeo copy --override-os linux --override-arch amd64 "${pull[@]}" \
 		"docker://$FLEET_PACKAGE_IMAGE" "dir:$staging/oci"
 	mkdir "$staging/rootfs"
 	python3 -c 'import json, sys

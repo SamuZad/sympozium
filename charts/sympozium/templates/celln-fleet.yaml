@@ -173,6 +173,8 @@ spec:
               value: {{ $package.image | quote }}
             - name: FLEET_PACKAGE_HASH
               value: {{ $package.hash | quote }}
+            - name: FLEET_PACKAGE_INSECURE
+              value: {{ $package.insecureRegistry | default false | quote }}
             - name: FLEET_PUBLISHER
               value: {{ $fleet.publisher | quote }}
             - name: FLEET_PRINCIPAL

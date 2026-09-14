@@ -555,6 +555,9 @@ celln:
       hash: ""
       # -- Optional Secret in celln-system with `.dockerconfigjson` for a private registry.
       pullSecret: ""
+      # -- Skip registry TLS verification (development registries only). The
+      # package is still verified against `hash` after download.
+      insecureRegistry: false
     # -- Explicitly approved publisher key of the package (from `celln starter-inspect`).
     publisher: ""
     # -- Parent principal every owner authenticates; must match the
