@@ -7,7 +7,9 @@
 # a node's label drains its owner honestly.
 #
 # Requires: kind, docker, kubectl, helm, /dev/kvm, a readable host kernel in
-# /boot, DEEPSEEK_API_KEY, a celln bundle (bin/celln + share/celln with pilot
+# /boot, a model backend (FLEET_MODEL_PROVIDER=deepseek|openai|anthropic|llama-server
+# with DEEPSEEK_API_KEY, OPENAI_API_KEY or ANTHROPIC_API_KEY, or
+# FLEET_MODEL_ENDPOINT for llama-server; FLEET_MODEL names the model), a celln bundle (bin/celln + share/celln with pilot
 # binaries, scripts, guest) matching config/celln/release.json plus #109/#110,
 # and the sympozium controller/apiserver/webhook/celln-installer images tagged
 # $SYMPOZIUM_IMAGE_TAG together with the celln image $CELLN_IMAGE. See
@@ -15,7 +17,17 @@
 set -euo pipefail
 
 : "${CELLN_BUNDLE:?bundle directory with bin/celln and share/celln}"
-: "${DEEPSEEK_API_KEY:?}"
+MODEL_PROVIDER="${FLEET_MODEL_PROVIDER:-deepseek}"
+MODEL_ARGS=(--celln-fleet-model-provider "$MODEL_PROVIDER")
+[ -n "${FLEET_MODEL:-}" ] && MODEL_ARGS+=(--celln-fleet-model "$FLEET_MODEL")
+[ -n "${FLEET_MODEL_ENDPOINT:-}" ] && MODEL_ARGS+=(--celln-fleet-model-endpoint "$FLEET_MODEL_ENDPOINT")
+[ "${FLEET_MODEL_ALLOW_INSECURE:-}" = 1 ] && MODEL_ARGS+=(--celln-fleet-model-allow-insecure)
+case "$MODEL_PROVIDER" in
+deepseek) MODEL_KEY="${DEEPSEEK_API_KEY:?DEEPSEEK_API_KEY for the deepseek backend}" ;;
+openai) MODEL_KEY="${OPENAI_API_KEY:?OPENAI_API_KEY for the openai backend}" ;;
+anthropic) MODEL_KEY="${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY for the anthropic backend}" ;;
+*) MODEL_KEY="${FLEET_MODEL_KEY:-}" ;;
+esac
 CLUSTER="${FLEET_CLUSTER:-fleet}"
 SCOPE="${FLEET_SCOPE:-trial}"
 TAG="${SYMPOZIUM_IMAGE_TAG:-fleet-trial}"
@@ -89,7 +101,12 @@ for image in "$CELLN_IMAGE" "ghcr.io/sympozium-ai/sympozium/controller:$TAG" "gh
 done
 [ -x "$SYMPOZIUM" ] || (cd "$REPO" && go build -o "$SYMPOZIUM" ./cmd/sympozium)
 umask 077
-printf '%s\n' "$DEEPSEEK_API_KEY" >"$WORK/model-token"
+rm -f "$WORK/model-token"
+CREDENTIAL_ARGS=()
+if [ -n "$MODEL_KEY" ]; then
+	printf '%s\n' "$MODEL_KEY" >"$WORK/model-token"
+	CREDENTIAL_ARGS=(--celln-fleet-model-credential-file "$WORK/model-token")
+fi
 kc create namespace "$NAMESPACE" 2>/dev/null || true
 kc label node --overwrite -l '!node-role.kubernetes.io/control-plane' celln.dev/kvm=true >/dev/null
 pass "images loaded; workers labeled celln.dev/kvm=true"
@@ -102,7 +119,8 @@ KUBECONFIG="$WORK/kubeconfig" "$SYMPOZIUM" install -n "$NAMESPACE" --celln-fleet
 	--celln-fleet-package-image "$registry/celln/starter@$digest" \
 	--celln-fleet-package-hash "$package_hash" \
 	--celln-fleet-publisher "$publisher" \
-	--celln-fleet-model-credential-file "$WORK/model-token" \
+	"${CREDENTIAL_ARGS[@]}" \
+	"${MODEL_ARGS[@]}" \
 	--celln-fleet-output-dir "$WORK/fleet-out" \
 	--celln-fleet-wait 20m \
 	--celln-native-approve-starter-tools \

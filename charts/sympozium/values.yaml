@@ -568,6 +568,19 @@ celln:
     parentClientsConfigMap: ""
     # -- ConfigMap in celln-system the nodes publish the starter configuration to.
     configurationConfigMap: celln-fleet-configuration
+    # -- The scope's model backend, configured once on every node. An empty
+    # endpoint keeps Celln's reviewed default (DeepSeek). `sympozium install
+    # --celln-fleet --celln-fleet-model-provider` fills these from presets for
+    # deepseek, openai, anthropic and llama-server. Changing it needs a new scope.
+    model:
+      provider: ""
+      # -- openai-chat or anthropic-messages
+      protocol: ""
+      # -- Full chat endpoint URL, e.g. https://api.openai.com/v1/chat/completions
+      endpoint: ""
+      name: ""
+      # -- Approve a plain-HTTP or private endpoint (e.g. a LAN llama-server).
+      allowInsecure: false
     modelCredential:
       # -- Secret in celln-system (key `token`) mounted read-only into every
       # dispatcher at `path`, which the model profile references. Guests and

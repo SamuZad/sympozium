@@ -107,6 +107,23 @@ func TestFleetRendersPerNodeOwnersBehindOneGateway(t *testing.T) {
 	if strings.Contains(args, "--max-cells") || !strings.HasPrefix(command, "/bin/sh -ec") || !strings.Contains(command, "/proc/meminfo") || !strings.Contains(command, `--max-cells "$cells"`) || !strings.Contains(command, `--egress-slots "$cells"`) || !strings.Contains(command, "* 75 ))") {
 		t.Fatalf("dispatcher does not size capacity on the node: command=%s args=%s", command, args)
 	}
+	prepareEnv := map[string]string{}
+	for _, e := range spec.InitContainers[0].Env {
+		prepareEnv[e.Name] = e.Value
+	}
+	if prepareEnv["FLEET_MODEL_ENDPOINT"] != "" || prepareEnv["FLEET_SCOPE"] != "starter" {
+		t.Fatalf("default fleet must keep Celln's reviewed model route: %v", prepareEnv)
+	}
+	llama, err := renderNativeParent(t, append(fleetValues(), "celln.fleet.model.provider=llama-server", "celln.fleet.model.protocol=openai-chat", "celln.fleet.model.endpoint=http://100.81.163.75:8080/v1/chat/completions", "celln.fleet.model.name=qwen.gguf", "celln.fleet.model.allowInsecure=true"))
+	if err != nil {
+		t.Fatalf("llama-server model render: %v: %s", err, llama)
+	}
+	for _, e := range decodeFleet(t, llama).daemonSets["celln-node"].Spec.Template.Spec.InitContainers[0].Env {
+		prepareEnv[e.Name] = e.Value
+	}
+	if prepareEnv["FLEET_MODEL_ENDPOINT"] != "http://100.81.163.75:8080/v1/chat/completions" || prepareEnv["FLEET_MODEL_ALLOW_INSECURE"] != "true" || prepareEnv["FLEET_MODEL_NAME"] != "qwen.gguf" || prepareEnv["FLEET_MODEL_PROTOCOL"] != "openai-chat" {
+		t.Fatalf("model route not passed to node preparation: %v", prepareEnv)
+	}
 	fixed, err := renderNativeParent(t, append(fleetValues(), "celln.fleet.capacity=fixed", "celln.fleet.maxCells=6", "celln.fleet.egressSlots="))
 	if err != nil {
 		t.Fatalf("fixed capacity render: %v: %s", err, fixed)
@@ -192,6 +209,8 @@ func TestFleetRefusesUnsafeConfiguration(t *testing.T) {
 		"celln.fleet.modelCredential.path=/token", "celln.fleet.modelCredential.path=/etc/../token",
 		"celln.fleet.capacity=fixed,celln.fleet.maxCells=1", "celln.fleet.capacity=sometimes",
 		"celln.fleet.memoryPercent=99", "celln.fleet.cellMemoryBytes=1048576", "celln.router.parentTokenSecret=",
+		"celln.fleet.model.endpoint=https://api.openai.com/v1/chat/completions,celln.fleet.model.provider=openai,celln.fleet.model.protocol=openai-chat",
+		"celln.fleet.model.endpoint=http://10.0.0.5:8080/v1/chat/completions,celln.fleet.model.provider=llama-server,celln.fleet.model.protocol=openai-chat,celln.fleet.model.name=q",
 		"celln.dispatcher.enabled=true", "celln.installer.enabled=true", "celln.router.external=true",
 		"controller.replicas=2",
 	} {

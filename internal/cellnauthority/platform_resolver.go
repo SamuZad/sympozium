@@ -525,7 +525,10 @@ func resolveDecisionRoute(s platformSnapshot, required bool) (DecisionRouteBindi
 	var err error
 	if auth != "none" {
 		origin, err = api.ModelEndpointOriginInsecure(c.Spec.Endpoint, c.Spec.AllowInsecure)
-		if err == nil && !strings.HasPrefix(strings.ToLower(origin), "https://") {
+		// A cluster Secret never crosses plain HTTP. A host-profile credential
+		// stays on the node and the operator approved this insecure endpoint
+		// when configuring the node's model profile (e.g. a LAN llama-server).
+		if err == nil && !strings.HasPrefix(strings.ToLower(origin), "https://") && !(auth == "host-profile" && c.Spec.AllowInsecure) {
 			err = fmt.Errorf("credential-bearing model endpoint must use HTTPS")
 		}
 	} else {

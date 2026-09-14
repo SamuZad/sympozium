@@ -30,9 +30,14 @@ func (f *cellnFleetFlags) register(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&f.options.PackageHash, "celln-fleet-package-hash", "", "Exact operator-approved package BLAKE3 identity from 'celln starter-inspect'")
 	cmd.Flags().StringVar(&f.options.Publisher, "celln-fleet-publisher", "", "Explicitly approved publisher key of the package from 'celln starter-inspect'")
 	cmd.Flags().StringVar(&f.options.Principal, "celln-fleet-principal", "sympozium:celln", "Parent principal every fleet owner authenticates")
+	cmd.Flags().StringVar(&f.options.Model.Provider, "celln-fleet-model-provider", cellninstall.ModelProviderDeepSeek, "Model backend for the starter agent: deepseek, openai, anthropic or llama-server (any other name needs --celln-fleet-model-endpoint and --celln-fleet-model-protocol)")
+	cmd.Flags().StringVar(&f.options.Model.Name, "celln-fleet-model", "", "Model name the backend serves (required except for deepseek, which defaults to deepseek-chat)")
+	cmd.Flags().StringVar(&f.options.Model.Endpoint, "celln-fleet-model-endpoint", "", "Full chat endpoint URL; defaults per provider (required for llama-server, e.g. http://HOST:8080/v1/chat/completions)")
+	cmd.Flags().StringVar(&f.options.Model.Protocol, "celln-fleet-model-protocol", "", "openai-chat or anthropic-messages; defaults per provider")
+	cmd.Flags().BoolVar(&f.options.Model.AllowInsecure, "celln-fleet-model-allow-insecure", false, "Approve a plain-HTTP or private model endpoint such as a LAN llama-server")
 	cmd.Flags().StringVar(&f.authorise, "celln-fleet-authorise", "all", "Which namespaces may run on the fleet: 'all' (every namespace except kube-*, cert-manager, the control-plane namespaces and namespaces labeled celln.sympozium.ai/excluded) or 'labeled' (only namespaces labeled celln.sympozium.ai/scope=<scope>)")
 	cmd.Flags().StringVar(&f.options.ModelCredentialPath, "celln-fleet-model-credential-path", "/etc/celln-native/model-token", "Absolute path inside every dispatcher where the model credential Secret is mounted; recorded in the model profile")
-	cmd.Flags().StringVar(&f.modelCredentialFile, "celln-fleet-model-credential-file", "", "Local file holding the model provider credential to publish once as a Secret in celln-system (omit to keep an existing Secret)")
+	cmd.Flags().StringVar(&f.modelCredentialFile, "celln-fleet-model-credential-file", "", "Local file holding the model provider credential to publish once as a Secret in celln-system (omit to keep an existing Secret; not needed for llama-server)")
 	cmd.Flags().StringVar(&f.outputDir, "celln-fleet-output-dir", "", "Absolute private directory for the materialized configuration and installation records")
 	cmd.Flags().DurationVar(&f.wait, "celln-fleet-wait", 15*time.Minute, "How long to wait for the first labeled node to publish the starter configuration")
 }
@@ -64,7 +69,7 @@ func installCellnFleet(ctx context.Context, f cellnFleetFlags, imageTag string, 
 	}
 	// The chart owns celln-system; the nodes and the router block on these
 	// objects until they exist, so publishing after the install is safe.
-	if err := cellninstall.PublishFleetModelCredential(ctx, k8sClient, f.modelCredentialFile); err != nil {
+	if err := cellninstall.PublishFleetModelCredential(ctx, k8sClient, f.modelCredentialFile, f.options.Model); err != nil {
 		return err
 	}
 	if err := cellninstall.PrepareFleetTrust(ctx, k8sClient, f.options.Principal); err != nil {

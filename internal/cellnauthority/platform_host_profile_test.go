@@ -106,6 +106,39 @@ func TestPlatformResolverBindsHostProfileRouteToRuntimeNative(t *testing.T) {
 	if err := f.client.Update(ctx, &run); err != nil {
 		t.Fatal(err)
 	}
+	// An operator-approved plain-HTTP endpoint (a LAN llama-server) is allowed
+	// for a node-held credential and never for a cluster Secret.
+	insecure := func(endpoint string, allow bool, origin string) {
+		t.Helper()
+		if err := f.client.Get(ctx, types.NamespacedName{Namespace: "tenant", Name: "model"}, &connection); err != nil {
+			t.Fatal(err)
+		}
+		connection.Spec.Endpoint, connection.Spec.AllowInsecure = endpoint, allow
+		if err := f.client.Update(ctx, &connection); err != nil {
+			t.Fatal(err)
+		}
+		var policies api.CellnExecutionPolicyList
+		if err := f.client.List(ctx, &policies); err != nil {
+			t.Fatal(err)
+		}
+		for i := range policies.Items {
+			policies.Items[i].Spec.Routes[0].EndpointOrigins = []string{origin}
+			if err := f.client.Update(ctx, &policies.Items[i]); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := f.client.Get(ctx, f.runKey, &run); err != nil {
+			t.Fatal(err)
+		}
+		run.Spec.Model.BaseURL, run.Spec.Model.AllowInsecure, run.Spec.Model.ConnectionRevision = "", false, ""
+		if err := f.client.Update(ctx, &run); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insecure("http://10.1.2.3:8080/v1/chat/completions", true, "http://10.1.2.3:8080")
+	if resolved, err := f.resolver.Resolve(ctx, f.runKey, request); err != nil || resolved.Decision.Route.EndpointOrigin != "http://10.1.2.3:8080" {
+		t.Fatalf("approved insecure host-profile endpoint refused: %v", err)
+	}
 	setPolicyAuth("secret")
 	if _, err := f.resolver.Resolve(ctx, f.runKey, request); PlatformReason(err) != ReasonRouteMismatch {
 		t.Fatalf("policy requiring Secret custody accepted a host credential: %v", err)
