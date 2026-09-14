@@ -264,11 +264,12 @@ exact numbers, or lower `memoryPercent` on nodes that run other workloads.
 Per-parent broker charging arrived in Celln v0.5.12 (celln#112), which this
 chart pins; releases before it hold one parent per node whatever the budget says.
 
-The gateway places each parent by incarnation hash, not by load. An owner that
-refuses a create for capacity ends that run with `CellnParentReady` reason
-`CreateRefused` ("create a new run"); the incarnation is never retried and the
-run deletes cleanly. Capacity-aware placement in the gateway is tracked in
-#464 (P1b).
+The gateway provisions each new parent on the healthy owner with the most
+spare cells (then memory), as the owners advertise on `/v1/health`; equally
+free owners are chosen in hash order, so placement is deterministic. Once
+provisioned, a parent is bound to its owner. An owner that still refuses a
+create ends that run with `CellnParentReady` reason `CreateRefused` ("create a
+new run"); the incarnation is never retried and the run deletes cleanly.
 
 ## Limits
 
