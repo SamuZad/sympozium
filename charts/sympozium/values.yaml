@@ -574,16 +574,25 @@ celln:
       # the controller never see it; the model gateway is the long-term home.
       secret: ""
       path: /etc/celln-native/model-token
-    # -- Per-node budget. A parent keeps a warm child (two cells, 1.25 GiB
-    # declared). Celln v0.5.11 stops advertising egress while any parent is
-    # live, so a node holds ONE parent regardless of these values (see
-    # docs/guides/celln-fleet-installation.md); a create the owner refuses for
-    # capacity is terminal for that run.
+    # -- Per-node budget. `auto` sizes each node when its dispatcher starts:
+    # memoryBytes = memoryPercent of the node's memory (its cgroup limit when
+    # set), maxCells = memoryBytes / cellMemoryBytes capped at maxCellsCeiling,
+    # egressSlots = maxCells. A native parent charges two cells, two broker
+    # slots and its declared memory (1.25 GiB for the starter), so a 64 GiB
+    # node holds about 38 parents. `fixed` uses maxCells/memoryBytes/egressSlots
+    # exactly. Celln releases before v0.5.12 hold one parent per node whatever
+    # these say. A create the owner refuses for capacity ends
+    # that run and it deletes cleanly.
+    capacity: auto
+    memoryPercent: 75
+    cellMemoryBytes: 671088640
+    maxCellsCeiling: 1024
     maxCells: 4
     memoryBytes: 4294967296
     allowEgressHosts:
       - api.deepseek.com
-    egressSlots: 1
+    # -- fixed mode only; defaults to maxCells (one broker slot per cell).
+    egressSlots: 4
     # -- Controller-namespace Secret with registrations.json (remoteProvisioner);
     # produced by `sympozium install --celln-fleet` after the nodes publish.
     parentConfigSecret: ""

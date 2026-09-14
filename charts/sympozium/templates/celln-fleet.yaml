@@ -24,8 +24,18 @@
 {{- if or (not $model.secret) (not (hasPrefix "/" $credential)) (contains ".." $credential) (eq (dir $credential) "/") (hasSuffix "/" $credential) }}
 {{- fail "celln.fleet.modelCredential requires a Secret and a clean absolute file path in a dedicated directory" }}
 {{- end }}
-{{- if lt (int $fleet.maxCells) 2 }}
+{{- $capacity := $fleet.capacity | default "auto" }}
+{{- if not (has $capacity (list "auto" "fixed")) }}
+{{- fail "celln.fleet.capacity must be auto or fixed" }}
+{{- end }}
+{{- if and (eq $capacity "fixed") (lt (int $fleet.maxCells) 2) }}
 {{- fail "celln.fleet.maxCells must allow a parent and a child" }}
+{{- end }}
+{{- $memoryPercent := int ($fleet.memoryPercent | default 75) }}
+{{- $cellMemoryBytes := int64 ($fleet.cellMemoryBytes | default 671088640) }}
+{{- $maxCellsCeiling := int ($fleet.maxCellsCeiling | default 1024) }}
+{{- if or (lt $memoryPercent 1) (gt $memoryPercent 95) (lt $cellMemoryBytes 268435456) (lt $maxCellsCeiling 2) }}
+{{- fail "celln.fleet auto capacity needs memoryPercent 1-95, cellMemoryBytes >= 256 MiB and maxCellsCeiling >= 2" }}
 {{- end }}
 {{- $state := printf "/var/lib/sympozium-celln/%s" $fleet.scope }}
 {{- $root := printf "%s/authority" $state }}
@@ -222,7 +232,32 @@ spec:
         - name: dispatcher
           image: {{ $image | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if eq $capacity "auto" }}
+          # Size this node when the dispatcher starts: a share of the node's
+          # memory (its cgroup limit when set), cells from the per-cell
+          # declaration, and one broker slot per cell. A parent charges two
+          # cells, two broker slots and its declared memory.
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              total=$(( $(awk '/^MemTotal:/ {print $2}' /proc/meminfo) * 1024 ))
+              node=$total
+              limit=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo max)
+              if [ -n "$limit" ] && [ "$limit" != max ] && [ "$limit" -lt "$total" ]; then node=$limit; fi
+              memory=$(( node / 100 * {{ $memoryPercent }} ))
+              cells=$(( memory / {{ $cellMemoryBytes }} ))
+              [ "$cells" -le {{ $maxCellsCeiling }} ] || cells={{ $maxCellsCeiling }}
+              if [ "$cells" -lt 2 ]; then
+                echo "celln capacity: node memory $node bytes cannot hold a parent and its child" >&2
+                exit 1
+              fi
+              echo "celln capacity: node=$node memory=$memory cells=$cells egressSlots=$cells" >&2
+              exec /usr/local/bin/celln "$@" --max-cells "$cells" --memory-bytes "$memory" --egress-slots "$cells"
+            - celln-dispatcher
+          {{- else }}
           command: ["/usr/local/bin/celln"]
+          {{- end }}
           args:
             - dispatcher
             - --listen
@@ -242,12 +277,14 @@ spec:
             - --allow-egress-host
             - {{ . | quote }}
             {{- end }}
+            {{- if eq $capacity "fixed" }}
             - --max-cells
             - {{ $fleet.maxCells | int | quote }}
             - --memory-bytes
             - {{ $fleet.memoryBytes | int64 | quote }}
             - --egress-slots
-            - {{ $fleet.egressSlots | default 1 | quote }}
+            - {{ $fleet.egressSlots | default $fleet.maxCells | quote }}
+            {{- end }}
           env:
             - name: NODE_NAME
               valueFrom:

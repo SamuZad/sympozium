@@ -25,7 +25,9 @@ var (
 	ErrReconcile    = celln.ErrReconcile
 	ErrNotFound     = celln.ErrNotFound
 	ErrOwnerRemoved = celln.ErrOwnerRemoved
-	hashPattern     = regexp.MustCompile(`^blake3:[0-9a-f]{64}$`)
+	// ErrCreateRefused is the owner's definitive refusal of a create.
+	ErrCreateRefused = celln.ErrCreateRefused
+	hashPattern      = regexp.MustCompile(`^blake3:[0-9a-f]{64}$`)
 )
 
 // Type aliases keep the parent protocol types in one place (internal/celln).

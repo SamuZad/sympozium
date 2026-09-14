@@ -24,11 +24,18 @@ var (
 	// bound to this incarnation is no longer part of the execution plane. Its
 	// in-process parent context is gone and the identity is never re-placed.
 	ErrOwnerRemoved = errors.New("parent owner left the execution plane; live context lost and never re-placed")
-	hashPattern     = regexp.MustCompile(`^blake3:[0-9a-f]{64}$`)
-	turnPattern     = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+	// ErrCreateRefused is the owner's definitive refusal of one create (node
+	// capacity or authority). Nothing was started; the incarnation is spent
+	// and never retried.
+	ErrCreateRefused = errors.New("owner refused parent creation; this incarnation is never retried")
+	hashPattern      = regexp.MustCompile(`^blake3:[0-9a-f]{64}$`)
+	turnPattern      = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 )
 
-const ownerRemovedError = "original parent backend removed"
+const (
+	ownerRemovedError  = "original parent backend removed"
+	createRefusedError = "parent creation refused; reconcile incarnation"
+)
 
 // ParentStatus is a live owner observation of a parent incarnation.
 type ParentStatus struct {
@@ -108,6 +115,16 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body any, outp
 		}
 		if json.Unmarshal(data, &refusal) == nil && refusal.Error == ownerRemovedError {
 			return res.StatusCode, ErrOwnerRemoved
+		}
+	}
+	if res.StatusCode == http.StatusConflict && method == http.MethodPost && path == "/v1/parents" {
+		var refusal struct {
+			Error string `json:"error"`
+		}
+		// Only the owner's own refusal is definitive; the gateway's "already
+		// claimed" conflict means an owner may hold the parent.
+		if json.Unmarshal(data, &refusal) == nil && refusal.Error == createRefusedError {
+			return res.StatusCode, ErrCreateRefused
 		}
 	}
 	if res.StatusCode != http.StatusOK && res.StatusCode != http.StatusAccepted {

@@ -94,6 +94,14 @@ func (r *AgentRunReconciler) reconcileCellnParent(ctx context.Context, run *api.
 			condition.Status = metav1.ConditionTrue
 			condition.Reason = observed.Owner.Status
 			condition.Message = "Native parent initialized; turn completion is tracked separately"
+		case cellnparent.OwnerCreateRefused:
+			outcome := recordOwnerOutcome(&fresh, observed.Owner.Status)
+			meta.SetStatusCondition(&fresh.Status.Conditions, metav1.Condition{Type: "CellnParentReady", Status: metav1.ConditionFalse, Reason: observed.Owner.Status, Message: "The owner node refused this parent (capacity or authority); nothing was started and this run is never retried. Create a new run.", ObservedGeneration: fresh.Generation})
+			slog.WarnContext(ctx, "celln.parent.create-refused", "agent_run", fresh.Name, "detail", outcome)
+			if err := r.Status().Update(ctx, &fresh); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{}, r.failRun(ctx, &fresh, "Celln owner refused the parent (node capacity or authority); nothing was started. Create a new run.")
 		case "ContextLost", "Stopped", "TeardownUncertain":
 			outcome := recordOwnerOutcome(&fresh, observed.Owner.Status)
 			meta.SetStatusCondition(&fresh.Status.Conditions, metav1.Condition{Type: "CellnParentReady", Status: metav1.ConditionFalse, Reason: observed.Owner.Status, Message: outcome, ObservedGeneration: fresh.Generation})

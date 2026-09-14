@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	api "github.com/sympozium-ai/sympozium/api/v1alpha1"
 	"k8s.io/apimachinery/pkg/types"
@@ -22,6 +23,10 @@ func ReconcileStop(ctx context.Context, reader client.Reader, key types.Namespac
 	if run.Status.CellnParent == nil || !run.Status.CellnParent.CreateAttempted {
 		return fmt.Errorf("no attempted parent to confirm; reconcile local admission separately")
 	}
+	if outcome := run.Status.CellnParent.OwnerOutcome; outcome != nil && outcome.Status == OwnerCreateRefused {
+		// The owner refused the only create and started nothing to tear down.
+		return nil
+	}
 	binding, transport, err := loadBinding(configPath, &run, true)
 	if err != nil {
 		return err
@@ -32,6 +37,11 @@ func ReconcileStop(ctx context.Context, reader client.Reader, key types.Namespac
 		// No acknowledgement can ever come from an owner the gateway no longer
 		// serves; its cells died with its process. Treat the removal itself as
 		// the teardown fact so the run can be released.
+		return nil
+	}
+	if errors.Is(err, ErrNotFound) && CreateSettled(&run, time.Now()) {
+		// The bound owner holds nothing for this incarnation long after its
+		// only create; an owner keeps stopped identities, so nothing is live.
 		return nil
 	}
 	return err

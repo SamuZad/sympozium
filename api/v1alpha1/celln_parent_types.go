@@ -55,7 +55,7 @@ type CellnParentStatus struct {
 	// +optional
 	ActiveTurn *CellnActiveTurn `json:"activeTurn,omitempty"`
 	// OwnerOutcome records the first terminal owner observation
-	// (ContextLost, Stopped, TeardownUncertain) with the failure signature
+	// (ContextLost, Stopped, TeardownUncertain, CreateRefused) with the failure signature
 	// the broker itself does not report: whether the parent ever reached
 	// Ready and when the loss was observed. Set once; it grants no replay
 	// authority and never authorizes reconstruction.
@@ -67,7 +67,7 @@ type CellnParentStatus struct {
 // incarnation the owner reports lost or stopped. Hashes stay in Binding;
 // this carries only the observed status and its timing.
 type CellnParentOwnerOutcome struct {
-	// +kubebuilder:validation:Enum=ContextLost;Stopped;TeardownUncertain
+	// +kubebuilder:validation:Enum=ContextLost;Stopped;TeardownUncertain;CreateRefused
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=32
 	Status string `json:"status"`

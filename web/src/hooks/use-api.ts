@@ -81,6 +81,10 @@ export function useModelConnections() {
   return useQuery({ queryKey: ["model-connections"], queryFn: api.modelConnections.list });
 }
 
+export function useCellnPlatformProfiles(enabled = true) {
+  return useQuery({ queryKey: ["celln-platform-profiles"], queryFn: api.cellnPlatform.profiles, enabled });
+}
+
 export function useInstallDefaultRuntimes() {
   const qc = useQueryClient();
   return useMutation({

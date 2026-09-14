@@ -97,10 +97,23 @@ func TestFleetRendersPerNodeOwnersBehindOneGateway(t *testing.T) {
 	}
 	const state = "/var/lib/sympozium-celln/starter"
 	args := strings.Join(spec.Containers[0].Args, " ")
-	for _, want := range []string{"--root " + state + "/authority", "--node-name $(NODE_NAME)", "--max-cells 4"} {
+	for _, want := range []string{"--root " + state + "/authority", "--node-name $(NODE_NAME)"} {
 		if !strings.Contains(args, want) {
 			t.Fatalf("dispatcher args lack %q: %s", want, args)
 		}
+	}
+	// Default capacity is sized on the node; the flags come from the wrapper.
+	command := strings.Join(spec.Containers[0].Command, " ")
+	if strings.Contains(args, "--max-cells") || !strings.HasPrefix(command, "/bin/sh -ec") || !strings.Contains(command, "/proc/meminfo") || !strings.Contains(command, `--max-cells "$cells"`) || !strings.Contains(command, `--egress-slots "$cells"`) || !strings.Contains(command, "* 75 ))") {
+		t.Fatalf("dispatcher does not size capacity on the node: command=%s args=%s", command, args)
+	}
+	fixed, err := renderNativeParent(t, append(fleetValues(), "celln.fleet.capacity=fixed", "celln.fleet.maxCells=6", "celln.fleet.egressSlots="))
+	if err != nil {
+		t.Fatalf("fixed capacity render: %v: %s", err, fixed)
+	}
+	fixedSpec := decodeFleet(t, fixed).daemonSets["celln-node"].Spec.Template.Spec
+	if got := strings.Join(fixedSpec.Containers[0].Args, " "); !strings.Contains(got, "--max-cells 6") || !strings.Contains(got, "--egress-slots 6") || len(fixedSpec.Containers[0].Command) != 1 {
+		t.Fatalf("fixed capacity must pass explicit flags with egress slots defaulting to cells: %v %s", fixedSpec.Containers[0].Command, got)
 	}
 	mounts := map[string]corev1.VolumeMount{}
 	for _, m := range spec.Containers[0].VolumeMounts {
@@ -177,12 +190,13 @@ func TestFleetRefusesUnsafeConfiguration(t *testing.T) {
 		"celln.fleet.publisher=", "celln.fleet.principal=", "celln.fleet.parentClientsConfigMap=",
 		"celln.fleet.modelCredential.secret=", "celln.fleet.modelCredential.path=relative/token",
 		"celln.fleet.modelCredential.path=/token", "celln.fleet.modelCredential.path=/etc/../token",
-		"celln.fleet.maxCells=1", "celln.router.parentTokenSecret=",
+		"celln.fleet.capacity=fixed,celln.fleet.maxCells=1", "celln.fleet.capacity=sometimes",
+		"celln.fleet.memoryPercent=99", "celln.fleet.cellMemoryBytes=1048576", "celln.router.parentTokenSecret=",
 		"celln.dispatcher.enabled=true", "celln.installer.enabled=true", "celln.router.external=true",
 		"controller.replicas=2",
 	} {
 		t.Run(override, func(t *testing.T) {
-			if raw, err := renderNativeParent(t, append(fleetValues(), override)); err == nil {
+			if raw, err := renderNativeParent(t, append(fleetValues(), strings.Split(override, ",")...)); err == nil {
 				t.Fatalf("unsafe fleet rendered: %s", raw)
 			}
 		})

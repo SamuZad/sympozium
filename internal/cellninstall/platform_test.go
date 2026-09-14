@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	api "github.com/sympozium-ai/sympozium/api/v1alpha1"
 	"github.com/sympozium-ai/sympozium/internal/cellnparent"
+	"github.com/sympozium-ai/sympozium/internal/cellnplatform"
 	"github.com/zeebo/blake3"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -96,7 +98,11 @@ func TestInstallPlatformPublishesCatalogueOncePerScopeAndWrapsNamespaces(t *test
 		t.Fatal(err)
 	}
 	route := policy.Spec.Routes[0]
-	if policy.Spec.NamespaceSelector.MatchLabels[ScopeLabel] != "trial" || len(policy.Spec.Tools) != 3 || route.Auth != "host-profile" || route.Provider != "deepseek" || route.EndpointOrigins[0] != "https://api.deepseek.com" || policy.Spec.Ceilings.MaxTurns != 12 || policy.Spec.Ceilings.MaxParentLeaseSeconds != 3600 || policy.Spec.Ceilings.MaxTurnSeconds != 60 {
+	exclusions := policy.Spec.NamespaceSelector.MatchExpressions
+	if len(exclusions) != 2 || exclusions[0].Key != cellnplatform.NamespaceNameLabel || exclusions[0].Operator != metav1.LabelSelectorOpNotIn || !slices.Contains(exclusions[0].Values, "kube-system") || !slices.Contains(exclusions[0].Values, "sympozium-system") || !slices.Contains(exclusions[0].Values, "celln-system") || exclusions[1].Key != cellnplatform.ExcludedLabel || exclusions[1].Operator != metav1.LabelSelectorOpDoesNotExist {
+		t.Fatalf("default policy is not open with system exclusions: %+v", policy.Spec.NamespaceSelector)
+	}
+	if len(policy.Spec.Tools) != 3 || route.Auth != "host-profile" || route.Provider != "deepseek" || route.EndpointOrigins[0] != "https://api.deepseek.com" || policy.Spec.Ceilings.MaxTurns != 12 || policy.Spec.Ceilings.MaxParentLeaseSeconds != 3600 || policy.Spec.Ceilings.MaxTurnSeconds != 60 {
 		t.Fatalf("policy does not bind the reviewed route and ceilings: %+v", policy.Spec)
 	}
 	var tool api.ClusterCellnTool
@@ -104,8 +110,8 @@ func TestInstallPlatformPublishesCatalogueOncePerScopeAndWrapsNamespaces(t *test
 		t.Fatalf("cluster tool missing: %v", err)
 	}
 	var namespace corev1.Namespace
-	if err := store.Get(ctx, types.NamespacedName{Name: "tenant-a"}, &namespace); err != nil || namespace.Labels[ScopeLabel] != "trial" {
-		t.Fatalf("tenant namespace not authorised: %v %v", err, namespace.Labels)
+	if err := store.Get(ctx, types.NamespacedName{Name: "tenant-a"}, &namespace); err != nil || namespace.Labels[ScopeLabel] != "" {
+		t.Fatalf("default mode labeled the namespace: %v %v", err, namespace.Labels)
 	}
 	var wrapper api.AgentRuntime
 	var connection api.ModelConnection
@@ -147,6 +153,24 @@ func TestInstallPlatformPublishesCatalogueOncePerScopeAndWrapsNamespaces(t *test
 	}
 	if err := store.Get(ctx, types.NamespacedName{Namespace: "tenant-b", Name: "celln-native"}, &wrapper); err != nil {
 		t.Fatal(err)
+	}
+	// Strict mode publishes a scope-label selector and labels the namespace.
+	strict := options("tenant-b")
+	strict.Scope, strict.Authorise, strict.OutputDir = "strict", "labeled", filepath.Join(t.TempDir(), "strict")
+	if err := InstallPlatform(ctx, store, strict); err != nil {
+		t.Fatal(err)
+	}
+	_, strictPolicy, _ := PlatformCatalogueNames("strict")
+	if err := store.Get(ctx, types.NamespacedName{Name: strictPolicy}, &policy); err != nil || policy.Spec.NamespaceSelector.MatchLabels[ScopeLabel] != "strict" {
+		t.Fatalf("strict policy: %v %+v", err, policy.Spec.NamespaceSelector)
+	}
+	if err := store.Get(ctx, types.NamespacedName{Name: "tenant-b"}, &namespace); err != nil || namespace.Labels[ScopeLabel] != "strict" {
+		t.Fatalf("strict mode did not label the namespace: %v %v", err, namespace.Labels)
+	}
+	bogus := options("tenant-b")
+	bogus.Authorise, bogus.OutputDir = "sometimes", filepath.Join(t.TempDir(), "bogus")
+	if err := InstallPlatform(ctx, store, bogus); err == nil {
+		t.Fatal("unknown authorisation mode accepted")
 	}
 	// A different package under the same scope is refused before tenant changes.
 	mismatch := options("tenant-b")

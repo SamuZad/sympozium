@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Multi-node fleet proof on Kind: label N KVM nodes, every node prepares the
-# reviewed starter package, one router discovers them, enduring parents are
-# issued through the gateway on distinct owners, a follow-up turn keeps live
-# context, and removing a node's label drains its owner honestly.
+# reviewed starter package and sizes its own capacity, one router discovers
+# them, enduring parents are issued through the gateway (several on one node),
+# a follow-up turn keeps live context, any ordinary namespace runs with
+# wrappers created on first use while an excluded one is refused, and removing
+# a node's label drains its owner honestly.
 #
 # Requires: kind, docker, kubectl, helm, /dev/kvm, a readable host kernel in
 # /boot, DEEPSEEK_API_KEY, a celln bundle (bin/celln + share/celln with pilot
@@ -131,21 +133,36 @@ first_node="$(node_of "$(launch_of "$first")")"
 [ -n "$first_node" ] || fail "owner of $first not found"
 pass "$first issued through the gateway to $first_node and completed a real model turn"
 
-# The gateway places by incarnation hash, not by load, and Celln holds one
-# parent per node: a second run either lands on the other owner and runs, or
-# is refused there terminally. Both are honest outcomes; neither is re-placed.
-second="$(kc -n "$NAMESPACE" create -f "$WORK/fleet-out/installation/run.json" -o jsonpath='{.metadata.name}')"
-wait_for "issuance of $second" 120 bash -c "[ -n \"\$(kubectl --context kind-$CLUSTER -n $NAMESPACE get agentrun $second -o jsonpath='{.status.cellnParent.binding.launchProfile}')\" ]"
-second_node="$(node_of "$(launch_of "$second")")"
-[ -n "$second_node" ] || fail "owner of $second not found"
-if [ "$second_node" != "$first_node" ]; then
-	wait_for "parent $second ready" 240 run_ready "$second"
-	wait_for "initial turn of $second" 240 bash -c "kubectl --context kind-$CLUSTER -n $NAMESPACE get agentrun $second -o jsonpath='{.status.cellnParent.initialTurn.result.succeeded}' | grep -q true"
-	pass "$second issued to the other owner $second_node and completed a real model turn"
+# The gateway places by incarnation hash, not by load. With per-parent broker
+# charging (celln#112) and node-sized capacity a node holds many parents, so
+# keep creating runs until one lands on the first owner and prove both live
+# there. FLEET_EXPECT_COLOCATION=0 restores the one-parent-per-node assertion
+# for Celln bundles without it.
+extra=()
+colocated=""
+for attempt in 1 2 3 4 5 6; do
+	run="$(kc -n "$NAMESPACE" create -f "$WORK/fleet-out/installation/run.json" -o jsonpath='{.metadata.name}')"
+	extra+=("$run")
+	wait_for "issuance of $run" 120 bash -c "[ -n \"\$(kubectl --context kind-$CLUSTER -n $NAMESPACE get agentrun $run -o jsonpath='{.status.cellnParent.binding.launchProfile}')\" ]"
+	node="$(node_of "$(launch_of "$run")")"
+	[ -n "$node" ] || fail "owner of $run not found"
+	if [ "$node" != "$first_node" ]; then
+		wait_for "parent $run ready" 240 run_ready "$run"
+		pass "$run issued to the other owner $node"
+		continue
+	fi
+	colocated="$run"
+	break
+done
+[ -n "$colocated" ] || fail "no run hashed to $first_node in ${#extra[@]} attempts"
+if [ "${FLEET_EXPECT_COLOCATION:-1}" = 1 ]; then
+	wait_for "parent $colocated ready beside $first on $first_node" 240 run_ready "$colocated"
+	wait_for "initial turn of $colocated" 240 bash -c "kubectl --context kind-$CLUSTER -n $NAMESPACE get agentrun $colocated -o jsonpath='{.status.cellnParent.initialTurn.result.succeeded}' | grep -q true"
+	run_ready "$first" || fail "$first lost readiness when $colocated joined $first_node"
+	pass "$colocated and $first are both live on $first_node and $colocated completed a real model turn"
 else
-	wait_for "capacity refusal of $second" 120 bash -c "kubectl --context kind-$CLUSTER -n $NAMESPACE get agentrun $second -o jsonpath='{.status.conditions[?(@.type==\"CellnParentReady\")].reason}' | grep -q ReconciliationRequired"
-	run_ready "$second" && fail "$second became ready on an owner that already holds a parent"
-	pass "$second hashed to $first_node and was refused there (one parent per node); not re-placed"
+	wait_for "capacity refusal of $colocated" 120 bash -c "kubectl --context kind-$CLUSTER -n $NAMESPACE get agentrun $colocated -o jsonpath='{.status.conditions[?(@.type==\"CellnParentReady\")].reason}' | grep -qE 'CreateRefused|ReconciliationRequired'"
+	pass "$colocated hashed to $first_node and was refused there (one parent per node); not re-placed"
 fi
 
 log "Follow-up turn keeps live context on the same owner"
@@ -168,29 +185,40 @@ echo "$answer" | grep -qi violet || fail "follow-up turn lost context: $answer"
 [ "$(kc -n "$NAMESPACE" get agentrunturn "$first-turn-2" -o jsonpath='{.status.execution.child}')" != "$(kc -n "$NAMESPACE" get agentrun "$first" -o jsonpath='{.status.cellnParent.initialTurn.child}')" ] || fail "turn reused the initial child"
 pass "distinct child read back: $(echo "$answer" | tr '\n' ' ')"
 
-# One parent per node: release the fleet before another namespace is tried,
-# and prove a live parent can be stopped through the gateway on the way.
-kc -n "$NAMESPACE" delete agentrun "$first" --timeout=120s >/dev/null || fail "$first could not be deleted while its owner was live"
-if run_ready "$second"; then
-	kc -n "$NAMESPACE" delete agentrun "$second" --timeout=120s >/dev/null || fail "$second could not be deleted while its owner was live"
-fi
-pass "$first deleted through the gateway; fleet released"
+# Every run deletes cleanly through the gateway, live or refused.
+for run in "$first" "${extra[@]}"; do
+	kc -n "$NAMESPACE" delete agentrun "$run" --timeout=180s >/dev/null || fail "$run could not be deleted"
+done
+pass "$first and ${#extra[@]} other runs deleted through the gateway"
 
-log "A second namespace needs only wrapper objects; an unlabeled one is refused"
+log "Any ordinary namespace runs on the fleet; wrappers are created on first use; an excluded one is refused"
 tenant="$NAMESPACE-b"
 denied="$NAMESPACE-denied"
 profile="celln-native-$SCOPE"
-for ns in "$tenant" "$denied"; do
-	kc create namespace "$ns" >/dev/null 2>&1 || true
-	# The tenant's three wrapper objects are copies of the installed ones.
-	for kind in modelconnection agentruntime agent; do
-		kc -n "$NAMESPACE" get "$kind" -o json | python3 -c "
+kc create namespace "$tenant" >/dev/null 2>&1 || true
+kc create namespace "$denied" >/dev/null 2>&1 || true
+kc label namespace "$denied" --overwrite celln.sympozium.ai/excluded=true >/dev/null
+# The tenant path is the API: list the profiles the namespace may run, then
+# have the wrappers created. No label, no YAML.
+api_token="$(kc -n sympozium-system get secret sympozium-ui-token -o jsonpath='{.data.token}' 2>/dev/null | base64 -d || true)"
+[ -n "$api_token" ] || api_token="$(kc -n sympozium-system get deploy sympozium-apiserver -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="SYMPOZIUM_UI_TOKEN")].value}')"
+api_auth=()
+[ -n "$api_token" ] && api_auth=(-H "Authorization: Bearer $api_token")
+kc -n sympozium-system port-forward svc/sympozium-apiserver 18080:8080 >/dev/null 2>&1 &
+api_pf=$!
+wait_for "apiserver port-forward" 60 curl -sf "${api_auth[@]}" "http://127.0.0.1:18080/api/v1/celln-platform/profiles?namespace=$tenant" -o /dev/null
+curl -sf "${api_auth[@]}" "http://127.0.0.1:18080/api/v1/celln-platform/profiles?namespace=$tenant" | grep -q "\"name\":\"$profile\"" || fail "platform profile $profile not offered to $tenant"
+curl -sf "${api_auth[@]}" -X POST -H 'Content-Type: application/json' -d "{\"profile\":\"$profile\"}" "http://127.0.0.1:18080/api/v1/celln-platform/wrappers?namespace=$tenant" | grep -q '"connection":"celln-native"' || fail "wrappers were not created in $tenant"
+[ "$(curl -s "${api_auth[@]}" "http://127.0.0.1:18080/api/v1/celln-platform/profiles?namespace=$denied")" = "[]" ] || fail "excluded namespace $denied was offered a profile"
+[ "$(curl -s -o /dev/null -w '%{http_code}' "${api_auth[@]}" -X POST -H 'Content-Type: application/json' -d "{\"profile\":\"$profile\"}" "http://127.0.0.1:18080/api/v1/celln-platform/wrappers?namespace=$denied")" = 403 ] || fail "excluded namespace $denied was prepared"
+kill "$api_pf" >/dev/null 2>&1 || true
+# The excluded namespace applies the same objects by hand so its refusal is the policy's, not a missing Agent.
+for kind in modelconnection agentruntime agent; do
+	kc -n "$NAMESPACE" get "$kind" -o json | python3 -c "
 import json, sys
 for item in json.load(sys.stdin)['items']:
-    print(json.dumps({'apiVersion': item['apiVersion'], 'kind': item['kind'], 'metadata': {'name': item['metadata']['name'], 'namespace': sys.argv[1]}, 'spec': item['spec']}))" "$ns" | kc apply -f - >/dev/null
-	done
+    print(json.dumps({'apiVersion': item['apiVersion'], 'kind': item['kind'], 'metadata': {'name': item['metadata']['name'], 'namespace': sys.argv[1]}, 'spec': item['spec']}))" "$denied" | kc apply -f - >/dev/null
 done
-kc label namespace "$tenant" --overwrite "celln.sympozium.ai/scope=$SCOPE" >/dev/null
 tenant_run="$(python3 -c "
 import json, sys
 r = json.load(open(sys.argv[1])); r['metadata']['namespace'] = sys.argv[2]; print(json.dumps(r))" "$WORK/fleet-out/installation/run.json" "$tenant" | kc create -f - -o jsonpath='{.metadata.name}')"
@@ -200,13 +228,13 @@ wait_for "initial turn of $tenant_run" 240 bash -c "kubectl --context kind-$CLUS
 [ "$(kc -n "$tenant" get cellntool -o name | wc -l)" = 0 ] || fail "namespaced tools appeared in $tenant"
 tenant_node="$(node_of "$(kc -n "$tenant" get agentrun "$tenant_run" -o jsonpath='{.status.cellnParent.binding.launchProfile}')")"
 [ -n "$tenant_node" ] || fail "owner of $tenant_run not found"
-pass "$tenant_run ran in $tenant on $tenant_node from wrapper objects only (no install, no grants, no copied tools)"
+pass "$tenant_run ran in $tenant on $tenant_node with wrappers created on first use (no label, no YAML, no grants, no copied tools)"
 denied_run="$(python3 -c "
 import json, sys
 r = json.load(open(sys.argv[1])); r['metadata']['namespace'] = sys.argv[2]; print(json.dumps(r))" "$WORK/fleet-out/installation/run.json" "$denied" | kc create -f - -o jsonpath='{.metadata.name}')"
 wait_for "policy refusal for $denied_run" 90 bash -c "kubectl --context kind-$CLUSTER -n $denied get agentrun $denied_run -o jsonpath='{.status.conditions[?(@.type==\"CellnParentReady\")].message}' | grep -q AUTH_POLICY_WITHDRAWN"
 [ -z "$(kc -n "$denied" get agentrun "$denied_run" -o jsonpath='{.status.cellnParent}')" ] || fail "$denied_run was issued a parent without policy"
-pass "$denied_run in unlabeled $denied refused with AUTH_POLICY_WITHDRAWN and no parent"
+pass "$denied_run in excluded $denied refused with AUTH_POLICY_WITHDRAWN and no parent"
 
 log "Removing a node's label drains its owner and reports context loss"
 kc label node "$tenant_node" celln.dev/kvm- >/dev/null

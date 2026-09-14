@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/sympozium-ai/sympozium/internal/cellninstall"
+	"github.com/sympozium-ai/sympozium/internal/cellnplatform"
 )
 
 // cellnFleetFlags configure `sympozium install --celln-fleet`: one reviewed
@@ -18,6 +19,7 @@ type cellnFleetFlags struct {
 	options             cellninstall.FleetOptions
 	modelCredentialFile string
 	outputDir           string
+	authorise           string
 	wait                time.Duration
 }
 
@@ -28,6 +30,7 @@ func (f *cellnFleetFlags) register(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&f.options.PackageHash, "celln-fleet-package-hash", "", "Exact operator-approved package BLAKE3 identity from 'celln starter-inspect'")
 	cmd.Flags().StringVar(&f.options.Publisher, "celln-fleet-publisher", "", "Explicitly approved publisher key of the package from 'celln starter-inspect'")
 	cmd.Flags().StringVar(&f.options.Principal, "celln-fleet-principal", "sympozium:celln", "Parent principal every fleet owner authenticates")
+	cmd.Flags().StringVar(&f.authorise, "celln-fleet-authorise", "all", "Which namespaces may run on the fleet: 'all' (every namespace except kube-*, cert-manager, the control-plane namespaces and namespaces labeled celln.sympozium.ai/excluded) or 'labeled' (only namespaces labeled celln.sympozium.ai/scope=<scope>)")
 	cmd.Flags().StringVar(&f.options.ModelCredentialPath, "celln-fleet-model-credential-path", "/etc/celln-native/model-token", "Absolute path inside every dispatcher where the model credential Secret is mounted; recorded in the model profile")
 	cmd.Flags().StringVar(&f.modelCredentialFile, "celln-fleet-model-credential-file", "", "Local file holding the model provider credential to publish once as a Secret in celln-system (omit to keep an existing Secret)")
 	cmd.Flags().StringVar(&f.outputDir, "celln-fleet-output-dir", "", "Absolute private directory for the materialized configuration and installation records")
@@ -101,7 +104,7 @@ func installCellnFleet(ctx context.Context, f cellnFleetFlags, imageTag string, 
 	if err != nil {
 		return err
 	}
-	platform := cellninstall.PlatformOptions{Namespace: namespace, ConfigurationDir: configuration, OutputDir: filepath.Join(f.outputDir, "installation"), Scope: f.options.Scope, ClusterID: clusterID, PackageHash: f.options.PackageHash, Principal: f.options.Principal, ControllerNamespace: helmNamespace}
+	platform := cellninstall.PlatformOptions{Namespace: namespace, ConfigurationDir: configuration, OutputDir: filepath.Join(f.outputDir, "installation"), Scope: f.options.Scope, ClusterID: clusterID, PackageHash: f.options.PackageHash, Principal: f.options.Principal, ControllerNamespace: helmNamespace, Authorise: f.authorise}
 	if err := cellninstall.InstallPlatform(ctx, k8sClient, platform); err != nil {
 		return err
 	}
@@ -113,6 +116,10 @@ func installCellnFleet(ctx context.Context, f cellnFleetFlags, imageTag string, 
 	if err := runInstall(imageTag, append(values, wiring...)); err != nil {
 		return err
 	}
-	fmt.Printf("  Enabled enduring Celln runs on fleet %q; namespace %s is labeled %s=%s and carries the wrapper objects. Authorise more namespaces with that label plus an AgentRuntime referencing profile celln-native-%s. No run submitted.\n", f.options.Scope, namespace, cellninstall.ScopeLabel, f.options.Scope, f.options.Scope)
+	if f.authorise == cellnplatform.AuthoriseLabeled {
+		fmt.Printf("  Enabled enduring Celln runs on fleet %q for namespaces labeled %s=%s; %s is labeled and carries the wrapper objects. No run submitted.\n", f.options.Scope, cellninstall.ScopeLabel, f.options.Scope, namespace)
+	} else {
+		fmt.Printf("  Enabled enduring Celln runs on fleet %q for every namespace except the system exclusions and namespaces labeled %s; %s carries the wrapper objects and any other namespace gets them on first use. No run submitted.\n", f.options.Scope, cellnplatform.ExcludedLabel, namespace)
+	}
 	return nil
 }
