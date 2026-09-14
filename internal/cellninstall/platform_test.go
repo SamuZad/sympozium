@@ -25,6 +25,8 @@ import (
 
 // starterConfiguration materializes the reviewed testdata with a consistent
 // receipt, as the fleet nodes publish it.
+type testBackend struct{ name, provider, protocol, model, url, credentialProfile string }
+
 func starterConfiguration(t *testing.T) (dir, packageHash, principal string) {
 	t.Helper()
 	dir = filepath.Join(t.TempDir(), "configuration")
@@ -33,55 +35,62 @@ func starterConfiguration(t *testing.T) (dir, packageHash, principal string) {
 	}
 	// Two backends of one package: the reviewed default (DeepSeek) and an
 	// Anthropic route named "claude" sharing every other byte.
-	for _, backend := range []struct{ name, provider, protocol, model, url, credentialProfile string }{
+	for _, backend := range []testBackend{
 		{"native", "", "", "", "", ""},
 		{"claude", "anthropic", "anthropic-messages", "claude-test", "https://api.anthropic.com/v1/messages", "trial-claude"},
 	} {
-		sub := filepath.Join(dir, backend.name)
-		if err := os.Mkdir(sub, 0700); err != nil {
-			t.Fatal(err)
-		}
-		var metadata receipt
-		for _, name := range []string{"catalogue.json", "native-template.json", "configured.json"} {
-			raw, err := os.ReadFile(filepath.Join("testdata", name))
-			if err != nil {
-				t.Fatal(err)
-			}
-			raw = []byte(strings.TrimSuffix(string(raw), "\n"))
-			if name == "native-template.json" && backend.provider != "" {
-				var native map[string]any
-				if err := json.Unmarshal(raw, &native); err != nil {
-					t.Fatal(err)
-				}
-				template := native["template"].(map[string]any)
-				template["model"], template["url"] = backend.model, backend.url
-				native["modelProfile"] = "blake3:" + strings.Repeat("e", 64)
-				raw, _ = json.Marshal(native)
-			}
-			if name == "configured.json" {
-				if err := json.Unmarshal(raw, &metadata); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if err := os.WriteFile(filepath.Join(sub, name), raw, 0600); err != nil {
-				t.Fatal(err)
-			}
-		}
-		if backend.provider != "" {
-			metadata.Model = api.ModelSpec{Provider: backend.provider, Protocol: backend.protocol, Model: backend.model, BaseURL: backend.url, CredentialProfile: backend.credentialProfile}
-			metadata.ModelProfile = "blake3:" + strings.Repeat("e", 64)
-		}
-		for file, field := range map[string]*string{"catalogue.json": &metadata.CatalogueHash, "native-template.json": &metadata.NativeTemplateHash} {
-			raw, _ := os.ReadFile(filepath.Join(sub, file))
-			*field = fmt.Sprintf("blake3:%x", blake3.Sum256(raw))
-		}
-		raw, _ := json.Marshal(metadata)
-		if err := os.WriteFile(filepath.Join(sub, "configured.json"), raw, 0600); err != nil {
-			t.Fatal(err)
-		}
-		packageHash, principal = metadata.PackageHash, metadata.Principal
+		packageHash, principal = writeBackendConfiguration(t, dir, backend)
 	}
 	return dir, packageHash, principal
+}
+
+// writeBackendConfiguration materializes one backend's node configuration
+// from the testdata package, as a node would publish it.
+func writeBackendConfiguration(t *testing.T, dir string, backend testBackend) (packageHash, principal string) {
+	t.Helper()
+	sub := filepath.Join(dir, backend.name)
+	if err := os.Mkdir(sub, 0700); err != nil {
+		t.Fatal(err)
+	}
+	var metadata receipt
+	for _, name := range []string{"catalogue.json", "native-template.json", "configured.json"} {
+		raw, err := os.ReadFile(filepath.Join("testdata", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw = []byte(strings.TrimSuffix(string(raw), "\n"))
+		if name == "native-template.json" && backend.provider != "" {
+			var native map[string]any
+			if err := json.Unmarshal(raw, &native); err != nil {
+				t.Fatal(err)
+			}
+			template := native["template"].(map[string]any)
+			template["model"], template["url"] = backend.model, backend.url
+			native["modelProfile"] = "blake3:" + strings.Repeat("e", 64)
+			raw, _ = json.Marshal(native)
+		}
+		if name == "configured.json" {
+			if err := json.Unmarshal(raw, &metadata); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(sub, name), raw, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if backend.provider != "" {
+		metadata.Model = api.ModelSpec{Provider: backend.provider, Protocol: backend.protocol, Model: backend.model, BaseURL: backend.url, CredentialProfile: backend.credentialProfile}
+		metadata.ModelProfile = "blake3:" + strings.Repeat("e", 64)
+	}
+	for file, field := range map[string]*string{"catalogue.json": &metadata.CatalogueHash, "native-template.json": &metadata.NativeTemplateHash} {
+		raw, _ := os.ReadFile(filepath.Join(sub, file))
+		*field = fmt.Sprintf("blake3:%x", blake3.Sum256(raw))
+	}
+	raw, _ := json.Marshal(metadata)
+	if err := os.WriteFile(filepath.Join(sub, "configured.json"), raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	return metadata.PackageHash, metadata.Principal
 }
 
 func platformInstallStore(t *testing.T) client.Client {
@@ -227,5 +236,59 @@ func TestSessionDefaultsStayInsideCeilings(t *testing.T) {
 	narrow := SessionDefaults(api.EnduringRunSpec{LeaseSeconds: 600, MaxTurns: 4, MaxModelRequests: 12, MaxOutputTokens: 6144})
 	if narrow.LeaseSeconds != 600 || narrow.MaxTurns != 4 || narrow.MaxModelRequests != 12 || narrow.MaxOutputTokens != 6144 {
 		t.Fatalf("session defaults exceed narrow ceilings: %+v", narrow)
+	}
+}
+
+// A rerun with one more backend configured by the nodes adds that backend's
+// profile, route and wrappers to the scope and rewrites the installation
+// record; the first installation's registration and sample run are kept.
+func TestInstallPlatformAddsBackendToRunningScope(t *testing.T) {
+	ctx := context.Background()
+	dir, packageHash, principal := starterConfiguration(t)
+	store := platformInstallStore(t)
+	o := PlatformOptions{Namespace: "tenant-a", ConfigurationDir: dir, OutputDir: filepath.Join(t.TempDir(), "out"), Scope: "trial", ClusterID: "cluster-uid", PackageHash: packageHash, Principal: principal, ControllerNamespace: "sympozium-system"}
+	if err := InstallPlatform(ctx, store, o); err != nil {
+		t.Fatal(err)
+	}
+	runBefore, err := os.ReadFile(filepath.Join(o.OutputDir, "run.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeBackendConfiguration(t, dir, testBackend{"spare", "spare-provider", "openai-chat", "spare.gguf", "https://spare.example/v1/chat/completions", "trial-spare"})
+	if err := InstallPlatform(ctx, store, o); err != nil {
+		t.Fatalf("rerun with an added backend refused: %v", err)
+	}
+	_, policyName, _ := PlatformCatalogueNames("trial")
+	var policy api.CellnExecutionPolicy
+	if err := store.Get(ctx, types.NamespacedName{Name: policyName}, &policy); err != nil {
+		t.Fatal(err)
+	}
+	if len(policy.Spec.RuntimeProfiles) != 3 || len(policy.Spec.Routes) != 3 || !slices.ContainsFunc(policy.Spec.Routes, func(r api.CellnExecutionPolicyRoute) bool {
+		return r.Provider == "spare-provider" && r.EndpointOrigins[0] == "https://spare.example"
+	}) {
+		t.Fatalf("policy did not grow by the added backend only: %+v", policy.Spec)
+	}
+	var spare api.CellnRuntimeProfile
+	if err := store.Get(ctx, types.NamespacedName{Name: PlatformProfileName("trial", "spare")}, &spare); err != nil || spare.Spec.Native.CredentialProfile != "trial-spare" {
+		t.Fatalf("added backend profile: %v", err)
+	}
+	var connection api.ModelConnection
+	if err := store.Get(ctx, types.NamespacedName{Namespace: "tenant-a", Name: "celln-spare"}, &connection); err != nil || connection.Spec.Provider != "spare-provider" {
+		t.Fatalf("added backend wrappers: %v", err)
+	}
+	var installed struct {
+		Backends []string `json:"backends"`
+	}
+	raw, err := os.ReadFile(filepath.Join(o.OutputDir, "installed.json"))
+	if err != nil || json.Unmarshal(raw, &installed) != nil || len(installed.Backends) != 3 {
+		t.Fatalf("installation record not rewritten with every backend: %s %v", raw, err)
+	}
+	runAfter, _ := os.ReadFile(filepath.Join(o.OutputDir, "run.json"))
+	if string(runAfter) != string(runBefore) {
+		t.Fatal("sample run of the first installation was rewritten")
+	}
+	// The same rerun again changes nothing.
+	if err := InstallPlatform(ctx, store, o); err != nil {
+		t.Fatalf("idempotent rerun refused: %v", err)
 	}
 }

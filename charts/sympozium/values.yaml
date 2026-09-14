@@ -568,15 +568,16 @@ celln:
     parentClientsConfigMap: ""
     # -- ConfigMap in celln-system the nodes publish the starter configuration to.
     configurationConfigMap: celln-fleet-configuration
-    # -- The scope's model backends. Every node configures every backend and
-    # mounts every credential; each backend becomes a runtime profile and an
-    # AgentRuntime wrapper (`celln-<name>`, the one named `native` keeps
-    # `celln-native`) so one namespace runs parents on several providers side
-    # by side. `sympozium install --celln-fleet --celln-fleet-backend
-    # name=..,provider=..,model=..` fills this list. Names are DNS labels;
-    # credentialSecret is a Secret in celln-system (key `token`) mounted
-    # read-only into every dispatcher at credentialPath, which must sit in a
-    # directory no other backend uses. Adding a backend needs a new scope.
+    # -- The scope's model backends. Every node configures every backend;
+    # each backend becomes a runtime profile and an AgentRuntime wrapper
+    # (`celln-<name>`, the one named `native` keeps `celln-native`) so one
+    # namespace runs parents on several providers side by side.
+    # `sympozium install --celln-fleet --celln-fleet-backend
+    # name=..,provider=..,model=..` fills this list and may be rerun to add a
+    # backend: the node-configure DaemonSet configures it and publishes it,
+    # while the owner DaemonSet is untouched so running conversations keep
+    # going. Names are DNS labels. Keys live in `modelCredentialsSecret`
+    # under the backend's name.
     backends: []
     # - name: native
     #   provider: deepseek
@@ -584,15 +585,16 @@ celln:
     #   endpoint: https://api.deepseek.com/chat/completions
     #   model: deepseek-chat
     #   allowInsecure: false
-    #   credentialSecret: celln-fleet-model-credential
-    #   credentialPath: /etc/celln-native/model-token
     # - name: claude
     #   provider: anthropic
     #   protocol: anthropic-messages
     #   endpoint: https://api.anthropic.com/v1/messages
     #   model: claude-sonnet-5
-    #   credentialSecret: celln-fleet-model-credential-claude
-    #   credentialPath: /etc/celln-native/claude/model-token
+    # -- Secret in celln-system holding every backend's provider key under the
+    # backend's name, mounted read-only into every dispatcher at
+    # /etc/celln-native/credentials. Guests and the controller never see it;
+    # the model gateway is the long-term home. The installer publishes it.
+    modelCredentialsSecret: celln-fleet-model-credentials
     # -- Legacy single-backend form, used only when `backends` is empty: it
     # becomes the one backend named `native`. An empty endpoint keeps Celln's
     # reviewed default (DeepSeek).
@@ -613,13 +615,6 @@ celln:
       maxTurns: 0
       maxModelRequests: 0
       maxOutputTokens: 0
-    # -- Legacy single-backend credential (see `backends`): Secret in
-    # celln-system (key `token`) mounted read-only into every dispatcher at
-    # `path`. Guests and the controller never see it; the model gateway is
-    # the long-term home.
-    modelCredential:
-      secret: ""
-      path: /etc/celln-native/model-token
     # -- Per-node budget. `auto` sizes each node when its dispatcher starts:
     # memoryBytes = memoryPercent of the node's memory (its cgroup limit when
     # set), maxCells = memoryBytes / cellMemoryBytes capped at maxCellsCeiling,

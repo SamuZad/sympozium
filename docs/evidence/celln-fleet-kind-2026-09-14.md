@@ -255,6 +255,32 @@ cells returned to the 6 held by the three enduring parents. No namespace
 grants, no scoped receiver, no separate one-shot stack: the parent path
 serves both lifecycles.
 
+## A backend added to a running scope (no owner restart)
+
+Node preparation now lives in a `celln-node-configure` DaemonSet; the
+`celln-node` owner only waits for the node's package admission, and every
+backend's key is one entry in the `celln-fleet-model-credentials` Secret
+mounted whole. On `fleet-ci` (scope `ci`, backends `native` and `messages`)
+the same install command was rerun with a third backend, `spare` (custom
+provider `llama-spare`, openai-chat, the framework machine's llama-server),
+while three enduring conversations were live in `celln-agents-b`.
+
+| Check | Result |
+| --- | --- |
+| Owners | Both `celln-node` pod UIDs unchanged across the rerun; the conversation `celln-agent-wgmnz` still Running afterwards. |
+| Nodes | Both configure pods rolled, configured `spare` from the already-admitted package, waited for its key file, and merge-patched `spare.*` into `celln-fleet-configuration`; existing keys untouched. |
+| Catalogue | Profile `celln-native-ci-spare` (credential profile `ci-spare`) added; policy `celln-fleet-ci` grew to three runtime profiles and three routes; `installed.json` rewritten, `run.json` kept. |
+| Tenant | `celln-agents-b` offered the new profile through the API and got wrappers `celln-spare`/`celln-agent-spare` on first use. |
+| Run | One-shot `celln-agent-spare-69sfb` on `spare` succeeded: "The Nossob River flows through Botswana." |
+
+Two earlier attempts found real gaps. A custom provider needs a key file
+(the journey now supplies one). And a run issued 34 s after the key was
+published reached its owner 5 s before the kubelet had refreshed that
+owner's Secret mount, so the parent was lost on "provider credential
+unavailable". Nodes now publish a backend only once its key file is present
+in their own mount of the Secret, and after a rerun that added backends the
+installer waits 90 s for the running owners' mounts to follow.
+
 ## Environment caveats
 
 - Kind nodes have no kernel in `/boot`; the dispatcher's readiness gate

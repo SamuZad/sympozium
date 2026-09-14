@@ -107,8 +107,8 @@ func TestPublishFleetModelCredentialKeepsExistingSecret(t *testing.T) {
 		t.Fatal(err)
 	}
 	var secret corev1.Secret
-	if err := store.Get(ctx, types.NamespacedName{Namespace: "celln-system", Name: FleetModelCredentialSecret}, &secret); err != nil || string(secret.Data["token"]) != "sk-test-model-credential-0001" {
-		t.Fatalf("credential not published verbatim: %v %q", err, secret.Data)
+	if err := store.Get(ctx, types.NamespacedName{Namespace: "celln-system", Name: FleetModelCredentialSecret}, &secret); err != nil || string(secret.Data["native"]) != "sk-test-model-credential-0001" {
+		t.Fatalf("credential not published verbatim under the backend's name: %v %q", err, secret.Data)
 	}
 	if err := PublishFleetModelCredential(ctx, store, path, FleetModel{}); err != nil {
 		t.Fatalf("identical rerun refused: %v", err)
@@ -196,6 +196,17 @@ func TestConfigureFleetRebindsIssuanceToGateway(t *testing.T) {
 	if published.LocalProvisioner != nil || remote == nil || remote.Target != ManagedRouterURL || remote.TokenFile != "/etc/sympozium/celln/token" || remote.CAFile != "" || remote.Journal != FleetJournalRoot+"/journal" || published.Journal != remote.Journal || published.Approvals != FleetJournalRoot+"/approvals" || remote.Approvals != published.Approvals || len(published.HostTemplates) != 1 {
 		t.Fatalf("controller wiring did not move issuance to the gateway: %+v", published)
 	}
+	// A rerun keeps identical wiring; different wiring is never replaced.
+	if again, err := ConfigureFleet(ctx, store, o); err != nil || strings.Join(again, ",") != strings.Join(values, ",") {
+		t.Fatalf("identical rerun did not keep the wiring: %v %v", err, again)
+	}
+	if wired, err := ExistingFleetWiring(ctx, store, o.ControllerNamespace); err != nil || !wired {
+		t.Fatalf("existing wiring not detected: %v", err)
+	}
+	secret.Data["registrations.json"] = []byte(`{"apiVersion":"other"}`)
+	if err := store.Update(ctx, &secret); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := ConfigureFleet(ctx, store, o); err == nil {
 		t.Fatal("existing wiring replaced")
 	}
@@ -244,7 +255,7 @@ func TestFleetModelPresetsAndRefusals(t *testing.T) {
 	o.Model = ok["llama-server"]
 	values, err := FleetValues(o)
 	joined := strings.Join(values, "\n")
-	if err != nil || !strings.Contains(joined, "celln.fleet.backends[0].endpoint=http://100.81.163.75:8080/v1/chat/completions") || !strings.Contains(joined, "celln.fleet.backends[0].allowInsecure=true") || !strings.Contains(joined, "celln.fleet.backends[0].model=qwen.gguf") || !strings.Contains(joined, "celln.fleet.backends[0].name=native") || !strings.Contains(joined, "celln.fleet.backends[0].credentialSecret=celln-fleet-model-credential") || !strings.Contains(joined, "celln.fleet.backends[0].credentialPath=/etc/celln-native/model-token") {
+	if err != nil || !strings.Contains(joined, "celln.fleet.backends[0].endpoint=http://100.81.163.75:8080/v1/chat/completions") || !strings.Contains(joined, "celln.fleet.backends[0].allowInsecure=true") || !strings.Contains(joined, "celln.fleet.backends[0].model=qwen.gguf") || !strings.Contains(joined, "celln.fleet.backends[0].name=native") || strings.Contains(joined, "credential") {
 		t.Fatalf("model route not rendered into values: %v %s", err, joined)
 	}
 	o.Model = FleetModel{Provider: ModelProviderOpenAI}
@@ -264,7 +275,7 @@ func TestKeylessModelPublishesPlaceholderAndShortKeysAreRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	var secret corev1.Secret
-	if err := store.Get(ctx, types.NamespacedName{Namespace: "celln-system", Name: FleetModelCredentialSecret}, &secret); err != nil || len(secret.Data["token"]) < 24 {
+	if err := store.Get(ctx, types.NamespacedName{Namespace: "celln-system", Name: FleetModelCredentialSecret}, &secret); err != nil || len(secret.Data["native"]) < 24 {
 		t.Fatalf("keyless backend placeholder missing or too short for Celln: %v %q", err, secret.Data)
 	}
 	short := filepath.Join(t.TempDir(), "short")
@@ -299,9 +310,9 @@ func TestFleetLimitsDefaultToLongRunningAndAreBounded(t *testing.T) {
 	}
 }
 
-// A scope may carry several backends: each gets its own values entry,
-// credential Secret, mount path and credential profile; the default backend
-// keeps the original names.
+// A scope may carry several backends: each gets its own values entry, entry
+// in the shared credentials Secret, credential path and credential profile;
+// the default backend keeps the original names.
 func TestFleetBackendsRenderSeparately(t *testing.T) {
 	o := validFleet()
 	o.Backends = []FleetBackend{
@@ -316,16 +327,16 @@ func TestFleetBackendsRenderSeparately(t *testing.T) {
 	values, err := FleetValues(o)
 	joined := strings.Join(values, "\n")
 	for _, want := range []string{
-		"celln.fleet.backends[0].name=native", "celln.fleet.backends[0].credentialSecret=celln-fleet-model-credential", "celln.fleet.backends[0].credentialPath=/etc/celln-native/model-token",
-		"celln.fleet.backends[1].name=local-qwen", "celln.fleet.backends[1].credentialSecret=celln-fleet-model-credential-local-qwen", "celln.fleet.backends[1].credentialPath=/etc/celln-native/local-qwen/model-token", "celln.fleet.backends[1].allowInsecure=true",
+		"celln.fleet.backends[0].name=native", "celln.fleet.backends[0].provider=deepseek",
+		"celln.fleet.backends[1].name=local-qwen", "celln.fleet.backends[1].allowInsecure=true",
 		"celln.fleet.backends[2].name=claude", "celln.fleet.backends[2].protocol=anthropic-messages", "celln.fleet.backends[2].endpoint=https://api.anthropic.com/v1/messages",
 	} {
 		if err != nil || !strings.Contains(joined, want) {
 			t.Fatalf("values lack %q: %v\n%s", want, err, joined)
 		}
 	}
-	if CredentialProfileFor("starter", "native") != "starter" || CredentialProfileFor("starter", "claude") != "starter-claude" {
-		t.Fatal("credential profiles must distinguish backends")
+	if CredentialProfileFor("starter", "native") != "starter" || CredentialProfileFor("starter", "claude") != "starter-claude" || BackendCredentialPath("native") != "/etc/celln-native/credentials/native" || BackendCredentialPath("claude") != "/etc/celln-native/credentials/claude" {
+		t.Fatal("credential profiles and paths must distinguish backends")
 	}
 	ctx := context.Background()
 	store := fleetStore()
@@ -339,16 +350,19 @@ func TestFleetBackendsRenderSeparately(t *testing.T) {
 			t.Fatalf("%s: %v", b.Name, err)
 		}
 	}
-	var secrets corev1.SecretList
-	if err := store.List(ctx, &secrets, client.InNamespace("celln-system")); err != nil {
+	var secret corev1.Secret
+	if err := store.Get(ctx, types.NamespacedName{Namespace: "celln-system", Name: FleetModelCredentialSecret}, &secret); err != nil || len(secret.Data["local-qwen"]) < 24 || string(secret.Data["claude"]) != "sk-ant-test-credential-0000000001" || len(secret.Data) != 2 {
+		t.Fatalf("backend credentials are one entry each in the shared Secret: %v %q", err, secret.Data)
+	}
+	// Adding a backend later adds its entry and leaves the others untouched.
+	if err := PublishFleetBackendCredential(ctx, store, FleetBackend{Name: "native", Model: backends[0].Model, CredentialFile: key}); err != nil {
 		t.Fatal(err)
 	}
-	names := map[string]int{}
-	for _, s := range secrets.Items {
-		names[s.Name] = len(s.Data["token"])
+	if err := store.Get(ctx, types.NamespacedName{Namespace: "celln-system", Name: FleetModelCredentialSecret}, &secret); err != nil || len(secret.Data) != 3 || string(secret.Data["claude"]) != "sk-ant-test-credential-0000000001" {
+		t.Fatalf("adding a backend disturbed the others: %v %q", err, secret.Data)
 	}
-	if names["celln-fleet-model-credential-local-qwen"] < 24 || names["celln-fleet-model-credential-claude"] != len("sk-ant-test-credential-0000000001") {
-		t.Fatalf("backend secrets: %v", names)
+	if err := PublishFleetBackendCredential(ctx, store, FleetBackend{Name: "claude", Model: backends[2].Model, CredentialFile: filepath.Join(t.TempDir(), "missing")}); err == nil {
+		t.Fatal("unreadable replacement accepted")
 	}
 }
 
