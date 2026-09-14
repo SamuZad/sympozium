@@ -17,3 +17,32 @@ func TestSharedCatalogueNeverFallsThroughLegacyResolution(t *testing.T) {
 		}
 	}
 }
+
+// Enduring platform runs select the shared catalogue with the namespace's
+// model connection; that is the only shape allowed through, and it keeps the
+// explicit (empty) legacy tool list and the connection rather than a provider.
+func TestEnduringPlatformSelectionIsAcceptedOnlyInItsExactShape(t *testing.T) {
+	shared := []api.ClusterCellnToolRef{{Name: "celln-trial-workspace-read", Revision: "v1"}}
+	enduring := &api.EnduringRunSpec{LeaseSeconds: 600, MaxTurns: 8, MaxModelRequests: 24, MaxOutputTokens: 8192}
+	ok := Input{Backend: "celln", ExecutionLifecycle: "enduring", Enduring: enduring, Model: "qwen.gguf", ModelConnectionRef: "celln-native", CellnSelection: &api.CellnCatalogueSelection{RuntimeRef: "celln-native", ToolRefs: []api.CellnCatalogueToolRef{}, ClusterToolRefs: shared}}
+	result, err := Resolve(nil, ok)
+	if err != nil || result.Backend != "celln" || result.ModelConnectionRef != "celln-native" || result.Provider != "" || len(result.CellnSelection.ClusterToolRefs) != 1 {
+		t.Fatalf("enduring platform selection refused or altered: %+v %v", result, err)
+	}
+	for name, mutate := range map[string]func(*Input){
+		"one-shot": func(in *Input) { in.ExecutionLifecycle = ""; in.Enduring = nil },
+		"mixed legacy tools": func(in *Input) {
+			in.CellnSelection.ToolRefs = []api.CellnCatalogueToolRef{{Name: "legacy", Revision: "v1"}}
+		},
+		"no connection":   func(in *Input) { in.ModelConnectionRef = "" },
+		"inline provider": func(in *Input) { in.Provider = "openai" },
+	} {
+		in := ok
+		selection := *ok.CellnSelection
+		in.CellnSelection = &selection
+		mutate(&in)
+		if _, err := Resolve(nil, in); err == nil || !strings.Contains(err.Error(), "AUTH_PROTOCOL_UNSUPPORTED") {
+			t.Fatalf("%s accepted: %v", name, err)
+		}
+	}
+}

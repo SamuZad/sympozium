@@ -240,7 +240,6 @@ curl -sf "${api_auth[@]}" "http://127.0.0.1:$api_port/api/v1/celln-platform/prof
 curl -sf "${api_auth[@]}" -X POST -H 'Content-Type: application/json' -d "{\"profile\":\"$profile\"}" "http://127.0.0.1:$api_port/api/v1/celln-platform/wrappers?namespace=$tenant" | grep -q '"connection":"celln-native"' || fail "wrappers were not created in $tenant"
 [ "$(curl -s "${api_auth[@]}" "http://127.0.0.1:$api_port/api/v1/celln-platform/profiles?namespace=$denied")" = "[]" ] || fail "excluded namespace $denied was offered a profile"
 [ "$(curl -s -o /dev/null -w '%{http_code}' "${api_auth[@]}" -X POST -H 'Content-Type: application/json' -d "{\"profile\":\"$profile\"}" "http://127.0.0.1:$api_port/api/v1/celln-platform/wrappers?namespace=$denied")" = 403 ] || fail "excluded namespace $denied was prepared"
-kill "$api_pf" >/dev/null 2>&1 || true
 # The excluded namespace applies the same objects by hand so its refusal is the policy's, not a missing Agent.
 for kind in modelconnection agentruntime agent; do
 	kc -n "$NAMESPACE" get "$kind" -o json | python3 -c "
@@ -248,11 +247,29 @@ import json, sys
 for item in json.load(sys.stdin)['items']:
     print(json.dumps({'apiVersion': item['apiVersion'], 'kind': item['kind'], 'metadata': {'name': item['metadata']['name'], 'namespace': sys.argv[1]}, 'spec': item['spec']}))" "$denied" | kc apply -f - >/dev/null
 done
-tenant_run="$(python3 -c "
+# Tenants start runs through the API, as the UI does, and one Agent may hold
+# several enduring conversations at once.
+api_run() { # task -> run name, via POST /api/v1/runs
+	python3 -c '
 import json, sys
-r = json.load(open(sys.argv[1])); r['metadata']['namespace'] = sys.argv[2]; print(json.dumps(r))" "$WORK/fleet-out/installation/run.json" "$tenant" | kc create -f - -o jsonpath='{.metadata.name}')"
-wait_for "parent $tenant_run ready in $tenant" 240 run_ready "$tenant_run" "$tenant"
-wait_for "initial turn of $tenant_run" 240 bash -c "kubectl --context kind-$CLUSTER -n $tenant get agentrun $tenant_run -o jsonpath='{.status.cellnParent.initialTurn.result.succeeded}' | grep -q true"
+r = json.load(open(sys.argv[1]))["spec"]
+print(json.dumps({"agentRef": r["agentRef"], "task": sys.argv[2], "systemPrompt": r["systemPrompt"], "backend": "celln",
+  "executionLifecycle": "enduring", "enduring": r["enduring"], "model": r["model"]["model"], "modelConnectionRef": r["model"]["connectionRef"],
+  "cellnSelection": {"runtimeRef": r["cellnSelection"]["runtimeRef"], "clusterToolRefs": r["cellnSelection"]["clusterToolRefs"], "toolRefs": []}}))' "$WORK/fleet-out/installation/run.json" "$1" |
+		curl -sf "${api_auth[@]}" -X POST -H 'Content-Type: application/json' --data-binary @- "http://127.0.0.1:$api_port/api/v1/runs?namespace=$tenant" |
+		python3 -c 'import json,sys; print(json.load(sys.stdin)["metadata"]["name"])'
+}
+tenant_task="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["spec"]["task"])' "$WORK/fleet-out/installation/run.json")"
+tenant_run="$(api_run "$tenant_task")" || fail "API refused an enduring run in $tenant"
+tenant_run2="$(api_run "Remember the word saffron. Reply with one short sentence; do not use tools.")" || fail "API refused a second conversation for the same Agent in $tenant"
+kill "$api_pf" >/dev/null 2>&1 || true
+for run in "$tenant_run" "$tenant_run2"; do
+	wait_for "parent $run ready in $tenant" 240 run_ready "$run" "$tenant"
+	wait_for "initial turn of $run" 240 bash -c "kubectl --context kind-$CLUSTER -n $tenant get agentrun $run -o jsonpath='{.status.cellnParent.initialTurn.result.succeeded}' | grep -q true"
+done
+[ "$(kc -n "$tenant" get agentrun "$tenant_run2" -o jsonpath='{.status.cellnParent.binding.incarnation}')" != "$(kc -n "$tenant" get agentrun "$tenant_run" -o jsonpath='{.status.cellnParent.binding.incarnation}')" ] || fail "two conversations shared a parent"
+pass "two enduring conversations of one Agent started through the API in $tenant, each with its own parent"
+kc -n "$tenant" delete agentrun "$tenant_run2" --timeout=180s >/dev/null || fail "$tenant_run2 could not be deleted"
 [ "$(kc -n "$tenant" get configmap -o name | grep -c grant-)" = 0 ] || fail "grant ConfigMaps appeared in $tenant"
 [ "$(kc -n "$tenant" get cellntool -o name | wc -l)" = 0 ] || fail "namespaced tools appeared in $tenant"
 tenant_node="$(node_of "$(kc -n "$tenant" get agentrun "$tenant_run" -o jsonpath='{.status.cellnParent.binding.launchProfile}')")"

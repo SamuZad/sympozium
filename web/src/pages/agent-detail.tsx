@@ -148,7 +148,9 @@ export function AgentDetailPage() {
     (selectedRuntime?.spec.celln?.contractVersion === "celln.json-tools/v1" || Boolean(selectedRuntime?.spec.cellnProfileRef)) &&
     inst.spec.execution?.backend === "celln" &&
     inst.spec.execution?.executionLifecycle === "enduring";
-  const enduringParent = (allRuns || [])
+  // Every enduring run of this Agent is its own conversation (own parent, own
+  // context); the page lists them all, newest first.
+  const enduringParents = (allRuns || [])
     .filter(
       (run) =>
         run.spec.agentRef === agentName &&
@@ -159,7 +161,7 @@ export function AgentDetailPage() {
       (b.metadata.creationTimestamp || "").localeCompare(
         a.metadata.creationTimestamp || "",
       ),
-    )[0];
+    );
   const chatSession = harnessSessions?.find((session) => session.spec.agentRef === agentName && session.spec.runtimeRef === selectedRuntime?.metadata.name);
   function startChat() {
     if (!selectedRuntime) return;
@@ -291,7 +293,7 @@ export function AgentDetailPage() {
             </Card>
             <AgentRuntimeCard inst={inst} runtimes={runtimes || []} />
             {nativeCellnEnduring && (
-              <CellnAgentConversation agent={inst} parent={enduringParent} />
+              <CellnAgentConversation agent={inst} parents={enduringParents} />
             )}
           </div>
         </TabsContent>

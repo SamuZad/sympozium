@@ -106,7 +106,15 @@ func Resolve(agent *api.Agent, in Input) (Result, error) {
 	}
 	if out.CellnSelection != nil {
 		if len(out.CellnSelection.ClusterToolRefs) != 0 {
-			return Result{}, fmt.Errorf("AUTH_PROTOCOL_UNSUPPORTED: shared catalogue selection requires mediated admission; refusing legacy fallback")
+			// An enduring run on the shared catalogue is admitted by the
+			// platform (policy, cluster profile, cluster tools, the namespace's
+			// model connection); it never reaches legacy issuance, and the
+			// controller refuses it honestly when no platform admission exists.
+			// One-shot shared selections and mixed legacy tool lists stay refused.
+			platform := out.ExecutionLifecycle == "enduring" && len(out.CellnSelection.ToolRefs) == 0 && out.ModelConnectionRef != "" && in.Provider == ""
+			if !platform {
+				return Result{}, fmt.Errorf("AUTH_PROTOCOL_UNSUPPORTED: shared catalogue selection requires mediated admission; refusing legacy fallback")
+			}
 		}
 		if out.CellnSelection.ToolRefs == nil {
 			return Result{}, fmt.Errorf("cellnSelection.toolRefs must be present (use [] for an explicit empty tool set)")
