@@ -248,8 +248,11 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentRun")
 		os.Exit(1)
 	}
-	if agentRunReconciler.ScopedDispatcher != nil {
-		if err := (&controller.AgentRunTurnReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), ScopedDispatcher: agentRunReconciler.ScopedDispatcher}).SetupWithManager(mgr); err != nil {
+	// Follow-up turns are served by whichever enduring path is configured: the
+	// scoped receiver, or the prepared native parent path folded into this
+	// manager (docs/design/celln-single-execution-plane.md).
+	if agentRunReconciler.ScopedDispatcher != nil || agentRunReconciler.ParentAdmission != nil {
+		if err := (&controller.AgentRunTurnReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), ScopedDispatcher: agentRunReconciler.ScopedDispatcher, ParentConfigPath: agentRunReconciler.ParentConfigPath}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create AgentRunTurn controller")
 			os.Exit(1)
 		}
