@@ -47,6 +47,19 @@ credential was the operator's own DeepSeek key.
   `celln-system`, and bound the catalogue before the controller rollout
   finished. Both reordered.
 
+## Placement is by hash, and a refused create is terminal
+
+A second trial on a fresh `fleet-ci` cluster created two runs back to back
+with the default 2 GiB node budget. Both incarnations hashed to the same owner
+(`fleet-ci-worker2` held both launch profiles); the first parent came up Ready
+and the owner refused the second create for capacity (two 1.25 GiB parents do
+not fit), so that run reported *Parent outcome unavailable; preserving original
+incarnation without replay* and the gateway's status read reached the owner
+(`parent owner not found`). The gateway does not re-place a refused
+incarnation, by design. Size `celln.fleet.memoryBytes` for the parents a node
+should hold; the integration script now uses 4 GiB and starts runs one at a
+time. Load-aware placement is a possible later gateway improvement.
+
 ## Environment caveats
 
 - Kind nodes have no kernel in `/boot`; the dispatcher's readiness gate
