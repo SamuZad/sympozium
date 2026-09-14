@@ -128,15 +128,15 @@ for _ in 1 2; do
 done
 first="${runs[0]}"
 second="${runs[1]}"
-node_of() { # incarnation -> node holding its journal
+node_of() { # launch profile -> node whose owner issued it
 	for pod in $(kc -n celln-system get pods -l app.kubernetes.io/name=celln-node -o name); do
-		if kc -n celln-system exec "$pod" -c dispatcher -- test -e "/var/lib/sympozium-celln/$SCOPE/authority/parent-journal/${1#blake3:}" 2>/dev/null; then
+		if kc -n celln-system exec "$pod" -c dispatcher -- test -e "/var/lib/sympozium-celln/$SCOPE/authority/trusted-parent-launches/${1#blake3:}.json" 2>/dev/null; then
 			kc -n celln-system get "$pod" -o jsonpath='{.spec.nodeName}'
 		fi
 	done
 }
-first_node="$(node_of "$(kc -n "$NAMESPACE" get agentrun "$first" -o jsonpath='{.status.cellnParent.binding.incarnation}')")"
-second_node="$(node_of "$(kc -n "$NAMESPACE" get agentrun "$second" -o jsonpath='{.status.cellnParent.binding.incarnation}')")"
+first_node="$(node_of "$(kc -n "$NAMESPACE" get agentrun "$first" -o jsonpath='{.status.cellnParent.binding.launchProfile}')")"
+second_node="$(node_of "$(kc -n "$NAMESPACE" get agentrun "$second" -o jsonpath='{.status.cellnParent.binding.launchProfile}')")"
 [ -n "$first_node" ] && [ -n "$second_node" ] || fail "owner journals not found"
 pass "$first on $first_node and $second on $second_node completed real model turns"
 
