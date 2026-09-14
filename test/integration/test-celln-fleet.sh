@@ -93,6 +93,7 @@ kc label node --overwrite -l '!node-role.kubernetes.io/control-plane' celln.dev/
 pass "images loaded; workers labeled celln.dev/kvm=true"
 
 log "sympozium install --celln-fleet"
+rm -rf "$WORK/fleet-out" # the installer refuses an existing private output directory
 KUBECONFIG="$WORK/kubeconfig" kind export kubeconfig --name "$CLUSTER" --kubeconfig "$WORK/kubeconfig" >/dev/null
 KUBECONFIG="$WORK/kubeconfig" "$SYMPOZIUM" install -n "$NAMESPACE" --celln-fleet \
 	--celln-fleet-scope "$SCOPE" \

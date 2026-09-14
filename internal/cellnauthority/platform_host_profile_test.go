@@ -7,6 +7,7 @@ import (
 	"time"
 
 	api "github.com/sympozium-ai/sympozium/api/v1alpha1"
+	"github.com/sympozium-ai/sympozium/internal/modelconnection"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -69,13 +70,25 @@ func TestPlatformResolverBindsHostProfileRouteToRuntimeNative(t *testing.T) {
 	if err := f.client.Get(ctx, f.runKey, &run); err != nil {
 		t.Fatal(err)
 	}
+	if err := f.client.Get(ctx, types.NamespacedName{Namespace: "tenant", Name: "model"}, &connection); err != nil {
+		t.Fatal(err)
+	}
 	run.Spec.Model.Provider, run.Spec.Model.Protocol, run.Spec.Model.BaseURL, run.Spec.Model.CredentialProfile = "openai", "openai-chat", "https://model.example/v1/chat/completions", "starter"
+	run.Spec.Model.ConnectionRevision = modelconnection.Revision(&connection)
 	if err := f.client.Update(ctx, &run); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.resolver.Resolve(ctx, f.runKey, request); err != nil {
 		t.Fatalf("mirrored connection route treated as an override: %v", err)
 	}
+	run.Spec.Model.ConnectionRevision = "sha256:" + strings.Repeat("0", 64)
+	if err := f.client.Update(ctx, &run); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.resolver.Resolve(ctx, f.runKey, request); PlatformReason(err) != ReasonRouteMismatch {
+		t.Fatalf("stale pinned connection revision accepted: %v", err)
+	}
+	run.Spec.Model.ConnectionRevision = ""
 	run.Spec.Model.CredentialProfile = "other"
 	if err := f.client.Update(ctx, &run); err != nil {
 		t.Fatal(err)

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	api "github.com/sympozium-ai/sympozium/api/v1alpha1"
+	"github.com/sympozium-ai/sympozium/internal/modelconnection"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -546,7 +547,7 @@ func resolveDecisionRoute(s platformSnapshot, required bool) (DecisionRouteBindi
 	if err != nil {
 		return empty, err
 	}
-	if revision := s.Run.Spec.Model.ConnectionRevision; revision != "" && revision != specDigest {
+	if revision := s.Run.Spec.Model.ConnectionRevision; revision != "" && revision != modelconnection.Revision(c) {
 		return empty, deny(ReasonRouteMismatch, "pinned model connection revision changed")
 	}
 	route := DecisionRouteBinding{ModelConnectionUID: &uid, ModelConnectionSpecSHA256: specDigest, Provider: c.Spec.Provider, Protocol: c.Spec.Protocol, Model: s.Run.Spec.Model.Model, EndpointOrigin: origin, Auth: auth}
