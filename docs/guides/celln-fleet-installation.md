@@ -130,8 +130,11 @@ journey on a three-node Kind cluster, including a node-leave drain.
 - **Join a node:** label it. The package is admitted on that node only.
 - **Leave a node:** remove the label or drain it. The DaemonSet pod's preStop
   calls `/v1/drain`, which closes admission, stops every parent tree on that
-  owner and confirms teardown; those runs report `ContextLost`. The gateway
-  stops resolving the address and refuses to re-place their identities.
+  owner and confirms teardown; those runs report `ContextLost`. Once the
+  address has left the fleet the gateway answers `original parent backend
+  removed` for its identities, which the controller also treats as context
+  loss (and as established teardown when the run is deleted); nothing is
+  re-placed.
 - **Rolling updates** replace one node's dispatcher at a time with the same
   drain semantics. A dispatcher restart loses live parents on that node.
 - **New package:** use a new scope. One scope carries exactly one package

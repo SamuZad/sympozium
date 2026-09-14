@@ -19,9 +19,15 @@ import (
 var (
 	ErrReconcile = errors.New("parent outcome requires reconciliation; preserve incarnation and turn ID")
 	ErrNotFound  = errors.New("parent or turn not found; not permission to replay")
-	hashPattern  = regexp.MustCompile(`^blake3:[0-9a-f]{64}$`)
-	turnPattern  = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+	// ErrOwnerRemoved is the gateway's definitive statement that the owner
+	// bound to this incarnation is no longer part of the execution plane. Its
+	// in-process parent context is gone and the identity is never re-placed.
+	ErrOwnerRemoved = errors.New("parent owner left the execution plane; live context lost and never re-placed")
+	hashPattern     = regexp.MustCompile(`^blake3:[0-9a-f]{64}$`)
+	turnPattern     = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 )
+
+const ownerRemovedError = "original parent backend removed"
 
 // ParentStatus is a live owner observation of a parent incarnation.
 type ParentStatus struct {
@@ -94,6 +100,14 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body any, outp
 	}
 	if res.StatusCode == http.StatusNotFound {
 		return res.StatusCode, ErrNotFound
+	}
+	if res.StatusCode == http.StatusServiceUnavailable {
+		var refusal struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(data, &refusal) == nil && refusal.Error == ownerRemovedError {
+			return res.StatusCode, ErrOwnerRemoved
+		}
 	}
 	if res.StatusCode != http.StatusOK && res.StatusCode != http.StatusAccepted {
 		return res.StatusCode, ErrReconcile

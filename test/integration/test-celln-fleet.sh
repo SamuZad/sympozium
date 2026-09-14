@@ -162,7 +162,7 @@ pass "distinct child read back: $(echo "$answer" | tr '\n' ' ')"
 log "Removing a node's label drains its owner and reports context loss"
 kc label node "$second_node" celln.dev/kvm- >/dev/null
 wait_for "owner drain on $second_node" 120 bash -c "[ \$(kubectl --context kind-$CLUSTER -n celln-system get pods -l app.kubernetes.io/name=celln-node --field-selector spec.nodeName=$second_node -o name | wc -l) = 0 ]"
-wait_for "context loss report for $second" 120 bash -c "kubectl --context kind-$CLUSTER -n $NAMESPACE get agentrun $second -o jsonpath='{.status.error}' | grep -q 'context lost or stopped'"
+wait_for "context loss report for $second" 180 bash -c "kubectl --context kind-$CLUSTER -n $NAMESPACE get agentrun $second -o jsonpath='{.status.error}' | grep -q 'context lost or stopped'"
 if [ "$first_node" != "$second_node" ]; then
 	run_ready "$first" || fail "$first on $first_node was affected by draining $second_node"
 	pass "$second reports ContextLost with owner outcome; $first on $first_node still Ready"

@@ -22,9 +22,10 @@ import (
 
 // The sentinels and validation patterns are shared with internal/celln.
 var (
-	ErrReconcile = celln.ErrReconcile
-	ErrNotFound  = celln.ErrNotFound
-	hashPattern  = regexp.MustCompile(`^blake3:[0-9a-f]{64}$`)
+	ErrReconcile    = celln.ErrReconcile
+	ErrNotFound     = celln.ErrNotFound
+	ErrOwnerRemoved = celln.ErrOwnerRemoved
+	hashPattern     = regexp.MustCompile(`^blake3:[0-9a-f]{64}$`)
 )
 
 // Type aliases keep the parent protocol types in one place (internal/celln).

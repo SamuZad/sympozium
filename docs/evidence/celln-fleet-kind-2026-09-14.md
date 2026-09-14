@@ -46,6 +46,11 @@ credential was the operator's own DeepSeek key.
 - `sympozium install --celln-fleet` published trust before the chart created
   `celln-system`, and bound the catalogue before the controller rollout
   finished. Both reordered.
+- Once a drained owner's address left the fleet, the gateway answered
+  `503 original parent backend removed` and the controller parked the run as
+  "uncertain" indefinitely (and could never confirm its cleanup). That refusal
+  is now a distinct client error mapped to `ContextLost` on startup/status and
+  to an established teardown on stop, so the run fails honestly and deletes.
 
 ## Placement is by hash, and a refused create is terminal
 

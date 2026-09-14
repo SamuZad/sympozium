@@ -2,6 +2,7 @@ package cellnparent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	api "github.com/sympozium-ai/sympozium/api/v1alpha1"
@@ -26,5 +27,12 @@ func ReconcileStop(ctx context.Context, reader client.Reader, key types.Namespac
 		return err
 	}
 	defer transport.Close()
-	return transport.Stop(ctx, binding.Incarnation)
+	err = transport.Stop(ctx, binding.Incarnation)
+	if errors.Is(err, ErrOwnerRemoved) {
+		// No acknowledgement can ever come from an owner the gateway no longer
+		// serves; its cells died with its process. Treat the removal itself as
+		// the teardown fact so the run can be released.
+		return nil
+	}
+	return err
 }
