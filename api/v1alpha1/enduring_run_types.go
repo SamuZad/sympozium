@@ -21,6 +21,18 @@ type EnduringRunSpec struct {
 	MaxOutputTokens int64 `json:"maxOutputTokens"`
 }
 
+// PlatformOneShotShape reports whether this spec asks for a single answer from
+// the shared catalogue: backend celln, a one-shot lifecycle, cluster tools or a
+// platform wrapper (no namespaced tools), the namespace's model connection and
+// a string task. On a fleet such a run is served by a single-turn native
+// parent that ends after its answer; the controller still confirms the runtime
+// is a platform wrapper before taking that path.
+func (s *AgentRunSpec) PlatformOneShotShape() bool {
+	return s.Backend == "celln" && s.ExecutionLifecycle != "enduring" && s.Enduring == nil && s.Celln == nil &&
+		s.CellnSelection != nil && len(s.CellnSelection.ToolRefs) == 0 && s.Model.ConnectionRef != "" &&
+		(s.Mode == "" || s.Mode == "task") && s.Task.IsString() && s.ValidateLifecycle() == ""
+}
+
 // ValidateLifecycle also protects clients/fake API servers that do not evaluate
 // CRD CEL. It does not claim that a selected backend implements this lifecycle.
 func (s *AgentRunSpec) ValidateLifecycle() string {

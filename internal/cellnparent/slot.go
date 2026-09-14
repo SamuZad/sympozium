@@ -73,6 +73,9 @@ func ClaimTurnSlot(ctx context.Context, writer client.Client, reader client.Read
 		}
 		return ErrTurnBusy
 	}
+	if run.Spec.Enduring == nil {
+		return fmt.Errorf("a one-shot parent answers once; it accepts no further turns")
+	}
 	if ParentLeaseExpired(parent, int64(run.Spec.Enduring.LeaseSeconds), now) {
 		return fmt.Errorf("%w; original admission does not authorize new turns", ErrParentLeaseExpired)
 	}

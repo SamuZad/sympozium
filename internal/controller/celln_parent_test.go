@@ -334,3 +334,104 @@ func TestCellnParentWarmPrepLossRecordsOwnerOutcome(t *testing.T) {
 		}
 	}
 }
+
+type platformAdmissionFunc func(context.Context, types.NamespacedName) error
+
+func (f platformAdmissionFunc) Admit(ctx context.Context, key types.NamespacedName) error {
+	return f(ctx, key)
+}
+func (platformAdmissionFunc) SupportsPlatform() bool { return true }
+
+// A one-shot on the platform is a single-turn parent: admitted and started
+// like an enduring run, finished with the initial turn's answer as the run
+// result, and its parent stopped by the completed reconciliation.
+func TestPlatformOneShotFinishesWithItsAnswerAndStopsTheParent(t *testing.T) {
+	ctx := context.Background()
+	id := "blake3:" + strings.Repeat("c", 64)
+	run := newTestCellnRun(t, "one-shot-parent", "one-shot-uid")
+	run.Spec.Celln = nil
+	run.Spec.Model = api.ModelSpec{ConnectionRef: "celln-native", Model: "deepseek-chat"}
+	run.Spec.CellnSelection = &api.CellnCatalogueSelection{RuntimeRef: "celln-native", ToolRefs: []api.CellnCatalogueToolRef{}, ClusterToolRefs: []api.ClusterCellnToolRef{{Name: "workspace-read", Revision: "v1"}}}
+	run.Finalizers = []string{agentRunFinalizer}
+	if !run.Spec.PlatformOneShotShape() {
+		t.Fatal("fixture is not a platform one-shot")
+	}
+	var creates, stops, turns atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		switch {
+		case req.URL.Path == "/v1/parents":
+			creates.Add(1)
+			w.WriteHeader(202)
+			fmt.Fprintf(w, `{"incarnation":%q,"initializationPending":true,"retryAuthorized":false}`, id)
+		case strings.HasSuffix(req.URL.Path, "/stop"):
+			stops.Add(1)
+			fmt.Fprintf(w, `{"incarnation":%q,"status":"Stopped","retryAuthorized":false}`, id)
+		case strings.HasSuffix(req.URL.Path, "/turns"):
+			turns.Add(1)
+			fmt.Fprint(w, `{"kind":"completed","apiVersion":"celln.parent-context/v1","turnId":"initial","succeeded":true,"answer":"Botswana is in southern Africa."}`)
+		default:
+			fmt.Fprintf(w, `{"incarnation":%q,"status":"Ready","statusIsLiveOwnerObservation":true,"retryAuthorized":false}`, id)
+		}
+	}))
+	defer server.Close()
+	digest, err := cellnparent.SpecDigest(run.Spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	token := filepath.Join(root, "token")
+	if err := os.WriteFile(token, []byte("controller-parent-only-test-token"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	config := cellnparent.ApprovalConfig{APIVersion: "sympozium.ai/celln-parent-controller-v1", Approvals: []cellnparent.RunApproval{{Namespace: run.Namespace, Name: run.Name, TokenFile: token,
+		Binding: api.CellnParentBinding{Target: server.URL, Principal: "tenant/one-shot-uid", RunUID: string(run.UID), SpecSHA256: digest, LaunchProfile: id, Incarnation: id}}}}
+	raw, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "config.json")
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	r := newAgentRunTestReconciler(t, run)
+	r.ParentConfigPath = path
+	r.ParentAdmission = platformAdmissionFunc(func(context.Context, types.NamespacedName) error { return nil })
+	var current api.AgentRun
+	for range 3 {
+		if err := r.Get(ctx, client.ObjectKeyFromObject(run), &current); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.reconcilePending(ctx, logr.Discard(), &current); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(run), &current); err != nil {
+		t.Fatal(err)
+	}
+	if creates.Load() != 1 || current.Status.Phase != api.AgentRunPhaseRunning || current.Status.CellnIssuance != nil || current.Status.CellnActionID != "" || current.Status.JobName != "" {
+		t.Fatalf("one-shot did not take the parent path: %+v creates=%d", current.Status, creates.Load())
+	}
+	for range 3 {
+		if err := r.Get(ctx, client.ObjectKeyFromObject(run), &current); err != nil {
+			t.Fatal(err)
+		}
+		if current.Status.Phase != api.AgentRunPhaseRunning {
+			break
+		}
+		if _, err := r.reconcileRunning(ctx, logr.Discard(), &current); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(run), &current); err != nil {
+		t.Fatal(err)
+	}
+	if turns.Load() != 1 || current.Status.Phase != api.AgentRunPhaseSucceeded || current.Status.Result != "Botswana is in southern Africa." || !meta.IsStatusConditionTrue(current.Status.Conditions, "CellnInitialTurnComplete") {
+		t.Fatalf("one-shot did not finish with its answer: phase=%s result=%q turns=%d", current.Status.Phase, current.Status.Result, turns.Load())
+	}
+	if _, err := r.reconcileCompleted(ctx, logr.Discard(), &current); err != nil {
+		t.Fatal(err)
+	}
+	if stops.Load() != 1 {
+		t.Fatalf("completed one-shot did not stop its parent: stops=%d", stops.Load())
+	}
+}

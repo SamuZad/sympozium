@@ -56,8 +56,12 @@ func (r *AgentRunReconciler) sharedCatalogueSelected(ctx context.Context, run *a
 			return false, nil
 		}
 	}
+	// A platform-capable parent admission also serves one-shot shared
+	// selections (a single-turn parent on the fleet) when no scoped receiver
+	// is configured to own them.
+	platformOneShot := r.ScopedDispatcher == nil && r.ParentAdmission != nil && r.ParentAdmission.SupportsPlatform() && run.Spec.PlatformOneShotShape()
 	if len(selection.ClusterToolRefs) != 0 {
-		return true, nil
+		return !platformOneShot, nil
 	}
 	if len(selection.ToolRefs) != 0 {
 		return false, nil
@@ -74,6 +78,44 @@ func (r *AgentRunReconciler) sharedCatalogueSelected(ctx context.Context, run *a
 				// An unissued legacy selection without an agent has no shared
 				// wrapper to inspect. Its existing issuance gate still forbids
 				// dispatch; explicit shared intent was handled above.
+				return false, nil
+			}
+			return false, err
+		}
+		runtimeName = agent.Spec.RuntimeRef
+	}
+	if runtimeName == "" {
+		return false, nil
+	}
+	var runtime api.AgentRuntime
+	if err := reader.Get(ctx, client.ObjectKey{Namespace: run.Namespace, Name: runtimeName}, &runtime); err != nil {
+		return false, err
+	}
+	wrapper := runtime.Spec.CellnProfileRef != nil && runtime.Spec.Celln == nil
+	return wrapper && !platformOneShot, nil
+}
+
+// platformOneShotSelected reports whether a pending one-shot run is a shared
+// selection this controller serves as a single-turn parent: the platform
+// admission is capable, no scoped receiver owns shared selections, and the
+// run selects cluster tools or a platform wrapper runtime.
+func (r *AgentRunReconciler) platformOneShotSelected(ctx context.Context, run *api.AgentRun) (bool, error) {
+	if r.ScopedDispatcher != nil || r.ParentAdmission == nil || !r.ParentAdmission.SupportsPlatform() || !run.Spec.PlatformOneShotShape() {
+		return false, nil
+	}
+	selection := run.Spec.CellnSelection
+	if len(selection.ClusterToolRefs) != 0 {
+		return true, nil
+	}
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	runtimeName := selection.RuntimeRef
+	if runtimeName == "" {
+		var agent api.Agent
+		if err := reader.Get(ctx, client.ObjectKey{Namespace: run.Namespace, Name: run.Spec.AgentRef}, &agent); err != nil {
+			if apierrors.IsNotFound(err) {
 				return false, nil
 			}
 			return false, err

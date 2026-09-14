@@ -37,8 +37,8 @@ func ValidateAdmission(run *api.AgentRun, approval api.CellnParentBinding) error
 	if run.Status.Phase != "" && run.Status.Phase != api.AgentRunPhasePending && run.Status.Phase != api.AgentRunPhaseRunning {
 		return fmt.Errorf("parent startup cannot admit a terminal or unrelated lifecycle phase")
 	}
-	if run.UID == "" || run.DeletionTimestamp != nil || run.Spec.ExecutionLifecycle != "enduring" || run.Spec.ValidateLifecycle() != "" {
-		return fmt.Errorf("parent admission requires a live enduring AgentRun")
+	if run.UID == "" || run.DeletionTimestamp != nil || run.Spec.ValidateLifecycle() != "" || (run.Spec.ExecutionLifecycle != "enduring" && !run.Spec.PlatformOneShotShape()) {
+		return fmt.Errorf("parent admission requires a live enduring AgentRun or a platform one-shot")
 	}
 	digest, err := SpecDigest(run.Spec)
 	if err != nil {

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	api "github.com/sympozium-ai/sympozium/api/v1alpha1"
 	"github.com/sympozium-ai/sympozium/internal/cellnauthority"
@@ -235,5 +236,81 @@ func TestPlatformAdmissionRefusesUnauthorisedNamespacePersonaAndConfig(t *testin
 	write(missing)
 	if _, err := LoadRegistrationDispatcher(path, root, store); err == nil {
 		t.Fatal("platform mode without cluster identity accepted")
+	}
+}
+
+// A one-shot on the platform is a single-turn parent: the same admission,
+// plan and owner protocol as an enduring run, with the lease derived from one
+// turn plus the admission grace and exactly one turn funded.
+func TestPlatformAdmissionIssuesSingleTurnParentForOneShot(t *testing.T) {
+	ctx := context.Background()
+	objects := platformObjects("tenant-a")
+	run := objects[len(objects)-1].(*api.AgentRun)
+	run.Spec.ExecutionLifecycle, run.Spec.Enduring = "", nil
+	if !run.Spec.PlatformOneShotShape() {
+		t.Fatal("fixture is not a platform one-shot")
+	}
+	store := platformStore(t, objects...)
+	key := types.NamespacedName{Namespace: "tenant-a", Name: "conversation"}
+	expected, _ := cellnauthority.ScopedParentIncarnation("cluster", "tenant-a-uid", "tenant-a-run")
+	launch := "blake3:" + strings.Repeat("e", 64)
+	var lastPlan HostProvisionPlan
+	owner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 65537))
+		if r.URL.Path != "/v1/parents/provision" || json.Unmarshal(body, &lastPlan) != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"apiVersion": "celln.parent-provisioned/v1", "launchProfile": launch, "incarnation": expected})
+	}))
+	defer owner.Close()
+	root := t.TempDir()
+	token := filepath.Join(root, "token")
+	if err := os.WriteFile(token, []byte("platform-admission-test-credential"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	p := PlatformProvisioner{ClusterID: "cluster", Journal: filepath.Join(root, "journal"), Approvals: filepath.Join(root, "approvals"), Target: owner.URL, TokenFile: token}
+	for _, dir := range []string{p.Journal, p.Approvals} {
+		if err := os.Mkdir(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := p.Admit(ctx, store, key); err != nil {
+		t.Fatal(err)
+	}
+	// One turn of the profile's allowance, the policy run cap as the total.
+	if lastPlan.MaxTurns != 1 || lastPlan.TurnModelRequests != 3 || lastPlan.TurnOutputTokens != 1536 || lastPlan.TotalModelRequests != 36 || lastPlan.TotalOutputTokens != 18432 {
+		t.Fatalf("one-shot plan did not fund exactly one turn: %+v", lastPlan)
+	}
+	var parent struct {
+		Capabilities struct{ TimeoutMs int64 }
+	}
+	// The profile allows 60 s turns; the lease adds the admission grace.
+	if json.Unmarshal(lastPlan.Parent, &parent) != nil || parent.Capabilities.TimeoutMs != (60+cellnauthority.OneShotParentGraceSeconds)*1000 {
+		t.Fatalf("one-shot lease does not cover one turn plus admission: %s", lastPlan.Parent)
+	}
+	var admitted api.AgentRun
+	if err := store.Get(ctx, key, &admitted); err != nil {
+		t.Fatal(err)
+	}
+	binding, transport, err := LoadApproval(p.Approvals, &admitted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport.Close()
+	if err := ValidateAdmission(&admitted, binding); err != nil {
+		t.Fatalf("one-shot admission rejected: %v", err)
+	}
+	// A one-shot parent never takes a follow-up turn.
+	admitted.Status.Phase = api.AgentRunPhaseRunning
+	admitted.Status.CellnParent = &api.CellnParentStatus{Binding: binding, CreateAttempted: true, InitialTurn: &api.CellnParentTurnStatus{ID: "initial", Message: "x", Child: launch, Attempted: true, Result: &api.CellnParentTurnResult{Succeeded: true, Answer: "done"}}}
+	if err := store.Status().Update(ctx, &admitted); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewTurn(&admitted, "follow-up", "again"); err == nil {
+		t.Fatal("one-shot parent accepted a follow-up turn")
+	}
+	if err := ClaimTurnSlot(ctx, store, store, types.NamespacedName{Namespace: "tenant-a", Name: "follow-up"}, p.Approvals, time.Now()); err == nil || strings.Contains(err.Error(), "Enduring") {
+		t.Fatalf("one-shot slot claim must refuse without dereferencing enduring limits: %v", err)
 	}
 }

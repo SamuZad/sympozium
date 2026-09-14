@@ -171,6 +171,33 @@ define the single backend named `native`.
 - The backend set is fixed for a scope (at most 32). To add or change one,
   install a new scope.
 
+## One-shot runs
+
+A run without `executionLifecycle: enduring` is a one-shot: the same
+selection (a backend's wrapper runtime, the cluster tools, the namespace's
+model connection) admitted by the same policy, served by a single-turn
+native parent. The parent is issued on the least-loaded owner, answers the
+task once, the run succeeds with that answer as its `status.result`, and
+the parent is stopped so its cells return to the node. A one-shot takes no
+follow-up turns; ask again with a new run.
+
+The API call is an enduring conversation minus the lifecycle and lease:
+
+```sh
+curl -X POST "$API/api/v1/runs?namespace=team-a" -d '{
+  "agentRef": "celln-agent-claude", "backend": "celln", "executionLifecycle": "one-shot",
+  "task": "Where is Botswana?", "systemPrompt": "...", "model": "claude-sonnet-5",
+  "modelConnectionRef": "celln-claude",
+  "cellnSelection": {"runtimeRef": "celln-claude", "toolRefs": [], "clusterToolRefs": [...]}
+}'
+```
+
+A one-shot's parent lease is the profile's turn allowance plus two minutes
+for admission, within the policy's parent ceiling; its model budget is one
+turn of the profile's allowance. Every backend of the scope serves one-shots
+the same way, so an Agent picks its provider per run regardless of
+lifecycle.
+
 ## Leases and budgets
 
 A parent lives for its run's `leaseSeconds` and may spend up to its run's

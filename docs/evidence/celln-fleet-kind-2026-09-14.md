@@ -235,6 +235,26 @@ two llama-server protocols was run instead. Worth noting: a provider outage
 surfaces as `ContextLost` rather than a failed turn, which is a Celln
 owner behaviour to look at separately.
 
+## One-shot runs on the fleet (#490)
+
+A one-shot on the shared catalogue is a single-turn native parent: the same
+admission, backend choice and owner protocol as an enduring run, finished
+with its answer and its parent stopped. On `fleet-ci` (scope `ci`, backends
+`native` and `messages` on the framework machine's llama-server), the
+tenant namespace `celln-agents-b` ran two one-shots through the API while
+three enduring conversations were live:
+
+| Run | Backend | Result |
+| --- | --- | --- |
+| `celln-agent-bq8jx` | `native` (openai-chat) | Succeeded: "Botswana is a landlocked country in southern Africa, bordered by South Africa, Namibia, Zambia, and Zimbabwe." |
+| `celln-agent-messages-pmfmw` | `messages` (anthropic-messages) | Succeeded: "The capital of Botswana is Gaborone." |
+
+Both carried a parent binding (`status.cellnParent.binding.incarnation`),
+finished with `status.result`, and after they completed the owners' live
+cells returned to the 6 held by the three enduring parents. No namespace
+grants, no scoped receiver, no separate one-shot stack: the parent path
+serves both lifecycles.
+
 ## Environment caveats
 
 - Kind nodes have no kernel in `/boot`; the dispatcher's readiness gate

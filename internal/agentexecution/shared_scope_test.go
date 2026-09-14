@@ -18,9 +18,10 @@ func TestSharedCatalogueNeverFallsThroughLegacyResolution(t *testing.T) {
 	}
 }
 
-// Enduring platform runs select the shared catalogue with the namespace's
-// model connection; that is the only shape allowed through, and it keeps the
-// explicit (empty) legacy tool list and the connection rather than a provider.
+// Platform runs select the shared catalogue with the namespace's model
+// connection; that is the only shape allowed through, enduring or one-shot,
+// and it keeps the explicit (empty) legacy tool list and the connection
+// rather than a provider.
 func TestEnduringPlatformSelectionIsAcceptedOnlyInItsExactShape(t *testing.T) {
 	shared := []api.ClusterCellnToolRef{{Name: "celln-trial-workspace-read", Revision: "v1"}}
 	enduring := &api.EnduringRunSpec{LeaseSeconds: 600, MaxTurns: 8, MaxModelRequests: 24, MaxOutputTokens: 8192}
@@ -29,8 +30,12 @@ func TestEnduringPlatformSelectionIsAcceptedOnlyInItsExactShape(t *testing.T) {
 	if err != nil || result.Backend != "celln" || result.ModelConnectionRef != "celln-native" || result.Provider != "" || len(result.CellnSelection.ClusterToolRefs) != 1 {
 		t.Fatalf("enduring platform selection refused or altered: %+v %v", result, err)
 	}
+	oneShot := ok
+	oneShot.ExecutionLifecycle, oneShot.Enduring = "", nil
+	if result, err := Resolve(nil, oneShot); err != nil || result.ExecutionLifecycle != "" || result.Enduring != nil || result.ModelConnectionRef != "celln-native" || len(result.CellnSelection.ClusterToolRefs) != 1 {
+		t.Fatalf("one-shot platform selection refused or altered: %+v %v", result, err)
+	}
 	for name, mutate := range map[string]func(*Input){
-		"one-shot": func(in *Input) { in.ExecutionLifecycle = ""; in.Enduring = nil },
 		"mixed legacy tools": func(in *Input) {
 			in.CellnSelection.ToolRefs = []api.CellnCatalogueToolRef{{Name: "legacy", Revision: "v1"}}
 		},
