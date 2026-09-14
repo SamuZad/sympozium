@@ -147,9 +147,10 @@ journey on a three-node Kind cluster, including a node-leave drain.
 
 The gateway places each parent by incarnation hash, not by load, and an owner
 that refuses a create for capacity ends that run (`Parent outcome unavailable`)
-rather than re-placing it. A parent and its per-turn child cost two cells and
-one egress slot; the defaults (`maxCells: 4`, `egressSlots: 2`, `memoryBytes:
-4 GiB`) hold two parents per node. Raise them together for busier nodes.
+rather than re-placing it. A parent keeps a warm child, so each parent holds two cells
+and two egress contexts; the defaults (`maxCells: 4`, `egressSlots: 4`,
+`memoryBytes: 4 GiB`) hold two parents per node. Raise them together
+(`egressSlots` = `maxCells`) for busier nodes.
 
 ## Limits
 

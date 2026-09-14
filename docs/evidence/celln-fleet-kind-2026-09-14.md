@@ -62,9 +62,10 @@ one egress slot and the fleet defaulted to `egressSlots: 1`, and two 1.25 GiB
 parents also exceed a 2 GiB budget — so that run reported *Parent outcome
 unavailable; preserving original incarnation without replay* and the gateway's
 status read reached the owner (`parent owner not found`). The gateway does not
-re-place a refused incarnation, by design. The fleet defaults now hold two
-parents per node (`maxCells: 4`, `egressSlots: 2`, `memoryBytes: 4 GiB`); size
-them for the parents a node should hold. The integration script starts runs
+re-place a refused incarnation, by design. A live parent keeps a warm child, so it holds two
+cells and two egress contexts. The fleet defaults now hold two parents per
+node (`maxCells: 4`, `egressSlots: 4`, `memoryBytes: 4 GiB`); size them for the
+parents a node should hold. The integration script starts runs
 one at a time. Load-aware placement is a possible later gateway improvement.
 
 ## Environment caveats
