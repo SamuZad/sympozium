@@ -16,7 +16,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	sigsyaml "sigs.k8s.io/yaml"
 	"sort"
 	"strconv"
 	"strings"
@@ -1467,13 +1466,14 @@ const (
 // newHelmConfig creates a Helm action.Configuration bound to the given namespace.
 func newHelmConfig(ns string) (*action.Configuration, error) {
 	cfg := new(action.Configuration)
-	// Use the same kubeconfig resolution as the rest of the CLI.
-	kubeconfigPath := kubeconfig
-	if kubeconfigPath == "" {
-		kubeconfigPath = clientcmd.RecommendedHomeFile
-	}
+	// Use the same kubeconfig resolution as the rest of the CLI and kubectl:
+	// --kubeconfig when given, otherwise $KUBECONFIG, otherwise ~/.kube/config.
+	// Forcing ~/.kube/config here sent Helm to whichever cluster was last
+	// created while kubectl followed $KUBECONFIG.
 	settings := helmcli.New()
-	settings.KubeConfig = kubeconfigPath
+	if kubeconfig != "" {
+		settings.KubeConfig = kubeconfig
+	}
 	settings.SetNamespace(ns)
 	if err := cfg.Init(settings.RESTClientGetter(), ns, "secret", func(format string, v ...interface{}) {
 		// Silence Helm's debug logging.
@@ -1536,72 +1536,7 @@ func applyCRDs(ch *chart.Chart) error {
 	if err := kubectlQuiet("wait", "--for=condition=established", "--timeout=120s", "-f", tmpDir); err != nil {
 		return fmt.Errorf("CRDs not established: %w", err)
 	}
-	return refreshHelmDiscovery(ch)
-}
-
-// refreshHelmDiscovery drops the on-disk discovery cache Helm shares with
-// kubectl and waits until the API server serves every CRD kind. Otherwise a
-// cache written before the CRDs existed makes Helm report "no matches for
-// kind" while building the release.
-func refreshHelmDiscovery(ch *chart.Chart) error {
-	kubeconfigPath := kubeconfig
-	if kubeconfigPath == "" {
-		kubeconfigPath = clientcmd.RecommendedHomeFile
-	}
-	settings := helmcli.New()
-	settings.KubeConfig = kubeconfigPath
-	discovery, err := settings.RESTClientGetter().ToDiscoveryClient()
-	if err != nil {
-		return fmt.Errorf("discovery client: %w", err)
-	}
-	want := map[string]bool{}
-	for _, crd := range ch.CRDObjects() {
-		var doc struct {
-			Spec struct {
-				Group string `json:"group"`
-				Names struct {
-					Kind string `json:"kind"`
-				} `json:"names"`
-				Versions []struct {
-					Name   string `json:"name"`
-					Served bool   `json:"served"`
-				} `json:"versions"`
-			} `json:"spec"`
-		}
-		if sigsyaml.Unmarshal(crd.File.Data, &doc) != nil || doc.Spec.Group == "" {
-			continue
-		}
-		for _, v := range doc.Spec.Versions {
-			if v.Served {
-				want[doc.Spec.Group+"/"+v.Name+"/"+doc.Spec.Names.Kind] = true
-			}
-		}
-	}
-	deadline := time.Now().Add(2 * time.Minute)
-	for {
-		discovery.Invalidate()
-		missing := ""
-		_, lists, _ := discovery.ServerGroupsAndResources()
-		served := map[string]bool{}
-		for _, list := range lists {
-			for _, r := range list.APIResources {
-				served[list.GroupVersion+"/"+r.Kind] = true
-			}
-		}
-		for key := range want {
-			if !served[key] {
-				missing = key
-				break
-			}
-		}
-		if missing == "" {
-			return nil
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("API server does not yet serve %s", missing)
-		}
-		time.Sleep(2 * time.Second)
-	}
+	return nil
 }
 
 // waitCertManagerWebhook waits until the webhook admits a server-side
@@ -1710,18 +1645,8 @@ func runInstall(imageTag string, setValues []string) error {
 	}
 
 	// ── Helm install or upgrade ─────────────────────────────────────────
-	// A webhook that just became ready can still refuse a connection for a
-	// few seconds while its Service endpoints propagate; retry only that.
-	var helmErr error
-	for attempt := 1; attempt <= 4; attempt++ {
-		if helmErr = helmInstallOrUpgrade(ch, vals); helmErr == nil || !strings.Contains(helmErr.Error(), "failed calling webhook") {
-			break
-		}
-		fmt.Printf("  Admission webhook not reachable yet (attempt %d); retrying...\n", attempt)
-		time.Sleep(time.Duration(attempt) * 10 * time.Second)
-	}
-	if helmErr != nil {
-		return helmErr
+	if err := helmInstallOrUpgrade(ch, vals); err != nil {
+		return err
 	}
 
 	fmt.Println("\n  Sympozium installed successfully!")
