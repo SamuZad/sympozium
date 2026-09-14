@@ -10,9 +10,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/sympozium-ai/sympozium/internal/cellnparent"
+	"github.com/sympozium-ai/sympozium/internal/cellnplatform"
 	"github.com/zeebo/blake3"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -48,12 +50,82 @@ var (
 type FleetOptions struct {
 	Scope, Principal, Publisher string
 	PackageImage, PackageHash   string
-	ModelCredentialPath         string
-	// Model is the one model route every node configures for this scope. An
-	// empty Provider keeps Celln's reviewed default (DeepSeek).
+	// Model is the default backend's route when Backends is empty (the single
+	// backend named cellnplatform.DefaultBackend). An empty Provider keeps
+	// Celln's reviewed default (DeepSeek).
 	Model FleetModel
+	// ModelCredentialFile is the default backend's provider key (local path).
+	ModelCredentialFile string
+	// Backends are the scope's model backends; every node configures all of
+	// them and a namespace may run parents on any of them side by side.
+	Backends []FleetBackend
 	// Limits are the scope's parent ceilings; zero fields take DefaultFleetLimits.
 	Limits FleetLimits
+}
+
+// FleetBackend is one model backend of a scope: a DNS-label name, its route
+// and the local file holding its provider key (empty for keyless backends).
+type FleetBackend struct {
+	Name           string
+	Model          FleetModel
+	CredentialFile string
+}
+
+var backendNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
+
+// CredentialProfileFor names the node-held credential a backend's model
+// connections reference; the default backend keeps the scope itself.
+func CredentialProfileFor(scope, backend string) string {
+	if backend == cellnplatform.DefaultBackend {
+		return scope
+	}
+	return scope + "-" + backend
+}
+
+// BackendCredentialSecret is the celln-system Secret holding a backend's key.
+func BackendCredentialSecret(backend string) string {
+	if backend == cellnplatform.DefaultBackend {
+		return FleetModelCredentialSecret
+	}
+	return FleetModelCredentialSecret + "-" + backend
+}
+
+// BackendCredentialPath is where every dispatcher mounts a backend's key.
+func BackendCredentialPath(backend string) string {
+	if backend == cellnplatform.DefaultBackend {
+		return "/etc/celln-native/model-token"
+	}
+	return "/etc/celln-native/" + backend + "/model-token"
+}
+
+// ResolvedBackends returns the scope's backends with routes resolved and
+// names validated: Backends when given, else the single default backend
+// built from Model and ModelCredentialFile.
+func (o FleetOptions) ResolvedBackends() ([]FleetBackend, error) {
+	backends := o.Backends
+	if len(backends) == 0 {
+		backends = []FleetBackend{{Name: cellnplatform.DefaultBackend, Model: o.Model, CredentialFile: o.ModelCredentialFile}}
+	}
+	if len(backends) > 32 {
+		return nil, fmt.Errorf("at most 32 model backends per scope")
+	}
+	seen := map[string]bool{}
+	out := make([]FleetBackend, 0, len(backends))
+	for _, b := range backends {
+		if !backendNamePattern.MatchString(b.Name) || seen[b.Name] {
+			return nil, fmt.Errorf("backend names must be unique DNS labels of at most 32 characters: %q", b.Name)
+		}
+		seen[b.Name] = true
+		model, err := b.Model.Resolve(CredentialProfileFor(o.Scope, b.Name))
+		if err != nil {
+			return nil, fmt.Errorf("backend %s: %w", b.Name, err)
+		}
+		if b.CredentialFile != "" && !filepath.IsAbs(b.CredentialFile) {
+			return nil, fmt.Errorf("backend %s: credential file must be an absolute path", b.Name)
+		}
+		out = append(out, FleetBackend{Name: b.Name, Model: model, CredentialFile: b.CredentialFile})
+	}
+	return out, nil
 }
 
 // FleetLimits bound one parent for its whole life. They become the policy
@@ -176,9 +248,8 @@ func (o FleetOptions) StatePath() string { return "/var/lib/sympozium-celln/" + 
 func (o FleetOptions) validate() error {
 	identities := o.Principal + o.Publisher
 	if !scopePattern.MatchString(o.Scope) || !digestImagePattern.MatchString(o.PackageImage) || !blake3Pattern.MatchString(o.PackageHash) ||
-		o.Principal == "" || o.Publisher == "" || strings.ContainsAny(identities, " \t\r\n,=") ||
-		!filepath.IsAbs(o.ModelCredentialPath) || filepath.Clean(o.ModelCredentialPath) != o.ModelCredentialPath || filepath.Dir(o.ModelCredentialPath) == "/" || strings.ContainsAny(o.ModelCredentialPath, ",=") {
-		return fmt.Errorf("fleet requires a DNS-label scope, a digest-pinned package image, a blake3 package hash, a publisher, a principal and a clean absolute model credential path in a dedicated directory")
+		o.Principal == "" || o.Publisher == "" || strings.ContainsAny(identities, " \t\r\n,=") {
+		return fmt.Errorf("fleet requires a DNS-label scope, a digest-pinned package image, a blake3 package hash, a publisher and a principal")
 	}
 	return nil
 }
@@ -189,7 +260,7 @@ func FleetValues(o FleetOptions) ([]string, error) {
 	if err := o.validate(); err != nil {
 		return nil, err
 	}
-	model, err := o.Model.Resolve(o.Scope)
+	backends, err := o.ResolvedBackends()
 	if err != nil {
 		return nil, err
 	}
@@ -197,30 +268,37 @@ func FleetValues(o FleetOptions) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return []string{
+	values := make([]string, 0, 16+8*len(backends))
+	for i, b := range backends {
+		prefix := fmt.Sprintf("celln.fleet.backends[%d].", i)
+		values = append(values,
+			prefix+"name="+b.Name,
+			prefix+"provider="+b.Model.Provider,
+			prefix+"protocol="+b.Model.Protocol,
+			prefix+"endpoint="+b.Model.Endpoint,
+			prefix+"model="+b.Model.Name,
+			fmt.Sprintf("%sallowInsecure=%t", prefix, b.Model.AllowInsecure),
+			prefix+"credentialSecret="+BackendCredentialSecret(b.Name),
+			prefix+"credentialPath="+BackendCredentialPath(b.Name),
+		)
+	}
+	return append(values,
 		fmt.Sprintf("celln.fleet.limits.leaseSeconds=%d", limits.LeaseSeconds),
 		fmt.Sprintf("celln.fleet.limits.maxTurns=%d", limits.MaxTurns),
 		fmt.Sprintf("celln.fleet.limits.maxModelRequests=%d", limits.MaxModelRequests),
 		fmt.Sprintf("celln.fleet.limits.maxOutputTokens=%d", limits.MaxOutputTokens),
-		"celln.fleet.model.provider=" + model.Provider,
-		"celln.fleet.model.protocol=" + model.Protocol,
-		"celln.fleet.model.endpoint=" + model.Endpoint,
-		"celln.fleet.model.name=" + model.Name,
-		fmt.Sprintf("celln.fleet.model.allowInsecure=%t", model.AllowInsecure),
 		"celln.dispatcher.enabled=false",
 		"celln.router.backends=null",
-		"celln.router.parentTokenSecret=" + FleetParentTokenSecret,
+		"celln.router.parentTokenSecret="+FleetParentTokenSecret,
 		"celln.fleet.enabled=true",
-		"celln.fleet.scope=" + o.Scope,
-		"celln.fleet.package.image=" + o.PackageImage,
-		"celln.fleet.package.hash=" + o.PackageHash,
-		"celln.fleet.publisher=" + o.Publisher,
-		"celln.fleet.principal=" + o.Principal,
-		"celln.fleet.parentClientsConfigMap=" + FleetParentClientsConfigMap,
-		"celln.fleet.configurationConfigMap=" + FleetConfigurationConfigMap,
-		"celln.fleet.modelCredential.secret=" + FleetModelCredentialSecret,
-		"celln.fleet.modelCredential.path=" + o.ModelCredentialPath,
-	}, nil
+		"celln.fleet.scope="+o.Scope,
+		"celln.fleet.package.image="+o.PackageImage,
+		"celln.fleet.package.hash="+o.PackageHash,
+		"celln.fleet.publisher="+o.Publisher,
+		"celln.fleet.principal="+o.Principal,
+		"celln.fleet.parentClientsConfigMap="+FleetParentClientsConfigMap,
+		"celln.fleet.configurationConfigMap="+FleetConfigurationConfigMap,
+	), nil
 }
 
 // PrepareFleetTrust publishes the shared parent principal: the gateway's
@@ -284,8 +362,16 @@ func fleetLabels() map[string]string {
 // and guests never read it. An existing Secret is kept when the file is
 // omitted or identical; it is never rotated by replacement.
 func PublishFleetModelCredential(ctx context.Context, store client.Client, path string, model FleetModel) error {
+	return PublishFleetBackendCredential(ctx, store, FleetBackend{Name: cellnplatform.DefaultBackend, Model: model, CredentialFile: path})
+}
+
+// PublishFleetBackendCredential publishes one backend's provider key as its
+// celln-system Secret. An existing Secret is kept when no file is given and
+// never replaced with different content; keyless backends get a placeholder.
+func PublishFleetBackendCredential(ctx context.Context, store client.Client, b FleetBackend) error {
+	name, path, model := BackendCredentialSecret(b.Name), b.CredentialFile, b.Model
 	var existing corev1.Secret
-	err := store.Get(ctx, types.NamespacedName{Namespace: fleetNamespace, Name: FleetModelCredentialSecret}, &existing)
+	err := store.Get(ctx, types.NamespacedName{Namespace: fleetNamespace, Name: name}, &existing)
 	if err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
@@ -294,7 +380,7 @@ func PublishFleetModelCredential(ctx context.Context, store client.Client, path 
 	}
 	if path == "" && !model.NeedsCredential() {
 		// A keyless local backend still needs Celln's bounded credential file.
-		return store.Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: FleetModelCredentialSecret, Namespace: fleetNamespace, Labels: fleetLabels()}, Data: map[string][]byte{"token": []byte(fleetModelPlaceholderCredential)}})
+		return store.Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: fleetNamespace, Labels: fleetLabels()}, Data: map[string][]byte{"token": []byte(fleetModelPlaceholderCredential)}})
 	}
 	info, statErr := os.Lstat(path)
 	if path == "" || !filepath.IsAbs(path) || statErr != nil || !info.Mode().IsRegular() || info.Size() > 4096 {
@@ -310,18 +396,69 @@ func PublishFleetModelCredential(ctx context.Context, store client.Client, path 
 	}
 	if err == nil {
 		if string(existing.Data["token"]) != credential {
-			return fmt.Errorf("model credential Secret %s already exists with different content; omit the file to keep it", FleetModelCredentialSecret)
+			return fmt.Errorf("model credential Secret %s already exists with different content; omit the file to keep it", name)
 		}
 		return nil
 	}
-	return store.Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: FleetModelCredentialSecret, Namespace: fleetNamespace, Labels: fleetLabels()}, Data: map[string][]byte{"token": []byte(credential)}})
+	return store.Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: fleetNamespace, Labels: fleetLabels()}, Data: map[string][]byte{"token": []byte(credential)}})
 }
 
 var fleetConfigurationFiles = []string{"catalogue.json", "configured.json", "native-template.json"}
 
+// PublishedBackends lists the backends a fleet configuration ConfigMap
+// carries: keys are "<backend>.<file>"; unprefixed keys belong to the default
+// backend. Every backend must carry every file.
+func PublishedBackends(data map[string]string) ([]string, error) {
+	files := map[string]map[string]bool{}
+	for key, content := range data {
+		backend, file := "", ""
+		for _, f := range fleetConfigurationFiles {
+			switch {
+			case key == f:
+				backend, file = cellnplatform.DefaultBackend, f
+			case strings.HasSuffix(key, "."+f):
+				backend, file = strings.TrimSuffix(key, "."+f), f
+			}
+		}
+		if file == "" {
+			return nil, fmt.Errorf("published fleet configuration carries an unknown key %q", key)
+		}
+		if len(content) == 0 || len(content) > 1<<20 {
+			return nil, fmt.Errorf("published fleet configuration is incomplete: %s", key)
+		}
+		if !backendNamePattern.MatchString(backend) {
+			return nil, fmt.Errorf("published fleet configuration names an invalid backend %q", backend)
+		}
+		if files[backend] == nil {
+			files[backend] = map[string]bool{}
+		}
+		files[backend][file] = true
+	}
+	backends := make([]string, 0, len(files))
+	for backend, have := range files {
+		for _, f := range fleetConfigurationFiles {
+			if !have[f] {
+				return nil, fmt.Errorf("published fleet configuration is incomplete: %s.%s", backend, f)
+			}
+		}
+		backends = append(backends, backend)
+	}
+	sort.Strings(backends)
+	return backends, nil
+}
+
+func publishedKey(backend, file string, data map[string]string) string {
+	if backend == cellnplatform.DefaultBackend {
+		if _, ok := data[file]; ok {
+			return file
+		}
+	}
+	return backend + "." + file
+}
+
 // ReadFleetConfiguration materializes the starter configuration a fleet node
-// published into dir, for Install. It reports false until a node has
-// published; an existing dir must already hold identical files.
+// published into dir/<backend>/ for every backend, for InstallPlatform. It
+// reports false until a node has published; existing files must be identical.
 func ReadFleetConfiguration(ctx context.Context, store client.Client, dir string) (bool, error) {
 	if !filepath.IsAbs(dir) || filepath.Clean(dir) != dir {
 		return false, fmt.Errorf("clean absolute configuration directory required")
@@ -332,27 +469,55 @@ func ReadFleetConfiguration(ctx context.Context, store client.Client, dir string
 	} else if err != nil {
 		return false, err
 	}
-	for _, name := range fleetConfigurationFiles {
-		if content, ok := published.Data[name]; !ok || len(content) == 0 || len(content) > 1<<20 {
-			return false, fmt.Errorf("published fleet configuration is incomplete: %s", name)
-		}
+	backends, err := PublishedBackends(published.Data)
+	if err != nil {
+		return false, err
+	}
+	if len(backends) == 0 {
+		return false, fmt.Errorf("published fleet configuration carries no backend")
 	}
 	if err := os.Mkdir(dir, 0700); err != nil && !os.IsExist(err) {
 		return false, err
 	}
-	for _, name := range fleetConfigurationFiles {
-		path := filepath.Join(dir, name)
-		if existing, err := os.ReadFile(path); err == nil {
-			if string(existing) != published.Data[name] {
-				return false, fmt.Errorf("existing %s differs from the published fleet configuration", name)
-			}
-			continue
-		}
-		if err := os.WriteFile(path, []byte(published.Data[name]), 0600); err != nil {
+	for _, backend := range backends {
+		if err := os.Mkdir(filepath.Join(dir, backend), 0700); err != nil && !os.IsExist(err) {
 			return false, err
+		}
+		for _, name := range fleetConfigurationFiles {
+			content := published.Data[publishedKey(backend, name, published.Data)]
+			path := filepath.Join(dir, backend, name)
+			if existing, err := os.ReadFile(path); err == nil {
+				if string(existing) != content {
+					return false, fmt.Errorf("existing %s/%s differs from the published fleet configuration", backend, name)
+				}
+				continue
+			}
+			if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+				return false, err
+			}
 		}
 	}
 	return true, nil
+}
+
+// ConfigurationBackends lists the backend directories a materialized
+// configuration holds, sorted.
+func ConfigurationBackends(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, e := range entries {
+		if e.IsDir() && backendNamePattern.MatchString(e.Name()) {
+			out = append(out, e.Name())
+		}
+	}
+	sort.Strings(out)
+	if len(out) == 0 {
+		return nil, fmt.Errorf("configuration directory %s holds no backend", dir)
+	}
+	return out, nil
 }
 
 // ConfigureFleet rebinds a completed Install to gateway issuance: the owner a

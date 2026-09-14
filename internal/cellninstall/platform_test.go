@@ -31,31 +31,57 @@ func starterConfiguration(t *testing.T) (dir, packageHash, principal string) {
 	if err := os.Mkdir(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	var metadata receipt
-	for _, name := range []string{"catalogue.json", "native-template.json", "configured.json"} {
-		raw, err := os.ReadFile(filepath.Join("testdata", name))
-		if err != nil {
+	// Two backends of one package: the reviewed default (DeepSeek) and an
+	// Anthropic route named "claude" sharing every other byte.
+	for _, backend := range []struct{ name, provider, protocol, model, url, credentialProfile string }{
+		{"native", "", "", "", "", ""},
+		{"claude", "anthropic", "anthropic-messages", "claude-test", "https://api.anthropic.com/v1/messages", "trial-claude"},
+	} {
+		sub := filepath.Join(dir, backend.name)
+		if err := os.Mkdir(sub, 0700); err != nil {
 			t.Fatal(err)
 		}
-		raw = []byte(strings.TrimSuffix(string(raw), "\n"))
-		if name == "configured.json" {
-			if err := json.Unmarshal(raw, &metadata); err != nil {
+		var metadata receipt
+		for _, name := range []string{"catalogue.json", "native-template.json", "configured.json"} {
+			raw, err := os.ReadFile(filepath.Join("testdata", name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw = []byte(strings.TrimSuffix(string(raw), "\n"))
+			if name == "native-template.json" && backend.provider != "" {
+				var native map[string]any
+				if err := json.Unmarshal(raw, &native); err != nil {
+					t.Fatal(err)
+				}
+				template := native["template"].(map[string]any)
+				template["model"], template["url"] = backend.model, backend.url
+				native["modelProfile"] = "blake3:" + strings.Repeat("e", 64)
+				raw, _ = json.Marshal(native)
+			}
+			if name == "configured.json" {
+				if err := json.Unmarshal(raw, &metadata); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(sub, name), raw, 0600); err != nil {
 				t.Fatal(err)
 			}
 		}
-		if err := os.WriteFile(filepath.Join(dir, name), raw, 0600); err != nil {
+		if backend.provider != "" {
+			metadata.Model = api.ModelSpec{Provider: backend.provider, Protocol: backend.protocol, Model: backend.model, BaseURL: backend.url, CredentialProfile: backend.credentialProfile}
+			metadata.ModelProfile = "blake3:" + strings.Repeat("e", 64)
+		}
+		for file, field := range map[string]*string{"catalogue.json": &metadata.CatalogueHash, "native-template.json": &metadata.NativeTemplateHash} {
+			raw, _ := os.ReadFile(filepath.Join(sub, file))
+			*field = fmt.Sprintf("blake3:%x", blake3.Sum256(raw))
+		}
+		raw, _ := json.Marshal(metadata)
+		if err := os.WriteFile(filepath.Join(sub, "configured.json"), raw, 0600); err != nil {
 			t.Fatal(err)
 		}
+		packageHash, principal = metadata.PackageHash, metadata.Principal
 	}
-	for file, field := range map[string]*string{"catalogue.json": &metadata.CatalogueHash, "native-template.json": &metadata.NativeTemplateHash} {
-		raw, _ := os.ReadFile(filepath.Join(dir, file))
-		*field = fmt.Sprintf("blake3:%x", blake3.Sum256(raw))
-	}
-	raw, _ := json.Marshal(metadata)
-	if err := os.WriteFile(filepath.Join(dir, "configured.json"), raw, 0600); err != nil {
-		t.Fatal(err)
-	}
-	return dir, metadata.PackageHash, metadata.Principal
+	return dir, packageHash, principal
 }
 
 func platformInstallStore(t *testing.T) client.Client {
@@ -89,6 +115,15 @@ func TestInstallPlatformPublishesCatalogueOncePerScopeAndWrapsNamespaces(t *test
 	if err := store.Get(ctx, types.NamespacedName{Name: profileName}, &profile); err != nil {
 		t.Fatal(err)
 	}
+	// The second backend has its own profile, credential profile and wrappers.
+	var claude api.CellnRuntimeProfile
+	if err := store.Get(ctx, types.NamespacedName{Name: PlatformProfileName("trial", "claude")}, &claude); err != nil || claude.Labels[cellnplatform.BackendLabel] != "claude" || claude.Annotations[cellnplatform.ProtocolAnnotation] != "anthropic-messages" || claude.Spec.Native.CredentialProfile != "trial-claude" || claude.Spec.Native.ModelProfile != "blake3:"+strings.Repeat("e", 64) {
+		t.Fatalf("claude profile: %v %+v", err, claude)
+	}
+	var claudeConnection api.ModelConnection
+	if err := store.Get(ctx, types.NamespacedName{Namespace: "tenant-a", Name: "celln-claude"}, &claudeConnection); err != nil || claudeConnection.Spec.Provider != "anthropic" || claudeConnection.Spec.Protocol != "anthropic-messages" || claudeConnection.Spec.CredentialProfile != "trial-claude" || claudeConnection.Spec.Validate() != nil {
+		t.Fatalf("claude wrapper connection: %v %+v", err, claudeConnection.Spec)
+	}
 	native := profile.Spec.Native
 	if native == nil || native.CredentialProfile != "trial" || native.ModelProfile == "" || native.SystemPrompt == "" || len(native.Parent.Raw) == 0 || len(native.Template.Raw) == 0 || profile.Spec.Lifecycles[1] != "enduring" || profile.Annotations[packageAnnotation] != packageHash {
 		t.Fatalf("profile lacks native provisioning material: %+v", profile.Spec)
@@ -102,6 +137,10 @@ func TestInstallPlatformPublishesCatalogueOncePerScopeAndWrapsNamespaces(t *test
 	if len(exclusions) != 2 || exclusions[0].Key != cellnplatform.NamespaceNameLabel || exclusions[0].Operator != metav1.LabelSelectorOpNotIn || !slices.Contains(exclusions[0].Values, "kube-system") || !slices.Contains(exclusions[0].Values, "sympozium-system") || !slices.Contains(exclusions[0].Values, "celln-system") || exclusions[1].Key != cellnplatform.ExcludedLabel || exclusions[1].Operator != metav1.LabelSelectorOpDoesNotExist {
 		t.Fatalf("default policy is not open with system exclusions: %+v", policy.Spec.NamespaceSelector)
 	}
+	if len(policy.Spec.RuntimeProfiles) != 2 || len(policy.Spec.Routes) != 2 || policy.Spec.Routes[0].Provider != "anthropic" || policy.Spec.Routes[1].Provider != "deepseek" {
+		t.Fatalf("policy must carry every backend's profile and route: %+v", policy.Spec)
+	}
+	route = policy.Spec.Routes[1]
 	if len(policy.Spec.Tools) != 3 || route.Auth != "host-profile" || route.Provider != "deepseek" || route.EndpointOrigins[0] != "https://api.deepseek.com" || policy.Spec.Ceilings.MaxTurns != 12 || policy.Spec.Ceilings.MaxParentLeaseSeconds != 3600 || policy.Spec.Ceilings.MaxTurnSeconds != 60 {
 		t.Fatalf("policy does not bind the reviewed route and ceilings: %+v", policy.Spec)
 	}

@@ -3,13 +3,16 @@
 # reviewed starter package and sizes its own capacity, one router discovers
 # them, enduring parents are issued through the gateway (several on one node),
 # a follow-up turn keeps live context, any ordinary namespace runs with
-# wrappers created on first use while an excluded one is refused, and removing
-# a node's label drains its owner honestly.
+# wrappers created on first use while an excluded one is refused, a second
+# model backend (FLEET_SECOND_BACKEND, optional) serves the same namespace side
+# by side, and removing a node's label drains its owner honestly.
 #
 # Requires: kind, docker, kubectl, helm, /dev/kvm, a readable host kernel in
 # /boot, a model backend (FLEET_MODEL_PROVIDER=deepseek|openai|anthropic|llama-server
 # with DEEPSEEK_API_KEY, OPENAI_API_KEY or ANTHROPIC_API_KEY, or
-# FLEET_MODEL_ENDPOINT for llama-server; FLEET_MODEL names the model), a celln bundle (bin/celln + share/celln with pilot
+# FLEET_MODEL_ENDPOINT for llama-server; FLEET_MODEL names the model; an optional
+# second backend as FLEET_SECOND_BACKEND="name=NAME,provider=..,model=..[,endpoint=..][,protocol=..][,allow-insecure=true]"
+# with its key in FLEET_SECOND_MODEL_KEY), a celln bundle (bin/celln + share/celln with pilot
 # binaries, scripts, guest) matching config/celln/release.json plus #109/#110,
 # and the sympozium controller/apiserver/webhook/celln-installer images tagged
 # $SYMPOZIUM_IMAGE_TAG together with the celln image $CELLN_IMAGE. See
@@ -107,6 +110,26 @@ CREDENTIAL_ARGS=()
 if [ -n "$MODEL_KEY" ]; then
 	printf '%s\n' "$MODEL_KEY" >"$WORK/model-token"
 	CREDENTIAL_ARGS=(--celln-fleet-model-credential-file "$WORK/model-token")
+fi
+# With a second backend both are declared explicitly: the native backend from
+# the FLEET_MODEL_* inputs and the second from FLEET_SECOND_BACKEND.
+SECOND_BACKEND=""
+if [ -n "${FLEET_SECOND_BACKEND:-}" ]; then
+	native_spec="name=native,provider=$MODEL_PROVIDER"
+	[ -n "${FLEET_MODEL:-}" ] && native_spec="$native_spec,model=$FLEET_MODEL"
+	[ -n "${FLEET_MODEL_ENDPOINT:-}" ] && native_spec="$native_spec,endpoint=$FLEET_MODEL_ENDPOINT"
+	[ -n "${FLEET_MODEL_PROTOCOL:-}" ] && native_spec="$native_spec,protocol=$FLEET_MODEL_PROTOCOL"
+	[ "${FLEET_MODEL_ALLOW_INSECURE:-}" = 1 ] && native_spec="$native_spec,allow-insecure=true"
+	[ -n "$MODEL_KEY" ] && native_spec="$native_spec,credential-file=$WORK/model-token"
+	second_spec="$FLEET_SECOND_BACKEND"
+	if [ -n "${FLEET_SECOND_MODEL_KEY:-}" ]; then
+		printf '%s\n' "$FLEET_SECOND_MODEL_KEY" >"$WORK/second-token"
+		second_spec="$second_spec,credential-file=$WORK/second-token"
+	fi
+	SECOND_BACKEND="$(printf '%s' "$FLEET_SECOND_BACKEND" | tr ',' '\n' | sed -n 's/^name=//p')"
+	[ -n "$SECOND_BACKEND" ] || fail "FLEET_SECOND_BACKEND needs name=NAME"
+	CREDENTIAL_ARGS=()
+	MODEL_ARGS=(--celln-fleet-backend "$native_spec" --celln-fleet-backend "$second_spec")
 fi
 kc create namespace "$NAMESPACE" 2>/dev/null || true
 kc label node --overwrite -l '!node-role.kubernetes.io/control-plane' celln.dev/kvm=true >/dev/null
@@ -238,6 +261,14 @@ trap 'kill "$api_pf" 2>/dev/null || true' EXIT
 wait_for "apiserver port-forward" 60 curl -sf "${api_auth[@]}" "http://127.0.0.1:$api_port/api/v1/celln-platform/profiles?namespace=$tenant" -o /dev/null
 curl -sf "${api_auth[@]}" "http://127.0.0.1:$api_port/api/v1/celln-platform/profiles?namespace=$tenant" | grep -q "\"name\":\"$profile\"" || fail "platform profile $profile not offered to $tenant"
 curl -sf "${api_auth[@]}" -X POST -H 'Content-Type: application/json' -d "{\"profile\":\"$profile\"}" "http://127.0.0.1:$api_port/api/v1/celln-platform/wrappers?namespace=$tenant" | grep -q '"connection":"celln-native"' || fail "wrappers were not created in $tenant"
+if [ -n "$SECOND_BACKEND" ]; then
+	# The second backend is a second profile of the same scope with its own
+	# wrapper names; the same namespace gets both.
+	second_profile="$profile-$SECOND_BACKEND"
+	curl -sf "${api_auth[@]}" "http://127.0.0.1:$api_port/api/v1/celln-platform/profiles?namespace=$tenant" | grep -q "\"name\":\"$second_profile\"" || fail "second backend profile $second_profile not offered to $tenant"
+	curl -sf "${api_auth[@]}" -X POST -H 'Content-Type: application/json' -d "{\"profile\":\"$second_profile\"}" "http://127.0.0.1:$api_port/api/v1/celln-platform/wrappers?namespace=$tenant" | grep -q "\"connection\":\"celln-$SECOND_BACKEND\"" || fail "second backend wrappers were not created in $tenant"
+	pass "$tenant offers both backends: $profile (celln-native) and $second_profile (celln-$SECOND_BACKEND)"
+fi
 [ "$(curl -s "${api_auth[@]}" "http://127.0.0.1:$api_port/api/v1/celln-platform/profiles?namespace=$denied")" = "[]" ] || fail "excluded namespace $denied was offered a profile"
 [ "$(curl -s -o /dev/null -w '%{http_code}' "${api_auth[@]}" -X POST -H 'Content-Type: application/json' -d "{\"profile\":\"$profile\"}" "http://127.0.0.1:$api_port/api/v1/celln-platform/wrappers?namespace=$denied")" = 403 ] || fail "excluded namespace $denied was prepared"
 # The excluded namespace applies the same objects by hand so its refusal is the policy's, not a missing Agent.
@@ -249,26 +280,43 @@ for item in json.load(sys.stdin)['items']:
 done
 # Tenants start runs through the API, as the UI does, and one Agent may hold
 # several enduring conversations at once.
-api_run() { # task -> run name, via POST /api/v1/runs
+api_run() { # task [backend] -> run name, via POST /api/v1/runs; a backend selects that backend's wrappers and model
 	python3 -c '
 import json, sys
 r = json.load(open(sys.argv[1]))["spec"]
-print(json.dumps({"agentRef": r["agentRef"], "task": sys.argv[2], "systemPrompt": r["systemPrompt"], "backend": "celln",
-  "executionLifecycle": "enduring", "enduring": r["enduring"], "model": r["model"]["model"], "modelConnectionRef": r["model"]["connectionRef"],
-  "cellnSelection": {"runtimeRef": r["cellnSelection"]["runtimeRef"], "clusterToolRefs": r["cellnSelection"]["clusterToolRefs"], "toolRefs": []}}))' "$WORK/fleet-out/installation/run.json" "$1" |
+backend = sys.argv[3] if len(sys.argv) > 3 else ""
+agent, runtime, connection, model = r["agentRef"], r["cellnSelection"]["runtimeRef"], r["model"]["connectionRef"], r["model"]["model"]
+if backend:
+    agent, runtime, connection = f"celln-agent-{backend}", f"celln-{backend}", f"celln-{backend}"
+    model = json.load(open(sys.argv[4]))["model"]["model"]
+print(json.dumps({"agentRef": agent, "task": sys.argv[2], "systemPrompt": r["systemPrompt"], "backend": "celln",
+  "executionLifecycle": "enduring", "enduring": r["enduring"], "model": model, "modelConnectionRef": connection,
+  "cellnSelection": {"runtimeRef": runtime, "clusterToolRefs": r["cellnSelection"]["clusterToolRefs"], "toolRefs": []}}))' "$WORK/fleet-out/installation/run.json" "$1" ${2:+"$2" "$WORK/fleet-out/configuration/$2/configured.json"} |
 		curl -sf "${api_auth[@]}" -X POST -H 'Content-Type: application/json' --data-binary @- "http://127.0.0.1:$api_port/api/v1/runs?namespace=$tenant" |
 		python3 -c 'import json,sys; print(json.load(sys.stdin)["metadata"]["name"])'
 }
 tenant_task="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["spec"]["task"])' "$WORK/fleet-out/installation/run.json")"
 tenant_run="$(api_run "$tenant_task")" || fail "API refused an enduring run in $tenant"
 tenant_run2="$(api_run "Remember the word saffron. Reply with one short sentence; do not use tools.")" || fail "API refused a second conversation for the same Agent in $tenant"
+tenant_runs=("$tenant_run" "$tenant_run2")
+second_run=""
+if [ -n "$SECOND_BACKEND" ]; then
+	second_run="$(api_run "Where is Botswana? Reply with one short sentence; do not use tools." "$SECOND_BACKEND")" || fail "API refused a conversation on backend $SECOND_BACKEND in $tenant"
+	tenant_runs+=("$second_run")
+fi
 kill "$api_pf" >/dev/null 2>&1 || true
-for run in "$tenant_run" "$tenant_run2"; do
+for run in "${tenant_runs[@]}"; do
 	wait_for "parent $run ready in $tenant" 240 run_ready "$run" "$tenant"
-	wait_for "initial turn of $run" 240 bash -c "kubectl --context kind-$CLUSTER -n $tenant get agentrun $run -o jsonpath='{.status.cellnParent.initialTurn.result.succeeded}' | grep -q true"
+	wait_for "initial turn of $run" 300 bash -c "kubectl --context kind-$CLUSTER -n $tenant get agentrun $run -o jsonpath='{.status.cellnParent.initialTurn.result.succeeded}' | grep -q true"
 done
 [ "$(kc -n "$tenant" get agentrun "$tenant_run2" -o jsonpath='{.status.cellnParent.binding.incarnation}')" != "$(kc -n "$tenant" get agentrun "$tenant_run" -o jsonpath='{.status.cellnParent.binding.incarnation}')" ] || fail "two conversations shared a parent"
 pass "two enduring conversations of one Agent started through the API in $tenant, each with its own parent"
+if [ -n "$second_run" ]; then
+	[ "$(kc -n "$tenant" get agentrun "$second_run" -o jsonpath='{.spec.cellnSelection.runtimeRef}{" "}{.spec.model.connectionRef}')" = "celln-$SECOND_BACKEND celln-$SECOND_BACKEND" ] || fail "$second_run did not run on backend $SECOND_BACKEND"
+	second_answer="$(kc -n "$tenant" get agentrun "$second_run" -o jsonpath='{.status.cellnParent.initialTurn.result.answer}' 2>/dev/null || true)"
+	pass "$second_run answered on backend $SECOND_BACKEND in the same namespace as the native runs: ${second_answer:0:160}"
+	kc -n "$tenant" delete agentrun "$second_run" --timeout=180s >/dev/null || fail "$second_run could not be deleted"
+fi
 kc -n "$tenant" delete agentrun "$tenant_run2" --timeout=180s >/dev/null || fail "$tenant_run2 could not be deleted"
 [ "$(kc -n "$tenant" get configmap -o name | grep -c grant-)" = 0 ] || fail "grant ConfigMaps appeared in $tenant"
 [ "$(kc -n "$tenant" get cellntool -o name | wc -l)" = 0 ] || fail "namespaced tools appeared in $tenant"

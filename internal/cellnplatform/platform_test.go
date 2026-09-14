@@ -130,3 +130,70 @@ func TestTenantWrappersCarryInsecureApprovalFromProfile(t *testing.T) {
 		t.Fatal("plain-HTTP profile without operator approval produced a connection")
 	}
 }
+
+// Each backend's wrappers are named after it, so a namespace holds one set per
+// backend; the default backend keeps the original names.
+func TestWrappersAreNamedPerBackend(t *testing.T) {
+	ctx := context.Background()
+	native, policy := catalogue(OpenSelector(SystemNamespaces()))
+	raw := func(s string) apiextensionsv1.JSON { return apiextensionsv1.JSON{Raw: []byte(s)} }
+	claude := &api.CellnRuntimeProfile{ObjectMeta: metav1.ObjectMeta{Name: "celln-native-trial-claude", UID: "profile-claude", Labels: map[string]string{BackendLabel: "claude"}}, Spec: api.CellnRuntimeProfileSpec{Revision: "v1", Native: &api.CellnNativeProvisioning{CredentialProfile: "trial-claude", Template: raw(`{"contract":"celln.json-tools/v1","model":"claude-test","url":"https://api.anthropic.com/v1/messages"}`)}}}
+	policy.Spec.RuntimeProfiles = append(policy.Spec.RuntimeProfiles, api.CellnExecutionPolicyRuntime{Ref: api.CellnRuntimeProfileRef{Name: claude.Name, Revision: "v1"}})
+	policy.Spec.Routes = append(policy.Spec.Routes, api.CellnExecutionPolicyRoute{Provider: "anthropic", Protocol: "anthropic-messages", Models: []string{"claude-test"}, EndpointOrigins: []string{"https://api.anthropic.com"}, Auth: "host-profile"})
+	c := store(t, native, claude, policy, namespace("team-a", nil))
+	offered, err := AuthorisedProfiles(ctx, c, "team-a")
+	if err != nil || len(offered) != 2 {
+		t.Fatalf("two backends not offered: %d %v", len(offered), err)
+	}
+	first, err := EnsureWrappers(ctx, c, "team-a", native.Name)
+	if err != nil || first.Backend != DefaultBackend || first.Runtime != "celln-native" || first.Agent != "celln-agent" {
+		t.Fatalf("default backend wrappers: %+v %v", first, err)
+	}
+	second, err := EnsureWrappers(ctx, c, "team-a", claude.Name)
+	if err != nil || second.Backend != "claude" || second.Runtime != "celln-claude" || second.Agent != "celln-agent-claude" || second.Connection != "celln-claude" || len(second.Created) != 3 {
+		t.Fatalf("named backend wrappers: %+v %v", second, err)
+	}
+	var connection api.ModelConnection
+	if err := c.Get(ctx, types.NamespacedName{Namespace: "team-a", Name: "celln-claude"}, &connection); err != nil || connection.Spec.Provider != "anthropic" || connection.Spec.CredentialProfile != "trial-claude" || connection.Labels[BackendLabel] != "claude" {
+		t.Fatalf("claude connection: %+v %v", connection, err)
+	}
+	var runtime api.AgentRuntime
+	if err := c.Get(ctx, types.NamespacedName{Namespace: "team-a", Name: "celln-native"}, &runtime); err != nil || runtime.Spec.CellnProfileRef.Name != native.Name {
+		t.Fatalf("default runtime wrapper still points at its profile: %v", err)
+	}
+}
+
+func TestWrappersBindTheRouteOfTheProfilesProtocol(t *testing.T) {
+	// Two backends on one llama-server: the same origin and model over
+	// openai-chat and over anthropic-messages. Each profile names its
+	// protocol and gets the route speaking it.
+	_, policy := catalogue(OpenSelector(SystemNamespaces()))
+	raw := func(s string) apiextensionsv1.JSON { return apiextensionsv1.JSON{Raw: []byte(s)} }
+	template := raw(`{"contract":"celln.json-tools/v1","model":"qwen.gguf","url":"http://100.81.163.75:8080/v1/chat/completions","allow_insecure":true}`)
+	chat := &api.CellnRuntimeProfile{ObjectMeta: metav1.ObjectMeta{Name: "celln-native-trial", Labels: map[string]string{BackendLabel: DefaultBackend}, Annotations: map[string]string{ProtocolAnnotation: "openai-chat"}}, Spec: api.CellnRuntimeProfileSpec{Revision: "v1", Native: &api.CellnNativeProvisioning{CredentialProfile: "trial", Template: template}}}
+	messages := chat.DeepCopy()
+	messages.Name, messages.Labels[BackendLabel], messages.Annotations[ProtocolAnnotation], messages.Spec.Native.CredentialProfile = "celln-native-trial-messages", "messages", "anthropic-messages", "trial-messages"
+	messages.Spec.Native.Template = raw(`{"contract":"celln.json-tools/v1","model":"qwen.gguf","url":"http://100.81.163.75:8080/v1/messages","allow_insecure":true}`)
+	policy.Spec.Routes = []api.CellnExecutionPolicyRoute{
+		{Provider: "llama-server", Protocol: "openai-chat", Models: []string{"qwen.gguf"}, EndpointOrigins: []string{"http://100.81.163.75:8080"}, Auth: "host-profile", AllowInsecure: true},
+		{Provider: "llama-server", Protocol: "anthropic-messages", Models: []string{"qwen.gguf"}, EndpointOrigins: []string{"http://100.81.163.75:8080"}, Auth: "host-profile", AllowInsecure: true},
+	}
+	for _, tc := range []struct {
+		profile  *api.CellnRuntimeProfile
+		protocol string
+	}{{chat, "openai-chat"}, {messages, "anthropic-messages"}} {
+		objects, err := TenantWrappers("team-a", tc.profile, policy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c := objects[2].(*api.ModelConnection); c.Spec.Protocol != tc.protocol || c.Spec.CredentialProfile != tc.profile.Spec.Native.CredentialProfile {
+			t.Fatalf("%s bound %s, want %s", tc.profile.Name, c.Spec.Protocol, tc.protocol)
+		}
+	}
+	unannotated := chat.DeepCopy()
+	unannotated.Annotations = nil
+	objects, err := TenantWrappers("team-a", unannotated, policy)
+	if err != nil || objects[2].(*api.ModelConnection).Spec.Protocol != "openai-chat" {
+		t.Fatalf("an unannotated profile must keep the first matching route: %v", err)
+	}
+}

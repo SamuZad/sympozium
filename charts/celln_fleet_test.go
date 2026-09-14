@@ -2,6 +2,7 @@ package charts
 
 import (
 	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -26,6 +27,44 @@ func fleetValues() []string {
 		"celln.fleet.modelCredential.secret=model-credential",
 		"celln.fleet.parentConfigSecret=registrations",
 	}
+}
+
+type fleetBackend struct {
+	Name           string `json:"name"`
+	Provider       string `json:"provider"`
+	Protocol       string `json:"protocol"`
+	Endpoint       string `json:"endpoint"`
+	Model          string `json:"model"`
+	AllowInsecure  bool   `json:"allowInsecure"`
+	CredentialFile string `json:"credentialFile"`
+}
+
+// prepareBackends decodes the backend list the chart hands node preparation.
+func prepareBackends(t *testing.T, spec corev1.PodSpec) (map[string]string, []fleetBackend) {
+	t.Helper()
+	env := map[string]string{}
+	for _, e := range spec.InitContainers[0].Env {
+		env[e.Name] = e.Value
+	}
+	var backends []fleetBackend
+	if err := json.Unmarshal([]byte(env["FLEET_BACKENDS"]), &backends); err != nil {
+		t.Fatalf("FLEET_BACKENDS is not a JSON list: %v: %q", err, env["FLEET_BACKENDS"])
+	}
+	return env, backends
+}
+
+func twoBackendValues() []string {
+	values := fleetValues()
+	values = values[:len(values)-2]
+	return append(values,
+		"celln.fleet.backends[0].name=native", "celln.fleet.backends[0].provider=deepseek", "celln.fleet.backends[0].protocol=openai-chat",
+		"celln.fleet.backends[0].endpoint=https://api.deepseek.com/chat/completions", "celln.fleet.backends[0].model=deepseek-chat",
+		"celln.fleet.backends[0].credentialSecret=celln-fleet-model-credential", "celln.fleet.backends[0].credentialPath=/etc/celln-native/model-token",
+		"celln.fleet.backends[1].name=local", "celln.fleet.backends[1].provider=llama-server", "celln.fleet.backends[1].protocol=openai-chat",
+		"celln.fleet.backends[1].endpoint=http://100.81.163.75:8080/v1/chat/completions", "celln.fleet.backends[1].model=qwen.gguf", "celln.fleet.backends[1].allowInsecure=true",
+		"celln.fleet.backends[1].credentialSecret=celln-fleet-model-credential-local", "celln.fleet.backends[1].credentialPath=/etc/celln-native/local/model-token",
+		"celln.fleet.parentConfigSecret=registrations",
+	)
 }
 
 type fleetRender struct {
@@ -107,22 +146,16 @@ func TestFleetRendersPerNodeOwnersBehindOneGateway(t *testing.T) {
 	if strings.Contains(args, "--max-cells") || !strings.HasPrefix(command, "/bin/sh -ec") || !strings.Contains(command, "/proc/meminfo") || !strings.Contains(command, `--max-cells "$cells"`) || !strings.Contains(command, `--egress-slots "$cells"`) || !strings.Contains(command, "* 75 ))") {
 		t.Fatalf("dispatcher does not size capacity on the node: command=%s args=%s", command, args)
 	}
-	prepareEnv := map[string]string{}
-	for _, e := range spec.InitContainers[0].Env {
-		prepareEnv[e.Name] = e.Value
-	}
-	if prepareEnv["FLEET_MODEL_ENDPOINT"] != "" || prepareEnv["FLEET_SCOPE"] != "starter" {
-		t.Fatalf("default fleet must keep Celln's reviewed model route: %v", prepareEnv)
+	prepareEnv, backends := prepareBackends(t, spec)
+	if len(backends) != 1 || backends[0].Name != "native" || backends[0].Endpoint != "" || backends[0].CredentialFile != "/etc/celln-native/model-token" || prepareEnv["FLEET_SCOPE"] != "starter" {
+		t.Fatalf("legacy single-backend values must become the one backend named native on Celln's reviewed model route: %+v", backends)
 	}
 	llama, err := renderNativeParent(t, append(fleetValues(), "celln.fleet.model.provider=llama-server", "celln.fleet.model.protocol=openai-chat", "celln.fleet.model.endpoint=http://100.81.163.75:8080/v1/chat/completions", "celln.fleet.model.name=qwen.gguf", "celln.fleet.model.allowInsecure=true"))
 	if err != nil {
 		t.Fatalf("llama-server model render: %v: %s", err, llama)
 	}
-	for _, e := range decodeFleet(t, llama).daemonSets["celln-node"].Spec.Template.Spec.InitContainers[0].Env {
-		prepareEnv[e.Name] = e.Value
-	}
-	if prepareEnv["FLEET_MODEL_ENDPOINT"] != "http://100.81.163.75:8080/v1/chat/completions" || prepareEnv["FLEET_MODEL_ALLOW_INSECURE"] != "true" || prepareEnv["FLEET_MODEL_NAME"] != "qwen.gguf" || prepareEnv["FLEET_MODEL_PROTOCOL"] != "openai-chat" {
-		t.Fatalf("model route not passed to node preparation: %v", prepareEnv)
+	if _, b := prepareBackends(t, decodeFleet(t, llama).daemonSets["celln-node"].Spec.Template.Spec); len(b) != 1 || b[0].Endpoint != "http://100.81.163.75:8080/v1/chat/completions" || !b[0].AllowInsecure || b[0].Model != "qwen.gguf" || b[0].Protocol != "openai-chat" || b[0].Provider != "llama-server" {
+		t.Fatalf("model route not passed to node preparation: %+v", b)
 	}
 	if prepareEnv["FLEET_LIMIT_LEASE_SECONDS"] != "0" {
 		t.Fatalf("default fleet must keep Celln's reviewed host limits: %v", prepareEnv)
@@ -149,7 +182,7 @@ func TestFleetRendersPerNodeOwnersBehindOneGateway(t *testing.T) {
 	for _, m := range spec.Containers[0].VolumeMounts {
 		mounts[m.Name] = m
 	}
-	if m := mounts["model-credential"]; m.MountPath != "/etc/celln-native" || !m.ReadOnly {
+	if m := mounts["model-credential-native"]; m.MountPath != "/etc/celln-native" || !m.ReadOnly {
 		t.Fatalf("model credential must mount read-only at the profile's directory: %+v", m)
 	}
 	if _, ok := mounts["publisher-credentials"]; ok {
@@ -166,7 +199,7 @@ func TestFleetRendersPerNodeOwnersBehindOneGateway(t *testing.T) {
 	for _, e := range spec.InitContainers[0].Env {
 		env[e.Name] = e.Value
 	}
-	if env["FLEET_MODEL_CREDENTIAL_FILE"] != "/etc/celln-native/model-token" || env["FLEET_PACKAGE_HASH"] != "blake3:"+strings.Repeat("b", 64) || env["FLEET_PUBLISHER"] != "ed25519:operator" {
+	if _, legacy := env["FLEET_MODEL_CREDENTIAL_FILE"]; legacy || env["FLEET_PACKAGE_HASH"] != "blake3:"+strings.Repeat("b", 64) || env["FLEET_PUBLISHER"] != "ed25519:operator" {
 		t.Fatalf("prepare step configuration drifted: %v", env)
 	}
 	for _, v := range spec.Volumes {
@@ -225,6 +258,12 @@ func TestFleetRefusesUnsafeConfiguration(t *testing.T) {
 		"celln.fleet.model.endpoint=https://api.openai.com/v1/chat/completions,celln.fleet.model.provider=openai,celln.fleet.model.protocol=openai-chat",
 		"celln.fleet.model.endpoint=http://10.0.0.5:8080/v1/chat/completions,celln.fleet.model.provider=llama-server,celln.fleet.model.protocol=openai-chat,celln.fleet.model.name=q",
 		"celln.fleet.limits.leaseSeconds=90000", "celln.fleet.limits.leaseSeconds=30",
+		"celln.fleet.backends[0].name=Native,celln.fleet.backends[0].credentialSecret=s,celln.fleet.backends[0].credentialPath=/etc/celln-native/model-token",
+		"celln.fleet.backends[0].name=native,celln.fleet.backends[0].credentialPath=/etc/celln-native/model-token",
+		"celln.fleet.backends[0].name=native,celln.fleet.backends[0].credentialSecret=s,celln.fleet.backends[0].credentialPath=/etc/celln-native/model-token,celln.fleet.backends[1].name=native,celln.fleet.backends[1].credentialSecret=t,celln.fleet.backends[1].credentialPath=/etc/celln-other/model-token",
+		"celln.fleet.backends[0].name=native,celln.fleet.backends[0].credentialSecret=s,celln.fleet.backends[0].credentialPath=/etc/celln-native/model-token,celln.fleet.backends[1].name=other,celln.fleet.backends[1].credentialSecret=t,celln.fleet.backends[1].credentialPath=/etc/celln-native/other-token",
+		"celln.fleet.backends[0].name=local,celln.fleet.backends[0].credentialSecret=s,celln.fleet.backends[0].credentialPath=/etc/celln-native/model-token,celln.fleet.backends[0].provider=llama-server,celln.fleet.backends[0].protocol=openai-chat,celln.fleet.backends[0].model=q,celln.fleet.backends[0].endpoint=http://10.0.0.5:8080/v1/chat/completions",
+		"celln.fleet.backends[0].name=openai,celln.fleet.backends[0].credentialSecret=s,celln.fleet.backends[0].credentialPath=/etc/celln-native/model-token,celln.fleet.backends[0].provider=openai,celln.fleet.backends[0].protocol=openai-chat,celln.fleet.backends[0].endpoint=https://api.openai.com/v1/chat/completions",
 		"celln.dispatcher.enabled=true", "celln.installer.enabled=true", "celln.router.external=true",
 		"controller.replicas=2",
 	} {
@@ -255,5 +294,44 @@ func TestFleetWithoutParentConfigPreparesNodesOnly(t *testing.T) {
 		if e.Name == "CELLN_PARENT_REGISTRATIONS" {
 			t.Fatal("controller wired before registrations exist")
 		}
+	}
+}
+
+func TestFleetConfiguresEveryBackendOnEveryNode(t *testing.T) {
+	raw, err := renderNativeParent(t, twoBackendValues())
+	if err != nil {
+		t.Fatalf("render: %v: %s", err, raw)
+	}
+	spec := decodeFleet(t, raw).daemonSets["celln-node"].Spec.Template.Spec
+	env, backends := prepareBackends(t, spec)
+	if len(backends) != 2 || backends[0].Name != "native" || backends[1].Name != "local" || env["FLEET_SCOPE"] != "starter" {
+		t.Fatalf("both backends must reach node preparation in order: %+v", backends)
+	}
+	if backends[0].CredentialFile != "/etc/celln-native/model-token" || backends[1].CredentialFile != "/etc/celln-native/local/model-token" || backends[1].Provider != "llama-server" || !backends[1].AllowInsecure {
+		t.Fatalf("backend routes drifted: %+v", backends)
+	}
+	mounts := map[string]corev1.VolumeMount{}
+	for _, m := range spec.Containers[0].VolumeMounts {
+		mounts[m.Name] = m
+	}
+	if m := mounts["model-credential-native"]; m.MountPath != "/etc/celln-native" || !m.ReadOnly {
+		t.Fatalf("native credential mount drifted: %+v", m)
+	}
+	if m := mounts["model-credential-local"]; m.MountPath != "/etc/celln-native/local" || !m.ReadOnly {
+		t.Fatalf("second backend must mount its own credential directory: %+v", m)
+	}
+	for _, m := range spec.InitContainers[0].VolumeMounts {
+		if strings.HasPrefix(m.Name, "model-credential") {
+			t.Fatal("node preparation must not see model credentials")
+		}
+	}
+	secrets := map[string]string{}
+	for _, v := range spec.Volumes {
+		if v.Secret != nil && strings.HasPrefix(v.Name, "model-credential") {
+			secrets[v.Name] = v.Secret.SecretName + ":" + v.Secret.Items[0].Path
+		}
+	}
+	if secrets["model-credential-native"] != "celln-fleet-model-credential:model-token" || secrets["model-credential-local"] != "celln-fleet-model-credential-local:model-token" {
+		t.Fatalf("each backend must project its own Secret: %v", secrets)
 	}
 }

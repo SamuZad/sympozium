@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -15,12 +16,12 @@ import (
 // cellnFleetFlags configure `sympozium install --celln-fleet`: one reviewed
 // package, one scope, and every node labeled celln.dev/kvm=true joins.
 type cellnFleetFlags struct {
-	enabled             bool
-	options             cellninstall.FleetOptions
-	modelCredentialFile string
-	outputDir           string
-	authorise           string
-	wait                time.Duration
+	enabled      bool
+	options      cellninstall.FleetOptions
+	backendSpecs []string
+	outputDir    string
+	authorise    string
+	wait         time.Duration
 }
 
 func (f *cellnFleetFlags) register(cmd *cobra.Command) {
@@ -40,8 +41,8 @@ func (f *cellnFleetFlags) register(cmd *cobra.Command) {
 	cmd.Flags().Int64Var(&f.options.Limits.MaxModelRequests, "celln-fleet-max-model-requests", cellninstall.DefaultFleetLimits.MaxModelRequests, "Most model requests one parent may make over its life (3–6144)")
 	cmd.Flags().Int64Var(&f.options.Limits.MaxOutputTokens, "celln-fleet-max-output-tokens", cellninstall.DefaultFleetLimits.MaxOutputTokens, "Most model output tokens one parent may consume over its life (1536–3145728)")
 	cmd.Flags().StringVar(&f.authorise, "celln-fleet-authorise", "all", "Which namespaces may run on the fleet: 'all' (every namespace except kube-*, cert-manager, the control-plane namespaces and namespaces labeled celln.sympozium.ai/excluded) or 'labeled' (only namespaces labeled celln.sympozium.ai/scope=<scope>)")
-	cmd.Flags().StringVar(&f.options.ModelCredentialPath, "celln-fleet-model-credential-path", "/etc/celln-native/model-token", "Absolute path inside every dispatcher where the model credential Secret is mounted; recorded in the model profile")
-	cmd.Flags().StringVar(&f.modelCredentialFile, "celln-fleet-model-credential-file", "", "Local file holding the model provider credential to publish once as a Secret in celln-system (omit to keep an existing Secret; not needed for llama-server)")
+	cmd.Flags().StringVar(&f.options.ModelCredentialFile, "celln-fleet-model-credential-file", "", "Local file holding the default backend's provider credential to publish once as a Secret in celln-system (omit to keep an existing Secret; not needed for llama-server)")
+	cmd.Flags().StringArrayVar(&f.backendSpecs, "celln-fleet-backend", nil, "A model backend of this fleet, repeatable: name=NAME,provider=PROVIDER,model=MODEL[,endpoint=URL][,protocol=openai-chat|anthropic-messages][,credential-file=/path][,allow-insecure=true]. Every node configures every backend and a namespace may run parents on any of them side by side. Without this flag the --celln-fleet-model-* flags define the single backend named native")
 	cmd.Flags().StringVar(&f.outputDir, "celln-fleet-output-dir", "", "Absolute private directory for the materialized configuration and installation records")
 	cmd.Flags().DurationVar(&f.wait, "celln-fleet-wait", 15*time.Minute, "How long to wait for the first labeled node to publish the starter configuration")
 }
@@ -54,7 +55,16 @@ func installCellnFleet(ctx context.Context, f cellnFleetFlags, imageTag string, 
 	if !approve {
 		return fmt.Errorf("--celln-fleet requires --celln-native-approve-starter-tools: grants include run-owned read/write and bounded example.com HTTPS")
 	}
+	backends, err := parseFleetBackends(f.backendSpecs)
+	if err != nil {
+		return err
+	}
+	f.options.Backends = backends
 	fleetValues, err := cellninstall.FleetValues(f.options)
+	if err != nil {
+		return err
+	}
+	resolved, err := f.options.ResolvedBackends()
 	if err != nil {
 		return err
 	}
@@ -73,8 +83,10 @@ func installCellnFleet(ctx context.Context, f cellnFleetFlags, imageTag string, 
 	}
 	// The chart owns celln-system; the nodes and the router block on these
 	// objects until they exist, so publishing after the install is safe.
-	if err := cellninstall.PublishFleetModelCredential(ctx, k8sClient, f.modelCredentialFile, f.options.Model); err != nil {
-		return err
+	for _, b := range resolved {
+		if err := cellninstall.PublishFleetBackendCredential(ctx, k8sClient, b); err != nil {
+			return fmt.Errorf("backend %s: %w", b.Name, err)
+		}
 	}
 	if err := cellninstall.PrepareFleetTrust(ctx, k8sClient, f.options.Principal); err != nil {
 		return err
@@ -125,10 +137,53 @@ func installCellnFleet(ctx context.Context, f cellnFleetFlags, imageTag string, 
 	if err := runInstall(imageTag, append(values, wiring...)); err != nil {
 		return err
 	}
+	names := make([]string, 0, len(resolved))
+	for _, b := range resolved {
+		names = append(names, b.Name+" ("+b.Model.Provider+"/"+b.Model.Name+")")
+	}
+	fmt.Printf("  Model backends on this fleet: %s. Each backend is an AgentRuntime wrapper in every namespace (celln-<backend>; the default backend keeps celln-native).\n", strings.Join(names, ", "))
 	if f.authorise == cellnplatform.AuthoriseLabeled {
 		fmt.Printf("  Enabled enduring Celln runs on fleet %q for namespaces labeled %s=%s; %s is labeled and carries the wrapper objects. No run submitted.\n", f.options.Scope, cellninstall.ScopeLabel, f.options.Scope, namespace)
 	} else {
 		fmt.Printf("  Enabled enduring Celln runs on fleet %q for every namespace except the system exclusions and namespaces labeled %s; %s carries the wrapper objects and any other namespace gets them on first use. No run submitted.\n", f.options.Scope, cellnplatform.ExcludedLabel, namespace)
 	}
 	return nil
+}
+
+// parseFleetBackends parses repeated --celln-fleet-backend values of the form
+// key=value pairs separated by commas.
+func parseFleetBackends(specs []string) ([]cellninstall.FleetBackend, error) {
+	var out []cellninstall.FleetBackend
+	for _, spec := range specs {
+		var b cellninstall.FleetBackend
+		for _, pair := range strings.Split(spec, ",") {
+			key, value, ok := strings.Cut(strings.TrimSpace(pair), "=")
+			if !ok {
+				return nil, fmt.Errorf("--celln-fleet-backend %q: expected key=value pairs", spec)
+			}
+			switch key {
+			case "name":
+				b.Name = value
+			case "provider":
+				b.Model.Provider = value
+			case "model":
+				b.Model.Name = value
+			case "endpoint":
+				b.Model.Endpoint = value
+			case "protocol":
+				b.Model.Protocol = value
+			case "credential-file":
+				b.CredentialFile = value
+			case "allow-insecure":
+				b.Model.AllowInsecure = value == "true" || value == "1" || value == "yes"
+			default:
+				return nil, fmt.Errorf("--celln-fleet-backend %q: unknown key %q (name, provider, model, endpoint, protocol, credential-file, allow-insecure)", spec, key)
+			}
+		}
+		if b.Name == "" {
+			return nil, fmt.Errorf("--celln-fleet-backend %q: name is required", spec)
+		}
+		out = append(out, b)
+	}
+	return out, nil
 }

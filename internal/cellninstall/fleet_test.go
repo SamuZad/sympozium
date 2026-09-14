@@ -26,7 +26,7 @@ func fleetStore() client.Client {
 }
 
 func validFleet() FleetOptions {
-	return FleetOptions{Scope: "starter", Principal: "sympozium:celln", Publisher: "ed25519:operator", PackageImage: "registry.example/celln/starter@sha256:" + strings.Repeat("a", 64), PackageHash: "blake3:" + strings.Repeat("b", 64), ModelCredentialPath: "/etc/celln-native/model-token"}
+	return FleetOptions{Scope: "starter", Principal: "sympozium:celln", Publisher: "ed25519:operator", PackageImage: "registry.example/celln/starter@sha256:" + strings.Repeat("a", 64), PackageHash: "blake3:" + strings.Repeat("b", 64)}
 }
 
 func TestFleetValuesRefuseAmbiguousOrUnpinnedInputs(t *testing.T) {
@@ -35,15 +35,22 @@ func TestFleetValuesRefuseAmbiguousOrUnpinnedInputs(t *testing.T) {
 		t.Fatalf("valid fleet refused: %v %v", err, values)
 	}
 	for name, change := range map[string]func(*FleetOptions){
-		"scope":      func(o *FleetOptions) { o.Scope = "Starter" },
-		"tag":        func(o *FleetOptions) { o.PackageImage = "registry.example/celln/starter:latest" },
-		"hash":       func(o *FleetOptions) { o.PackageHash = "sha256:" + strings.Repeat("b", 64) },
-		"publisher":  func(o *FleetOptions) { o.Publisher = "" },
-		"comma":      func(o *FleetOptions) { o.Publisher = "a,b" },
-		"principal":  func(o *FleetOptions) { o.Principal = "sympozium celln" },
-		"relative":   func(o *FleetOptions) { o.ModelCredentialPath = "etc/token" },
-		"root-level": func(o *FleetOptions) { o.ModelCredentialPath = "/token" },
-		"traversal":  func(o *FleetOptions) { o.ModelCredentialPath = "/etc/../token" },
+		"scope":             func(o *FleetOptions) { o.Scope = "Starter" },
+		"tag":               func(o *FleetOptions) { o.PackageImage = "registry.example/celln/starter:latest" },
+		"hash":              func(o *FleetOptions) { o.PackageHash = "sha256:" + strings.Repeat("b", 64) },
+		"publisher":         func(o *FleetOptions) { o.Publisher = "" },
+		"comma":             func(o *FleetOptions) { o.Publisher = "a,b" },
+		"principal":         func(o *FleetOptions) { o.Principal = "sympozium celln" },
+		"relative key file": func(o *FleetOptions) { o.ModelCredentialFile = "etc/token" },
+		"bad backend name": func(o *FleetOptions) {
+			o.Backends = []FleetBackend{{Name: "Claude", Model: FleetModel{Provider: "anthropic", Name: "m"}}}
+		},
+		"duplicate backends": func(o *FleetOptions) {
+			o.Backends = []FleetBackend{{Name: "a", Model: FleetModel{}}, {Name: "a", Model: FleetModel{}}}
+		},
+		"backend without model": func(o *FleetOptions) {
+			o.Backends = []FleetBackend{{Name: "openai", Model: FleetModel{Provider: "openai"}}}
+		},
 	} {
 		o := validFleet()
 		change(&o)
@@ -140,13 +147,13 @@ func TestReadFleetConfigurationWaitsForNodesAndRefusesDrift(t *testing.T) {
 	if ok, err := ReadFleetConfiguration(ctx, store, dir); err != nil || !ok {
 		t.Fatalf("published configuration not materialized: %v", err)
 	}
-	if raw, err := os.ReadFile(filepath.Join(dir, "native-template.json")); err != nil || string(raw) != data["native-template.json"] {
+	if raw, err := os.ReadFile(filepath.Join(dir, "native", "native-template.json")); err != nil || string(raw) != data["native-template.json"] {
 		t.Fatal("materialized bytes differ")
 	}
 	if ok, err := ReadFleetConfiguration(ctx, store, dir); err != nil || !ok {
 		t.Fatalf("identical rerun refused: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "catalogue.json"), []byte(`{"tools":["drift"]}`), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "native", "catalogue.json"), []byte(`{"tools":["drift"]}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ReadFleetConfiguration(ctx, store, dir); err == nil {
@@ -237,7 +244,7 @@ func TestFleetModelPresetsAndRefusals(t *testing.T) {
 	o.Model = ok["llama-server"]
 	values, err := FleetValues(o)
 	joined := strings.Join(values, "\n")
-	if err != nil || !strings.Contains(joined, "celln.fleet.model.endpoint=http://100.81.163.75:8080/v1/chat/completions") || !strings.Contains(joined, "celln.fleet.model.allowInsecure=true") || !strings.Contains(joined, "celln.fleet.model.name=qwen.gguf") {
+	if err != nil || !strings.Contains(joined, "celln.fleet.backends[0].endpoint=http://100.81.163.75:8080/v1/chat/completions") || !strings.Contains(joined, "celln.fleet.backends[0].allowInsecure=true") || !strings.Contains(joined, "celln.fleet.backends[0].model=qwen.gguf") || !strings.Contains(joined, "celln.fleet.backends[0].name=native") || !strings.Contains(joined, "celln.fleet.backends[0].credentialSecret=celln-fleet-model-credential") || !strings.Contains(joined, "celln.fleet.backends[0].credentialPath=/etc/celln-native/model-token") {
 		t.Fatalf("model route not rendered into values: %v %s", err, joined)
 	}
 	o.Model = FleetModel{Provider: ModelProviderOpenAI}
@@ -289,5 +296,101 @@ func TestFleetLimitsDefaultToLongRunningAndAreBounded(t *testing.T) {
 	joined := strings.Join(values, "\n")
 	if err != nil || !strings.Contains(joined, "celln.fleet.limits.leaseSeconds=7200") || !strings.Contains(joined, "celln.fleet.limits.maxTurns=256") {
 		t.Fatalf("limits not rendered: %v %s", err, joined)
+	}
+}
+
+// A scope may carry several backends: each gets its own values entry,
+// credential Secret, mount path and credential profile; the default backend
+// keeps the original names.
+func TestFleetBackendsRenderSeparately(t *testing.T) {
+	o := validFleet()
+	o.Backends = []FleetBackend{
+		{Name: "native", Model: FleetModel{}, CredentialFile: "/keys/deepseek"},
+		{Name: "local-qwen", Model: FleetModel{Provider: ModelProviderLlamaServer, Name: "qwen.gguf", Endpoint: "http://100.81.163.75:8080/v1/chat/completions", AllowInsecure: true}},
+		{Name: "claude", Model: FleetModel{Provider: ModelProviderAnthropic, Name: "claude-test"}, CredentialFile: "/keys/anthropic"},
+	}
+	backends, err := o.ResolvedBackends()
+	if err != nil || len(backends) != 3 || backends[1].Model.Protocol != "openai-chat" || backends[2].Model.Protocol != "anthropic-messages" {
+		t.Fatalf("resolved backends: %+v %v", backends, err)
+	}
+	values, err := FleetValues(o)
+	joined := strings.Join(values, "\n")
+	for _, want := range []string{
+		"celln.fleet.backends[0].name=native", "celln.fleet.backends[0].credentialSecret=celln-fleet-model-credential", "celln.fleet.backends[0].credentialPath=/etc/celln-native/model-token",
+		"celln.fleet.backends[1].name=local-qwen", "celln.fleet.backends[1].credentialSecret=celln-fleet-model-credential-local-qwen", "celln.fleet.backends[1].credentialPath=/etc/celln-native/local-qwen/model-token", "celln.fleet.backends[1].allowInsecure=true",
+		"celln.fleet.backends[2].name=claude", "celln.fleet.backends[2].protocol=anthropic-messages", "celln.fleet.backends[2].endpoint=https://api.anthropic.com/v1/messages",
+	} {
+		if err != nil || !strings.Contains(joined, want) {
+			t.Fatalf("values lack %q: %v\n%s", want, err, joined)
+		}
+	}
+	if CredentialProfileFor("starter", "native") != "starter" || CredentialProfileFor("starter", "claude") != "starter-claude" {
+		t.Fatal("credential profiles must distinguish backends")
+	}
+	ctx := context.Background()
+	store := fleetStore()
+	key := filepath.Join(t.TempDir(), "anthropic")
+	if err := os.WriteFile(key, []byte("sk-ant-test-credential-0000000001\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	backends[2].CredentialFile = key
+	for _, b := range backends[1:] {
+		if err := PublishFleetBackendCredential(ctx, store, b); err != nil {
+			t.Fatalf("%s: %v", b.Name, err)
+		}
+	}
+	var secrets corev1.SecretList
+	if err := store.List(ctx, &secrets, client.InNamespace("celln-system")); err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]int{}
+	for _, s := range secrets.Items {
+		names[s.Name] = len(s.Data["token"])
+	}
+	if names["celln-fleet-model-credential-local-qwen"] < 24 || names["celln-fleet-model-credential-claude"] != len("sk-ant-test-credential-0000000001") {
+		t.Fatalf("backend secrets: %v", names)
+	}
+}
+
+// Nodes publish one configuration per backend; the installer materializes
+// each under its own directory and accepts the legacy single-backend keys.
+func TestReadFleetConfigurationMaterializesEveryBackend(t *testing.T) {
+	ctx := context.Background()
+	store := fleetStore()
+	data := map[string]string{}
+	for _, f := range fleetConfigurationFiles {
+		data[f] = "{\"default\":\"" + f + "\"}"
+		data["claude."+f] = "{\"claude\":\"" + f + "\"}"
+	}
+	backends, err := PublishedBackends(data)
+	if err != nil || strings.Join(backends, ",") != "claude,native" {
+		t.Fatalf("published backends: %v %v", backends, err)
+	}
+	delete(data, "claude.configured.json")
+	if _, err := PublishedBackends(data); err == nil {
+		t.Fatal("incomplete backend accepted")
+	}
+	data["claude.configured.json"] = "{}"
+	data["stray.txt"] = "x"
+	if _, err := PublishedBackends(data); err == nil {
+		t.Fatal("unknown key accepted")
+	}
+	delete(data, "stray.txt")
+	if err := store.Create(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: FleetConfigurationConfigMap, Namespace: "celln-system"}, Data: data}); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(t.TempDir(), "configuration")
+	if ok, err := ReadFleetConfiguration(ctx, store, dir); err != nil || !ok {
+		t.Fatalf("read: %v %v", ok, err)
+	}
+	got, err := ConfigurationBackends(dir)
+	if err != nil || strings.Join(got, ",") != "claude,native" {
+		t.Fatalf("materialized backends: %v %v", got, err)
+	}
+	if raw, _ := os.ReadFile(filepath.Join(dir, "native", "catalogue.json")); string(raw) != data["catalogue.json"] {
+		t.Fatalf("default backend file: %s", raw)
+	}
+	if raw, _ := os.ReadFile(filepath.Join(dir, "claude", "configured.json")); string(raw) != "{}" {
+		t.Fatalf("claude backend file: %s", raw)
 	}
 }
