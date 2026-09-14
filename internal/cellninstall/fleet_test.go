@@ -103,6 +103,12 @@ func TestPublishFleetModelCredentialKeepsExistingSecret(t *testing.T) {
 	if err := store.Get(ctx, types.NamespacedName{Namespace: "celln-system", Name: FleetModelCredentialSecret}, &secret); err != nil || string(secret.Data["token"]) != "sk-test-model-credential" {
 		t.Fatalf("credential not published verbatim: %v %q", err, secret.Data)
 	}
+	if err := PublishFleetModelCredential(ctx, store, path); err != nil {
+		t.Fatalf("identical rerun refused: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("sk-rotated-model-credential\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	if err := PublishFleetModelCredential(ctx, store, path); err == nil {
 		t.Fatal("existing credential replaced")
 	}

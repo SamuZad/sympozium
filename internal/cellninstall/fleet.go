@@ -144,28 +144,34 @@ func fleetLabels() map[string]string {
 
 // PublishFleetModelCredential copies one operator credential file into the
 // Secret every dispatcher mounts at the model profile's path. The controller
-// and guests never read it; an existing Secret is kept as-is.
+// and guests never read it. An existing Secret is kept when the file is
+// omitted or identical; it is never rotated by replacement.
 func PublishFleetModelCredential(ctx context.Context, store client.Client, path string) error {
 	var existing corev1.Secret
-	if err := store.Get(ctx, types.NamespacedName{Namespace: fleetNamespace, Name: FleetModelCredentialSecret}, &existing); err == nil {
-		if path == "" {
-			return nil
-		}
-		return fmt.Errorf("model credential Secret %s already exists; omit the file to keep it", FleetModelCredentialSecret)
-	} else if !apierrors.IsNotFound(err) {
+	err := store.Get(ctx, types.NamespacedName{Namespace: fleetNamespace, Name: FleetModelCredentialSecret}, &existing)
+	if err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
-	info, err := os.Lstat(path)
-	if path == "" || !filepath.IsAbs(path) || err != nil || !info.Mode().IsRegular() || info.Size() > 4096 {
+	if err == nil && path == "" {
+		return nil
+	}
+	info, statErr := os.Lstat(path)
+	if path == "" || !filepath.IsAbs(path) || statErr != nil || !info.Mode().IsRegular() || info.Size() > 4096 {
 		return fmt.Errorf("bounded regular absolute model credential file required")
 	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return err
+	raw, readErr := os.ReadFile(path)
+	if readErr != nil {
+		return readErr
 	}
 	credential := strings.TrimRight(string(raw), "\r\n")
 	if len(credential) < 8 || strings.ContainsAny(credential, "\r\n") {
 		return fmt.Errorf("model credential file must hold one non-empty line")
+	}
+	if err == nil {
+		if string(existing.Data["token"]) != credential {
+			return fmt.Errorf("model credential Secret %s already exists with different content; omit the file to keep it", FleetModelCredentialSecret)
+		}
+		return nil
 	}
 	return store.Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: FleetModelCredentialSecret, Namespace: fleetNamespace, Labels: fleetLabels()}, Data: map[string][]byte{"token": []byte(credential)}})
 }

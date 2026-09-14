@@ -71,22 +71,31 @@ func installCellnFleet(ctx context.Context, f cellnFleetFlags, imageTag string, 
 	fmt.Printf("  Waiting up to %s for the first node to admit the package and publish the starter configuration...\n", f.wait)
 	configuration := filepath.Join(f.outputDir, "configuration")
 	deadline := time.Now().Add(f.wait)
-	for {
-		published, err := cellninstall.ReadFleetConfiguration(ctx, k8sClient, configuration)
-		if err != nil {
-			return err
+	wait := func(what string, ready func() (bool, error)) error {
+		for {
+			done, err := ready()
+			if err != nil || done {
+				return err
+			}
+			if time.Now().After(deadline) {
+				return fmt.Errorf("%s did not happen within %s; label a KVM node, check the celln-node prepare logs in celln-system, then rerun this command", what, f.wait)
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(5 * time.Second):
+			}
 		}
-		if published {
-			break
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("no fleet node published the starter configuration within %s; label a KVM node, check the celln-node prepare logs in celln-system, then rerun this command", f.wait)
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(5 * time.Second):
-		}
+	}
+	if err := wait("publishing the starter configuration", func() (bool, error) {
+		return cellninstall.ReadFleetConfiguration(ctx, k8sClient, configuration)
+	}); err != nil {
+		return err
+	}
+	if err := wait("the controller rollout", func() (bool, error) {
+		return cellninstall.ControllerRolledOut(ctx, k8sClient, helmNamespace)
+	}); err != nil {
+		return err
 	}
 	o := cellninstall.Options{Namespace: namespace, ConfigurationDir: configuration, OutputDir: filepath.Join(f.outputDir, "installation"), StatePath: f.options.StatePath(), OwnerTarget: cellninstall.ManagedRouterURL, Scope: f.options.Scope, ControllerNamespace: helmNamespace, PackageHash: f.options.PackageHash}
 	if err := cellninstall.Install(ctx, k8sClient, o); err != nil {
