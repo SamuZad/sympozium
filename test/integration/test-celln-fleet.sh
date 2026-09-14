@@ -113,7 +113,7 @@ kc -n sympozium-system get deploy sympozium-controller-manager -o jsonpath='{.sp
 pass "two owners prepared from one package; controller unpinned; catalogue installed in $NAMESPACE"
 
 log "Enduring runs are issued through the gateway to fleet owners"
-run_ready() { [ "$(kc -n "$NAMESPACE" get agentrun "$1" -o jsonpath='{.status.conditions[?(@.type=="CellnParentReady")].status}')" = True ]; }
+run_ready() { [ "$(kc -n "${2:-$NAMESPACE}" get agentrun "$1" -o jsonpath='{.status.conditions[?(@.type=="CellnParentReady")].status}')" = True ]; }
 node_of() { # launch profile -> node whose owner issued it
 	for pod in $(kc -n celln-system get pods -l app.kubernetes.io/name=celln-node -o name); do
 		if kc -n celln-system exec "$pod" -c dispatcher -- test -e "/var/lib/sympozium-celln/$SCOPE/authority/trusted-parent-launches/${1#blake3:}.json" 2>/dev/null; then
@@ -146,6 +146,50 @@ else
 	run_ready "$second" && fail "$second became ready on an owner that already holds a parent"
 	pass "$second hashed to $first_node and was refused there (one parent per node); not re-placed"
 fi
+
+log "A second namespace needs only wrapper objects; an unlabeled one is refused"
+tenant="$NAMESPACE-b"
+denied="$NAMESPACE-denied"
+profile="celln-native-$SCOPE"
+for ns in "$tenant" "$denied"; do
+	kc create namespace "$ns" >/dev/null 2>&1 || true
+	kc -n "$NAMESPACE" get modelconnection celln-native -o json | python3 -c "
+import json, sys
+c = json.load(sys.stdin)
+print(json.dumps({'apiVersion': c['apiVersion'], 'kind': 'ModelConnection', 'metadata': {'name': 'celln-native', 'namespace': '$ns'}, 'spec': c['spec']}))" | kc apply -f - >/dev/null
+	kc apply -f - >/dev/null <<EOF
+apiVersion: sympozium.ai/v1alpha1
+kind: AgentRuntime
+metadata:
+  name: celln-native
+  namespace: $ns
+spec:
+  cellnProfileRef: {name: $profile, revision: v1}
+---
+apiVersion: sympozium.ai/v1alpha1
+kind: Agent
+metadata:
+  name: celln-agent
+  namespace: $ns
+spec:
+  runtimeRef: celln-native
+EOF
+done
+kc label namespace "$tenant" --overwrite "celln.sympozium.ai/scope=$SCOPE" >/dev/null
+tenant_run="$(python3 -c "
+import json, sys
+r = json.load(open(sys.argv[1])); r['metadata']['namespace'] = sys.argv[2]; print(json.dumps(r))" "$WORK/fleet-out/installation/run.json" "$tenant" | kc create -f - -o jsonpath='{.metadata.name}')"
+wait_for "parent $tenant_run ready in $tenant" 240 run_ready "$tenant_run" "$tenant"
+wait_for "initial turn of $tenant_run" 240 bash -c "kubectl --context kind-$CLUSTER -n $tenant get agentrun $tenant_run -o jsonpath='{.status.cellnParent.initialTurn.result.succeeded}' | grep -q true"
+[ "$(kc -n "$tenant" get configmap -o name | grep -c grant-)" = 0 ] || fail "grant ConfigMaps appeared in $tenant"
+[ "$(kc -n "$tenant" get cellntool -o name | wc -l)" = 0 ] || fail "namespaced tools appeared in $tenant"
+pass "$tenant_run ran in $tenant from wrapper objects only (no install, no grants, no copied tools)"
+denied_run="$(python3 -c "
+import json, sys
+r = json.load(open(sys.argv[1])); r['metadata']['namespace'] = sys.argv[2]; print(json.dumps(r))" "$WORK/fleet-out/installation/run.json" "$denied" | kc create -f - -o jsonpath='{.metadata.name}')"
+wait_for "policy refusal for $denied_run" 90 bash -c "kubectl --context kind-$CLUSTER -n $denied get agentrun $denied_run -o jsonpath='{.status.conditions[?(@.type==\"CellnParentReady\")].message}' | grep -q AUTH_POLICY_WITHDRAWN"
+[ -z "$(kc -n "$denied" get agentrun "$denied_run" -o jsonpath='{.status.cellnParent}')" ] || fail "$denied_run was issued a parent without policy"
+pass "$denied_run in unlabeled $denied refused with AUTH_POLICY_WITHDRAWN and no parent"
 
 log "Follow-up turn keeps live context on the same owner"
 uid="$(kc -n "$NAMESPACE" get agentrun "$first" -o jsonpath='{.metadata.uid}')"
