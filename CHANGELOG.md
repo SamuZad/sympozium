@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.10.65](https://github.com/sympozium-ai/sympozium/compare/v0.10.64...v0.10.65) (2026-09-14)
+
+
+### Features
+
+* **celln:** long-running parents — day-long lease ceilings, session defaults, lease deadline in the UI ([d1e900a](https://github.com/sympozium-ai/sympozium/commit/d1e900aaf8101c2433dc001fda3d4bcc909665f2))
+* **celln:** long-running parents — day-long leases, session defaults, lease in the UI, capacity-aware placement ([3a70c96](https://github.com/sympozium-ai/sympozium/commit/3a70c963ecee96e406ed28e5234e33960060f1ab))
+* **celln:** several model backends per fleet scope ([949c432](https://github.com/sympozium-ai/sympozium/commit/949c432b60375e715e2ea5bf88ec46387807890e))
+* **celln:** several model backends per fleet scope ([3c91183](https://github.com/sympozium-ai/sympozium/commit/3c91183ca0fd60d9a978dacd309945bb856842ef)), closes [#535](https://github.com/sympozium-ai/sympozium/issues/535)
+
+
+### Bug Fixes
+
+* **chart:** NATS passwords never start with a digit ([562fe73](https://github.com/sympozium-ai/sympozium/commit/562fe731b191c5fad9e18c2860d4593496df1924))
+
 ## [0.10.64](https://github.com/sympozium-ai/sympozium/compare/v0.10.63...v0.10.64) (2026-09-14)
 
 
