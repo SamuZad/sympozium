@@ -1526,7 +1526,29 @@ func applyCRDs(ch *chart.Chart) error {
 		}
 	}
 	fmt.Println("  Applying CRDs...")
-	return kubectl("apply", "--server-side", "--force-conflicts", "-f", tmpDir)
+	if err := kubectl("apply", "--server-side", "--force-conflicts", "-f", tmpDir); err != nil {
+		return err
+	}
+	// Helm maps the chart's custom resources when it builds the release; a CRD
+	// that is applied but not yet established fails the install on a busy
+	// API server ("no matches for kind").
+	if err := kubectlQuiet("wait", "--for=condition=established", "--timeout=120s", "-f", tmpDir); err != nil {
+		return fmt.Errorf("CRDs not established: %w", err)
+	}
+	return nil
+}
+
+// kubectlRetry retries a command whose failure is typically transient (a
+// remote manifest download answering 5xx).
+func kubectlRetry(attempts int, args ...string) error {
+	var err error
+	for i := 0; i < attempts; i++ {
+		if err = kubectl(args...); err == nil {
+			return nil
+		}
+		time.Sleep(time.Duration(i+1) * 5 * time.Second)
+	}
+	return err
 }
 
 func runInstall(imageTag string, setValues []string) error {
@@ -1579,7 +1601,7 @@ func runInstall(imageTag string, setValues []string) error {
 
 	// ── Pre-flight: Gateway API CRDs ────────────────────────────────────
 	fmt.Println("  Installing Gateway API CRDs...")
-	if err := kubectl("apply", "--server-side", "--force-conflicts", "-f", gatewayAPICRDsURL); err != nil {
+	if err := kubectlRetry(3, "apply", "--server-side", "--force-conflicts", "-f", gatewayAPICRDsURL); err != nil {
 		return fmt.Errorf("install Gateway API CRDs: %w", err)
 	}
 
