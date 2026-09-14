@@ -185,7 +185,8 @@ kc create namespace "$denied" >/dev/null 2>&1 || true
 kc label namespace "$denied" --overwrite celln.sympozium.ai/excluded=true >/dev/null
 # The tenant path is the API: list the profiles the namespace may run, then
 # have the wrappers created. No label, no YAML.
-api_token="$(kc -n sympozium-system get deploy sympozium-apiserver -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="SYMPOZIUM_UI_TOKEN")].value}')"
+api_token="$(kc -n sympozium-system get secret sympozium-ui-token -o jsonpath='{.data.token}' 2>/dev/null | base64 -d || true)"
+[ -n "$api_token" ] || api_token="$(kc -n sympozium-system get deploy sympozium-apiserver -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="SYMPOZIUM_UI_TOKEN")].value}')"
 api_auth=()
 [ -n "$api_token" ] && api_auth=(-H "Authorization: Bearer $api_token")
 kc -n sympozium-system port-forward svc/sympozium-apiserver 18080:8080 >/dev/null 2>&1 &
