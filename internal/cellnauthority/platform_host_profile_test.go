@@ -63,6 +63,30 @@ func TestPlatformResolverBindsHostProfileRouteToRuntimeNative(t *testing.T) {
 	if err := f.resolver.Revalidate(ctx, f.runKey, *resolution); err != nil {
 		t.Fatalf("stable host-profile route failed revalidation: %v", err)
 	}
+	// The controller freezes the connection's route into spec.model; a mirror is
+	// not an override, a different profile is.
+	var run api.AgentRun
+	if err := f.client.Get(ctx, f.runKey, &run); err != nil {
+		t.Fatal(err)
+	}
+	run.Spec.Model.Provider, run.Spec.Model.Protocol, run.Spec.Model.BaseURL, run.Spec.Model.CredentialProfile = "openai", "openai-chat", "https://model.example/v1/chat/completions", "starter"
+	if err := f.client.Update(ctx, &run); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.resolver.Resolve(ctx, f.runKey, request); err != nil {
+		t.Fatalf("mirrored connection route treated as an override: %v", err)
+	}
+	run.Spec.Model.CredentialProfile = "other"
+	if err := f.client.Update(ctx, &run); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.resolver.Resolve(ctx, f.runKey, request); PlatformReason(err) != ReasonRouteMismatch {
+		t.Fatalf("foreign credential profile on the run accepted: %v", err)
+	}
+	run.Spec.Model.CredentialProfile = "starter"
+	if err := f.client.Update(ctx, &run); err != nil {
+		t.Fatal(err)
+	}
 	setPolicyAuth("secret")
 	if _, err := f.resolver.Resolve(ctx, f.runKey, request); PlatformReason(err) != ReasonRouteMismatch {
 		t.Fatalf("policy requiring Secret custody accepted a host credential: %v", err)

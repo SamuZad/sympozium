@@ -498,7 +498,9 @@ func resolveDecisionRoute(s platformSnapshot, required bool) (DecisionRouteBindi
 	if err := c.Spec.Validate(); err != nil || c.Spec.Disabled || c.DeletionTimestamp != nil || !slices.Contains(c.Spec.Models, s.Run.Spec.Model.Model) {
 		return empty, deny(ReasonRouteMismatch, "model connection is disabled, incompatible, or does not list the model")
 	}
-	if s.Run.Spec.Model.Provider != "" && s.Run.Spec.Model.Provider != c.Spec.Provider || s.Run.Spec.Model.BaseURL != "" && s.Run.Spec.Model.BaseURL != c.Spec.Endpoint || s.Run.Spec.Model.Protocol != "" && s.Run.Spec.Model.Protocol != c.Spec.Protocol || s.Run.Spec.Model.AuthSecretRef != "" || s.Run.Spec.Model.CredentialProfile != "" || s.Run.Spec.Model.ModelRef != "" || s.Run.Spec.Model.AllowInsecure || len(s.Run.Spec.Model.ProviderHeaders) != 0 || s.Run.Spec.Model.ProviderHeadersSecretRef != "" || len(s.Run.Spec.Model.NodeSelector) != 0 || (s.Run.Spec.Model.Thinking != "" && s.Run.Spec.Model.Thinking != "off") {
+	// The controller persists the connection's own route into spec.model when it
+	// freezes the run; values that mirror the connection are not overrides.
+	if s.Run.Spec.Model.Provider != "" && s.Run.Spec.Model.Provider != c.Spec.Provider || s.Run.Spec.Model.BaseURL != "" && s.Run.Spec.Model.BaseURL != c.Spec.Endpoint || s.Run.Spec.Model.Protocol != "" && s.Run.Spec.Model.Protocol != c.Spec.Protocol || s.Run.Spec.Model.AuthSecretRef != "" || s.Run.Spec.Model.CredentialProfile != "" && s.Run.Spec.Model.CredentialProfile != c.Spec.CredentialProfile || s.Run.Spec.Model.ModelRef != "" || s.Run.Spec.Model.AllowInsecure && !c.Spec.AllowInsecure || len(s.Run.Spec.Model.ProviderHeaders) != 0 || s.Run.Spec.Model.ProviderHeadersSecretRef != "" || len(s.Run.Spec.Model.NodeSelector) != 0 || (s.Run.Spec.Model.Thinking != "" && s.Run.Spec.Model.Thinking != "off") {
 		return empty, deny(ReasonRouteMismatch, "inline model authority or route override is forbidden")
 	}
 	auth := "none"
