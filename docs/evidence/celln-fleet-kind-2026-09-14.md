@@ -281,6 +281,25 @@ unavailable". Nodes now publish a backend only once its key file is present
 in their own mount of the Secret, and after a rerun that added backends the
 installer waits 90 s for the running owners' mounts to follow.
 
+## A failed child is a failed turn, not lost context (Celln v0.5.17)
+
+Celln v0.5.17 (celln#125, closing celln#124) commits a child failure as a
+failed turn with a readable reason and keeps the parent. On `fleet-ci`:
+
+| Case | Before | Now |
+| --- | --- | --- |
+| Local model made a second tool call against the package's one-call budget (a real intermittent case in the journey) | parent lost after the child died; run failed as `ContextLost` | enduring run stays Running, parent Ready, `initialTurn.result.succeeded=false` with "Turn failed; no result committed: child refused: guest exited with code 1: … CELLN_HARNESS_ERROR tool call budget exhausted" |
+| Backend key replaced with an unusable value (probe on `messages`) | same `ContextLost` | one-shot `broken-one-shot-cs9gj` Failed with "Celln one-shot turn failed: Turn failed; no result committed: child refused: guest exited with code 1: CELLN_HARNESS_ERROR lent executable failed"; enduring `broken-enduring-5r56p` Running with parent Ready and no owner outcome |
+
+The journey now reports a committed failed turn immediately with its reason
+instead of waiting for a success, and the installer's sample task asks for
+exactly one tool call so the local model's optional second call does not
+make the smoke run flaky.
+
+The installer also probes every backend before touching the cluster (PR
+#548): on this run both backends answered a one-token request on their own
+protocol before the install began.
+
 ## Environment caveats
 
 - Kind nodes have no kernel in `/boot`; the dispatcher's readiness gate

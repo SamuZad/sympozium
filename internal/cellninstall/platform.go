@@ -314,7 +314,7 @@ func InstallPlatform(ctx context.Context, store client.Client, o PlatformOptions
 		Model:          api.ModelSpec{ConnectionRef: wrapperNames.Connection, Model: sample.configured.Model.Model},
 		CellnSelection: &api.CellnCatalogueSelection{RuntimeRef: wrapperNames.Runtime, ToolRefs: []api.CellnCatalogueToolRef{}, ClusterToolRefs: clusterRefs},
 		Enduring:       SessionDefaults(limits),
-		Task:           api.NewStringTask("Write violet to notes.txt using workspace-write with revision 0."),
+		Task:           api.NewStringTask("Write violet to notes.txt using workspace-write with revision 0. Make exactly that one tool call, then reply done."),
 	}}
 	if err := write("run.json", run); err != nil {
 		return err

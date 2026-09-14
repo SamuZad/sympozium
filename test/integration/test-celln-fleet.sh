@@ -48,6 +48,13 @@ log() { printf '\033[1;33m---- %s\033[0m\n' "$*"; }
 pass() { printf '\033[0;32mPASS %s\033[0m\n' "$*"; }
 fail() { printf '\033[0;31mFAIL %s\033[0m\n' "$*" >&2; exit 1; }
 kc() { kubectl --context "kind-$CLUSTER" "$@"; }
+turn_recorded() { # run namespace -> the initial turn has a committed result (either way)
+	[ -n "$(kubectl --context "kind-$CLUSTER" -n "$2" get agentrun "$1" -o jsonpath='{.status.cellnParent.initialTurn.result.succeeded}' 2>/dev/null)" ]
+}
+require_turn_succeeded() { # run namespace: a committed failed turn is reported with its reason
+	[ "$(kubectl --context "kind-$CLUSTER" -n "$2" get agentrun "$1" -o jsonpath='{.status.cellnParent.initialTurn.result.succeeded}')" = true ] ||
+		fail "initial turn of $1 failed: $(kubectl --context "kind-$CLUSTER" -n "$2" get agentrun "$1" -o jsonpath='{.status.cellnParent.initialTurn.result.answer}' | cut -c1-300)"
+}
 wait_for() { # description seconds command...
 	local what="$1" limit="$2" i=0
 	shift 2
@@ -197,7 +204,8 @@ launch_of() { kc -n "$NAMESPACE" get agentrun "$1" -o jsonpath='{.status.cellnPa
 first="$(kc -n "$NAMESPACE" create -f "$WORK/fleet-out/installation/run.json" -o jsonpath='{.metadata.name}')"
 wait_for "parent $first ready" 240 run_ready "$first"
 [ "$(kc -n "$NAMESPACE" get agentrun "$first" -o jsonpath='{.status.cellnParent.binding.target}')" = "http://celln-router.celln-system.svc.cluster.local:8787" ] || fail "$first not issued through the gateway"
-wait_for "initial turn of $first" 240 bash -c "kubectl --context kind-$CLUSTER -n $NAMESPACE get agentrun $first -o jsonpath='{.status.cellnParent.initialTurn.result.succeeded}' | grep -q true"
+wait_for "initial turn of $first" 240 turn_recorded "$first" "$NAMESPACE"
+require_turn_succeeded "$first" "$NAMESPACE"
 first_node="$(node_of "$(launch_of "$first")")"
 [ -n "$first_node" ] || fail "owner of $first not found"
 pass "$first issued through the gateway to $first_node and completed a real model turn"
@@ -226,7 +234,8 @@ done
 [ -n "$colocated" ] || fail "no run hashed to $first_node in ${#extra[@]} attempts"
 if [ "${FLEET_EXPECT_COLOCATION:-1}" = 1 ]; then
 	wait_for "parent $colocated ready beside $first on $first_node" 240 run_ready "$colocated"
-	wait_for "initial turn of $colocated" 240 bash -c "kubectl --context kind-$CLUSTER -n $NAMESPACE get agentrun $colocated -o jsonpath='{.status.cellnParent.initialTurn.result.succeeded}' | grep -q true"
+	wait_for "initial turn of $colocated" 240 turn_recorded "$colocated" "$NAMESPACE"
+	require_turn_succeeded "$colocated" "$NAMESPACE"
 	run_ready "$first" || fail "$first lost readiness when $colocated joined $first_node"
 	pass "$colocated and $first are both live on $first_node and $colocated completed a real model turn"
 else
@@ -328,7 +337,8 @@ fi
 kill "$api_pf" >/dev/null 2>&1 || true
 for run in "${tenant_runs[@]}"; do
 	wait_for "parent $run ready in $tenant" 240 run_ready "$run" "$tenant"
-	wait_for "initial turn of $run" 300 bash -c "kubectl --context kind-$CLUSTER -n $tenant get agentrun $run -o jsonpath='{.status.cellnParent.initialTurn.result.succeeded}' | grep -q true"
+	wait_for "initial turn of $run" 300 turn_recorded "$run" "$tenant"
+	require_turn_succeeded "$run" "$tenant"
 done
 [ "$(kc -n "$tenant" get agentrun "$tenant_run2" -o jsonpath='{.status.cellnParent.binding.incarnation}')" != "$(kc -n "$tenant" get agentrun "$tenant_run" -o jsonpath='{.status.cellnParent.binding.incarnation}')" ] || fail "two conversations shared a parent"
 pass "two enduring conversations of one Agent started through the API in $tenant, each with its own parent"
