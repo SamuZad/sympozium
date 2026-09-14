@@ -46,8 +46,15 @@ func (r *AgentRunReconciler) sharedCatalogueSelected(ctx context.Context, run *a
 	// the prepared native parent path is actually configured, and even then
 	// explicit shared intent (cluster tools, a platform profile) never reaches
 	// legacy parent issuance.
-	if run.Spec.ExecutionLifecycle == "enduring" && (r.ScopedDispatcher != nil || r.ParentAdmission == nil) {
-		return true, nil
+	if run.Spec.ExecutionLifecycle == "enduring" {
+		if r.ScopedDispatcher != nil || r.ParentAdmission == nil {
+			return true, nil
+		}
+		// A platform-capable parent admission resolves wrapper runtimes and
+		// cluster tools itself (the fleet); it never issues from namespace grants.
+		if r.ParentAdmission.SupportsPlatform() {
+			return false, nil
+		}
 	}
 	if len(selection.ClusterToolRefs) != 0 {
 		return true, nil

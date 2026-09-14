@@ -14,6 +14,7 @@ import (
 
 	"github.com/go-logr/logr"
 	api "github.com/sympozium-ai/sympozium/api/v1alpha1"
+	"github.com/sympozium-ai/sympozium/internal/cellnauthority"
 	"github.com/sympozium-ai/sympozium/internal/cellnparent"
 	"github.com/zeebo/blake3"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -27,6 +28,8 @@ type parentAdmissionFunc func(context.Context, types.NamespacedName) error
 func (f parentAdmissionFunc) Admit(ctx context.Context, key types.NamespacedName) error {
 	return f(ctx, key)
 }
+
+func (parentAdmissionFunc) SupportsPlatform() bool { return false }
 
 func TestCellnParentAdmissionFailureDoesNotStart(t *testing.T) {
 	run := newTestCellnRun(t, "refused-parent", "refused-parent-uid")
@@ -55,6 +58,26 @@ func TestCellnParentAdmissionFailureDoesNotStart(t *testing.T) {
 	if condition == nil || condition.Status != "False" || condition.Reason != "AdmissionPending" || strings.Contains(condition.Message, "no prepared registration") {
 		t.Fatal("missing safe admission status")
 	}
+	// A platform refusal surfaces only its stable reason code, never a path.
+	r.ParentAdmission = parentAdmissionFunc(func(context.Context, types.NamespacedName) error {
+		return &cellnauthority.PlatformResolutionError{Reason: cellnauthority.ReasonPolicyWithdrawn, Detail: "no execution policy selects the namespace /var/lib/secret-path"}
+	})
+	if _, err := r.reconcileCellnParent(context.Background(), run); err == nil {
+		t.Fatal("platform refusal ignored")
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(run), &fresh); err != nil {
+		t.Fatal(err)
+	}
+	if condition = meta.FindStatusCondition(fresh.Status.Conditions, "CellnParentReady"); condition == nil || !strings.Contains(condition.Message, cellnauthority.ReasonPolicyWithdrawn) || strings.Contains(condition.Message, "/var/lib") {
+		t.Fatalf("platform refusal not reported by stable reason: %+v", condition)
+	}
+	r.ParentAdmission = parentAdmissionFunc(func(context.Context, types.NamespacedName) error { return fmt.Errorf("no prepared registration") })
+	if _, err := r.reconcileCellnParent(context.Background(), run); err == nil {
+		t.Fatal("generic refusal after platform refusal ignored")
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(run), &fresh); err != nil {
+		t.Fatal(err)
+	}
 	version := fresh.ResourceVersion
 	if _, err := r.reconcileCellnParent(context.Background(), &fresh); err == nil {
 		t.Fatal("second refusal ignored")
@@ -71,7 +94,7 @@ func TestCellnParentAdmissionFailureDoesNotStart(t *testing.T) {
 	if err := r.Status().Update(context.Background(), &fresh); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.recordParentAdmissionPending(context.Background(), run); err != nil {
+	if err := r.recordParentAdmissionPending(context.Background(), run, fmt.Errorf("stale")); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.Get(context.Background(), client.ObjectKeyFromObject(run), &fresh); err != nil {

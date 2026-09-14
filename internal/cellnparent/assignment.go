@@ -55,7 +55,11 @@ func claimParentAssignment(journal string, approval RunApproval, registrationHas
 // Both assignment and approval publication use the same non-replacing durable
 // primitive. Inputs come only from validated, operator-scoped callers.
 func publishParentRecord(journal, name string, raw []byte) error {
-	if !filepath.IsAbs(journal) || filepath.Base(name) != name || name == "." || name == ".." || len(raw) > 16384 {
+	return publishBoundedRecord(journal, name, raw, 16384)
+}
+
+func publishBoundedRecord(journal, name string, raw []byte, limit int) error {
+	if !filepath.IsAbs(journal) || filepath.Base(name) != name || name == "." || name == ".." || len(raw) > limit {
 		return fmt.Errorf("invalid bounded parent record location")
 	}
 	// Require a pre-existing operator directory. Never create arbitrary ancestors.
@@ -91,7 +95,7 @@ func publishParentRecord(journal, name string, raw []byte) error {
 		if !os.IsExist(err) {
 			return fmt.Errorf("atomic assignment publication unsupported or failed")
 		}
-		existing, readErr := boundedFile(path, 16384)
+		existing, readErr := boundedFile(path, int64(limit))
 		if readErr != nil || !bytes.Equal(existing, raw) {
 			return fmt.Errorf("parent incarnation already assigned differently or journal uncertain")
 		}
