@@ -194,20 +194,36 @@ journey on a three-node Kind cluster, including a node-leave drain.
 
 ## Capacity
 
-The gateway places each parent by incarnation hash, not by load, and an owner
-that refuses a create for capacity ends that run (`Parent outcome unavailable`)
-rather than re-placing it. **Celln v0.5.11 holds one parent per node**: while
-any parent is live the dispatcher advertises no spare egress (its parent
-registry does not yet charge exact broker slots), so a second parent — or an
-egress-using one-shot — placed on that node is refused. Plan one parent per
-labeled node and add nodes for more; per-parent broker accounting is tracked
-in the Celln repository. `maxCells`, `memoryBytes` and `egressSlots` still
-bound one-shot work on an idle node.
+Each node sizes itself when its dispatcher starts (`celln.fleet.capacity:
+auto`, the default): it may reserve `memoryPercent` (75) of the node's memory
+— the container's cgroup limit when one is set — for guests, allows one cell
+per `cellMemoryBytes` (640 MiB) up to `maxCellsCeiling`, and one broker slot
+per cell. The dispatcher logs the result (`celln capacity: node=… cells=…`).
+A native parent charges two cells, two broker slots and its declared memory
+(1.25 GiB for the starter profile). For nominal node sizes (the kernel reports
+slightly less, so real numbers come out a little lower):
+
+| Node memory | Cells | Parents per node |
+| --- | --- | --- |
+| 16 GiB | 19 | 9 |
+| 64 GiB | 76 | 38 |
+| 256 GiB | 307 | 153 |
+
+Set `capacity: fixed` with `maxCells`, `memoryBytes` and `egressSlots` to pin
+exact numbers, or lower `memoryPercent` on nodes that run other workloads.
+
+Per-parent broker charging needs a Celln release that includes it (celln#112);
+**Celln v0.5.11 still holds one parent per node** whatever the budget says.
+
+The gateway places each parent by incarnation hash, not by load. An owner that
+refuses a create for capacity ends that run with `CellnParentReady` reason
+`CreateRefused` ("create a new run"); the incarnation is never retried and the
+run deletes cleanly. Capacity-aware placement in the gateway is tracked in
+#464 (P1b).
 
 ## Limits
 
 Single active turn per parent, no parent migration or checkpoint recovery,
-no live lease extension, and the model credential Secret is an interim
-boundary. Namespace enablement still creates the catalogue in the target
-namespace; the cluster-scoped profile/policy path (#495, #505) is the next
-step toward "any authorised namespace".
+no live lease extension, and the model credential Secret mounted into every
+dispatcher is an interim boundary until the model gateway attaches to native
+parents (#464 P1c). Profiles are fixed by the starter package (#535).
