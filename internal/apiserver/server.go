@@ -521,7 +521,12 @@ type CellnPlatformProfile struct {
 	Endpoint          string `json:"endpoint"`
 	CredentialProfile string `json:"credentialProfile"`
 	SystemPrompt      string `json:"systemPrompt"`
-	Wrapper           string `json:"wrapper"`
+	// Backend names the fleet model backend this profile runs on ("native"
+	// for the default); Wrapper and Agent are the namespace's AgentRuntime
+	// and Agent for it, created on first use.
+	Backend string `json:"backend"`
+	Wrapper string `json:"wrapper"`
+	Agent   string `json:"agent"`
 	// Ceilings are the policy's per-parent maxima; SessionDefaults is the
 	// budget a new conversation should ask for (within them).
 	Ceilings        sympoziumv1alpha1.EnduringRunSpec `json:"ceilings"`
@@ -549,7 +554,8 @@ func (s *Server) listCellnPlatformProfiles(w http.ResponseWriter, r *http.Reques
 		connection := objects[2].(*sympoziumv1alpha1.ModelConnection)
 		c := a.Policy.Spec.Ceilings
 		ceilings := sympoziumv1alpha1.EnduringRunSpec{LeaseSeconds: int32(min(c.MaxParentLeaseSeconds, 86400)), MaxTurns: int32(min(c.MaxTurns, 1024)), MaxModelRequests: int32(min(c.MaxModelRequests, 6144)), MaxOutputTokens: c.MaxOutputTokens}
-		out = append(out, CellnPlatformProfile{Name: a.Profile.Name, Revision: a.Profile.Spec.Revision, Policy: a.Policy.Name, Model: connection.Spec.Models[0], Provider: connection.Spec.Provider, Endpoint: connection.Spec.Endpoint, CredentialProfile: connection.Spec.CredentialProfile, SystemPrompt: a.Profile.Spec.Native.SystemPrompt, Wrapper: cellnplatform.WrapperRuntimeName, Ceilings: ceilings, SessionDefaults: *cellninstall.SessionDefaults(ceilings)})
+		names := cellnplatform.WrapperNames(cellnplatform.Backend(&a.Profile))
+		out = append(out, CellnPlatformProfile{Name: a.Profile.Name, Revision: a.Profile.Spec.Revision, Policy: a.Policy.Name, Model: connection.Spec.Models[0], Provider: connection.Spec.Provider, Endpoint: connection.Spec.Endpoint, CredentialProfile: connection.Spec.CredentialProfile, SystemPrompt: a.Profile.Spec.Native.SystemPrompt, Backend: names.Backend, Wrapper: names.Runtime, Agent: names.Agent, Ceilings: ceilings, SessionDefaults: *cellninstall.SessionDefaults(ceilings)})
 	}
 	writeJSON(w, out)
 }

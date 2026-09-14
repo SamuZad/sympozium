@@ -24,16 +24,22 @@ func TestCellnPlatformProfilesAndWrappersFollowTheNamespacePolicy(t *testing.T) 
 	_ = corev1.AddToScheme(scheme)
 	raw := func(s string) apiextensionsv1.JSON { return apiextensionsv1.JSON{Raw: []byte(s)} }
 	profile := &sympoziumv1alpha1.CellnRuntimeProfile{ObjectMeta: metav1.ObjectMeta{Name: "celln-native-trial"}, Spec: sympoziumv1alpha1.CellnRuntimeProfileSpec{Revision: "v1", Native: &sympoziumv1alpha1.CellnNativeProvisioning{CredentialProfile: "trial", SystemPrompt: "host persona", Template: raw(`{"model":"deepseek-chat","url":"https://api.deepseek.com/chat/completions"}`)}}}
+	// A second backend of the same scope: its profile is labeled with the
+	// backend name and gets its own wrapper names.
+	local := &sympoziumv1alpha1.CellnRuntimeProfile{ObjectMeta: metav1.ObjectMeta{Name: "celln-native-trial-local", Labels: map[string]string{cellnplatform.BackendLabel: "local"}}, Spec: sympoziumv1alpha1.CellnRuntimeProfileSpec{Revision: "v1", Native: &sympoziumv1alpha1.CellnNativeProvisioning{CredentialProfile: "trial-local", SystemPrompt: "host persona", Template: raw(`{"model":"qwen.gguf","url":"http://100.81.163.75:8080/v1/chat/completions","allow_insecure":true}`)}}}
 	policy := &sympoziumv1alpha1.CellnExecutionPolicy{ObjectMeta: metav1.ObjectMeta{Name: "celln-fleet-trial"}, Spec: sympoziumv1alpha1.CellnExecutionPolicySpec{
 		NamespaceSelector: cellnplatform.OpenSelector(cellnplatform.SystemNamespaces("sympozium-system")),
-		RuntimeProfiles:   []sympoziumv1alpha1.CellnExecutionPolicyRuntime{{Ref: sympoziumv1alpha1.CellnRuntimeProfileRef{Name: profile.Name, Revision: "v1"}}},
-		Routes:            []sympoziumv1alpha1.CellnExecutionPolicyRoute{{Provider: "deepseek", Protocol: "openai-chat", Models: []string{"deepseek-chat"}, EndpointOrigins: []string{"https://api.deepseek.com"}, Auth: "host-profile"}},
-		Ceilings:          sympoziumv1alpha1.CellnExecutionPolicyCeilings{MaxTurns: 256, MaxModelRequests: 768, MaxOutputTokens: 393216, MaxParentLeaseSeconds: 86400, MaxTurnSeconds: 60},
+		RuntimeProfiles:   []sympoziumv1alpha1.CellnExecutionPolicyRuntime{{Ref: sympoziumv1alpha1.CellnRuntimeProfileRef{Name: profile.Name, Revision: "v1"}}, {Ref: sympoziumv1alpha1.CellnRuntimeProfileRef{Name: local.Name, Revision: "v1"}}},
+		Routes: []sympoziumv1alpha1.CellnExecutionPolicyRoute{
+			{Provider: "deepseek", Protocol: "openai-chat", Models: []string{"deepseek-chat"}, EndpointOrigins: []string{"https://api.deepseek.com"}, Auth: "host-profile"},
+			{Provider: "llama-server", Protocol: "openai-chat", Models: []string{"qwen.gguf"}, EndpointOrigins: []string{"http://100.81.163.75:8080"}, Auth: "host-profile", AllowInsecure: true},
+		},
+		Ceilings: sympoziumv1alpha1.CellnExecutionPolicyCeilings{MaxTurns: 256, MaxModelRequests: 768, MaxOutputTokens: 393216, MaxParentLeaseSeconds: 86400, MaxTurnSeconds: 60},
 	}}
 	ns := func(name string) *corev1.Namespace {
 		return &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{cellnplatform.NamespaceNameLabel: name}}}
 	}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(profile, policy, ns("team-a"), ns("sympozium-system")).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(profile, local, policy, ns("team-a"), ns("sympozium-system")).Build()
 	srv := NewServer(cl, nil, nil, logr.Discard())
 	get := func(namespace string) []CellnPlatformProfile {
 		t.Helper()
@@ -48,8 +54,16 @@ func TestCellnPlatformProfilesAndWrappersFollowTheNamespacePolicy(t *testing.T) 
 		}
 		return out
 	}
-	if got := get("team-a"); len(got) != 1 || got[0].Name != "celln-native-trial" || got[0].Provider != "deepseek" || got[0].Model != "deepseek-chat" || got[0].CredentialProfile != "trial" || got[0].Wrapper != "celln-native" || got[0].SystemPrompt != "host persona" || got[0].Ceilings.LeaseSeconds != 86400 || got[0].SessionDefaults.LeaseSeconds != 14400 || got[0].SessionDefaults.MaxTurns != 64 {
+	got := get("team-a")
+	byName := map[string]CellnPlatformProfile{}
+	for _, p := range got {
+		byName[p.Name] = p
+	}
+	if p := byName["celln-native-trial"]; len(got) != 2 || p.Provider != "deepseek" || p.Model != "deepseek-chat" || p.CredentialProfile != "trial" || p.Backend != "native" || p.Wrapper != "celln-native" || p.Agent != "celln-agent" || p.SystemPrompt != "host persona" || p.Ceilings.LeaseSeconds != 86400 || p.SessionDefaults.LeaseSeconds != 14400 || p.SessionDefaults.MaxTurns != 64 {
 		t.Fatalf("tenant profiles: %+v", got)
+	}
+	if p := byName["celln-native-trial-local"]; p.Provider != "llama-server" || p.Model != "qwen.gguf" || p.CredentialProfile != "trial-local" || p.Backend != "local" || p.Wrapper != "celln-local" || p.Agent != "celln-agent-local" {
+		t.Fatalf("second backend must be offered with its own wrapper names: %+v", p)
 	}
 	if got := get("sympozium-system"); len(got) != 0 {
 		t.Fatalf("control-plane namespace offered profiles: %+v", got)

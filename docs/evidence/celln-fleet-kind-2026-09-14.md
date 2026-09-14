@@ -208,6 +208,33 @@ password began with a digit, `nats.conf` references it as a bare variable,
 NATS crash-looped and the controller never became ready (about one install
 in six). Fixed in the chart in PR #542.
 
+## Several model backends per scope (#535)
+
+One scope, two backends, every node configures both, one namespace runs
+parents on either. On `fleet-ci` (two KVM workers) the scope `ci` was
+installed with `--celln-fleet-backend` twice against the framework machine's
+llama-server: `native` over `openai-chat` (`/v1/chat/completions`) and
+`messages` over `anthropic-messages` (`/v1/messages`), same model, same
+origin, different protocol.
+
+| Check | Result |
+| --- | --- |
+| Node preparation | Each node ran `starter-configure` twice from the one admitted package and published `native.*` and `messages.*` keys in `celln-fleet-configuration`; the second node verified. |
+| Catalogue | Profiles `celln-native-ci` (backend `native`, protocol `openai-chat`, credential `ci`) and `celln-native-ci-messages` (backend `messages`, protocol `anthropic-messages`, credential `ci-messages`); one policy `celln-fleet-ci` with both profiles and both routes. |
+| Credentials | Secrets `celln-fleet-model-credential` and `celln-fleet-model-credential-messages`, each mounted read-only into every dispatcher at its own directory (`/etc/celln-native`, `/etc/celln-native/messages`); the prepare step mounts neither. |
+| Tenant | Label-free `celln-agents-b` was offered both profiles by the API and got wrappers `celln-native`/`celln-agent` and `celln-messages`/`celln-agent-messages`, each connection bound to the route of its own protocol. |
+| Runs | Three conversations at once in that namespace: two of `celln-agent` on `native`, one of `celln-agent-messages` on `messages`. The `messages` parent answered "Botswana is a landlocked country in southern Africa, bordered by South Africa, Namibia, Zimbabwe, and Zambia." |
+| Everything else | Real turns, follow-up context, gateway deletes, excluded namespace refused, node leave → ContextLost, clean delete — all passed. |
+
+A first attempt paired DeepSeek (`native`) with llama-server (`local`). The
+install was correct (two profiles, two Secrets, prefixed ConfigMap keys,
+both wrappers) but DeepSeek was returning `503 Service is too busy` and then
+hanging for 60 s at the time; its parents lost context after the 60 s turn
+deadline while the llama-server parent answered in seconds. The pair with
+two llama-server protocols was run instead. Worth noting: a provider outage
+surfaces as `ContextLost` rather than a failed turn, which is a Celln
+owner behaviour to look at separately.
+
 ## Environment caveats
 
 - Kind nodes have no kernel in `/boot`; the dispatcher's readiness gate

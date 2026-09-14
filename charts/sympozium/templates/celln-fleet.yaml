@@ -19,17 +19,46 @@
 {{- if not .Values.celln.router.parentTokenSecret }}
 {{- fail "celln.fleet requires router.parentTokenSecret for gateway parent routing" }}
 {{- end }}
-{{- $model := $fleet.modelCredential | default dict }}
-{{- $credential := $model.path | default "" }}
-{{- if or (not $model.secret) (not (hasPrefix "/" $credential)) (contains ".." $credential) (eq (dir $credential) "/") (hasSuffix "/" $credential) }}
-{{- fail "celln.fleet.modelCredential requires a Secret and a clean absolute file path in a dedicated directory" }}
+{{- /* Model backends: the celln.fleet.backends list, or the legacy single
+     backend named native built from celln.fleet.model + modelCredential.
+     Every node configures every backend and mounts every credential. */}}
+{{- $backends := list }}
+{{- range $fleet.backends | default list }}
+{{- $backends = append $backends . }}
 {{- end }}
-{{- $modelRoute := $fleet.model | default dict }}
-{{- if and $modelRoute.endpoint (or (not $modelRoute.name) (not (has ($modelRoute.protocol | default "") (list "openai-chat" "anthropic-messages"))) (not $modelRoute.provider)) }}
-{{- fail "celln.fleet.model.endpoint needs provider, name and protocol openai-chat or anthropic-messages" }}
+{{- if not $backends }}
+{{- $legacyModel := $fleet.model | default dict }}
+{{- $legacyCredential := $fleet.modelCredential | default dict }}
+{{- $backends = list (dict "name" "native" "provider" ($legacyModel.provider | default "") "protocol" ($legacyModel.protocol | default "") "endpoint" ($legacyModel.endpoint | default "") "model" ($legacyModel.name | default "") "allowInsecure" ($legacyModel.allowInsecure | default false) "credentialSecret" ($legacyCredential.secret | default "") "credentialPath" ($legacyCredential.path | default "/etc/celln-native/model-token")) }}
 {{- end }}
-{{- if and $modelRoute.endpoint (hasPrefix "http://" $modelRoute.endpoint) (not $modelRoute.allowInsecure) }}
-{{- fail "celln.fleet.model.endpoint is plain HTTP; set celln.fleet.model.allowInsecure=true to approve it" }}
+{{- if gt (len $backends) 32 }}
+{{- fail "celln.fleet.backends allows at most 32 model backends per scope" }}
+{{- end }}
+{{- $backendNames := dict }}
+{{- $credentialDirs := dict }}
+{{- $backendExport := list }}
+{{- range $b := $backends }}
+{{- $name := $b.name | default "" }}
+{{- if or (not (regexMatch "^[a-z0-9][a-z0-9-]{0,31}$" $name)) (hasKey $backendNames $name) }}
+{{- fail (printf "celln.fleet.backends: names must be unique DNS labels of at most 32 characters: %q" $name) }}
+{{- end }}
+{{- $_ := set $backendNames $name true }}
+{{- $credential := $b.credentialPath | default "" }}
+{{- if or (not $b.credentialSecret) (not (hasPrefix "/" $credential)) (contains ".." $credential) (eq (dir $credential) "/") (hasSuffix "/" $credential) }}
+{{- fail (printf "celln.fleet.backends[%s] requires credentialSecret and a clean absolute credentialPath in a dedicated directory" $name) }}
+{{- end }}
+{{- if hasKey $credentialDirs (dir $credential) }}
+{{- fail (printf "celln.fleet.backends[%s]: credentialPath directory %s is already used by another backend" $name (dir $credential)) }}
+{{- end }}
+{{- $_ := set $credentialDirs (dir $credential) $name }}
+{{- $endpoint := $b.endpoint | default "" }}
+{{- if and $endpoint (or (not $b.model) (not (has ($b.protocol | default "") (list "openai-chat" "anthropic-messages"))) (not $b.provider)) }}
+{{- fail (printf "celln.fleet.backends[%s].endpoint needs provider, model and protocol openai-chat or anthropic-messages" $name) }}
+{{- end }}
+{{- if and $endpoint (hasPrefix "http://" $endpoint) (not $b.allowInsecure) }}
+{{- fail (printf "celln.fleet.backends[%s].endpoint is plain HTTP; set allowInsecure=true to approve it" $name) }}
+{{- end }}
+{{- $backendExport = append $backendExport (dict "name" $name "provider" ($b.provider | default "") "protocol" ($b.protocol | default "") "endpoint" $endpoint "model" ($b.model | default "") "allowInsecure" ($b.allowInsecure | default false) "credentialFile" $credential) }}
 {{- end }}
 {{- $limits := $fleet.limits | default dict }}
 {{- $lease := int64 ($limits.leaseSeconds | default 0) }}
@@ -201,20 +230,10 @@ spec:
               value: {{ $fleet.publisher | quote }}
             - name: FLEET_PRINCIPAL
               value: {{ $fleet.principal | quote }}
-            - name: FLEET_MODEL_CREDENTIAL_FILE
-              value: {{ $credential | quote }}
             - name: FLEET_SCOPE
               value: {{ $fleet.scope | quote }}
-            - name: FLEET_MODEL_PROVIDER
-              value: {{ $modelRoute.provider | default "" | quote }}
-            - name: FLEET_MODEL_PROTOCOL
-              value: {{ $modelRoute.protocol | default "" | quote }}
-            - name: FLEET_MODEL_ENDPOINT
-              value: {{ $modelRoute.endpoint | default "" | quote }}
-            - name: FLEET_MODEL_NAME
-              value: {{ $modelRoute.name | default "" | quote }}
-            - name: FLEET_MODEL_ALLOW_INSECURE
-              value: {{ $modelRoute.allowInsecure | default false | quote }}
+            - name: FLEET_BACKENDS
+              value: {{ toJson $backendExport | quote }}
             - name: FLEET_LIMIT_LEASE_SECONDS
               value: {{ $limits.leaseSeconds | default 0 | quote }}
             - name: FLEET_LIMIT_MAX_TURNS
@@ -348,9 +367,11 @@ spec:
               readOnly: true
             - name: state
               mountPath: {{ $state | quote }}
-            - name: model-credential
-              mountPath: {{ dir $credential | quote }}
+            {{- range $b := $backendExport }}
+            - name: {{ printf "model-credential-%s" $b.name | quote }}
+              mountPath: {{ dir $b.credentialFile | quote }}
               readOnly: true
+            {{- end }}
             - name: kvm
               mountPath: /dev/kvm
             - name: boot
@@ -392,13 +413,15 @@ spec:
           secret:
             secretName: {{ $backendSecret | quote }}
             defaultMode: 0440
-        - name: model-credential
+        {{- range $i, $b := $backendExport }}
+        - name: {{ printf "model-credential-%s" $b.name | quote }}
           secret:
-            secretName: {{ $model.secret | quote }}
+            secretName: {{ (index $backends $i).credentialSecret | quote }}
             defaultMode: 0400
             items:
               - key: token
-                path: {{ base $credential | quote }}
+                path: {{ base $b.credentialFile | quote }}
+        {{- end }}
         - name: state
           hostPath:
             path: {{ $state | quote }}

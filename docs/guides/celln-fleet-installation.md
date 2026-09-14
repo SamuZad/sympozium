@@ -29,9 +29,11 @@ controller mounts no host state at all, and no node is ever named in values.
   BLAKE3 hash as the client policy every node installs. Owners never see the
   token; the controller never sees the policy. Rerunning the installer verifies
   the pair and refuses to rotate it by replacement.
-- **Model credential.** The model profile references an absolute file path.
-  In fleet mode that file is a Secret (`celln-fleet-model-credential`) mounted
-  read-only into each dispatcher; guests and the controller cannot read it.
+- **Model credentials.** Each backend's model profile references an absolute
+  file path. In fleet mode that file is a Secret (`celln-fleet-model-credential`
+  for the `native` backend, `celln-fleet-model-credential-<name>` otherwise)
+  mounted read-only into each dispatcher; guests and the controller cannot
+  read it.
   This keeps the key inside the cluster trust boundary until the dedicated
   model gateway (#502) is attached to native parents; treat it as interim.
 - **Configuration publication.** Only the DaemonSet's init step holds a
@@ -94,8 +96,9 @@ The command runs two phases and is safe to rerun:
 1. Publishes the parent principal and model credential, then installs the
    chart with `celln.fleet.*` set. Labeled nodes pull the package by digest,
    verify `package.json` against the hash, run `starter-admit` (real guest
-   member checks on KVM) and `starter-configure`, and the first node publishes
-   `catalogue.json`, `configured.json` and `native-template.json` as the
+   member checks on KVM) and `starter-configure` once per model backend, and
+   the first node publishes each backend's `catalogue.json`, `configured.json`
+   and `native-template.json` (keys `<backend>.<file>`) as the
    `celln-fleet-configuration` ConfigMap. Later nodes verify they derived
    identical files; a different package under the same scope is refused.
 2. Waits (default 15 minutes, `--celln-fleet-wait`) for that ConfigMap,
@@ -108,30 +111,65 @@ If the wait expires, label a node, inspect the `prepare` init container's log
 in `celln-system`, and rerun the same command: existing trust, credential,
 configuration and installation records are verified, never replaced.
 
-## Choosing the model backend
+## Model backends
 
-The scope has one model backend, set at install time and configured on every
-node. DeepSeek is the default; pass `--celln-fleet-model-provider` for another:
+A scope carries one or more model backends, all set at install time and
+configured on every node. Each backend becomes a runtime profile
+(`celln-native-<scope>[-<name>]`) admitted by the scope's single policy, and
+every namespace gets one AgentRuntime wrapper and one Agent per backend
+(`celln-native` / `celln-agent` for the backend named `native`,
+`celln-<name>` / `celln-agent-<name>` for the others), so dozens of enduring
+instances on different providers run side by side in the same namespace. The
+API lists every backend a namespace may use
+(`GET /api/v1/celln-platform/profiles`, fields `backend`, `wrapper`, `agent`)
+and the wizard offers each wrapper as a runtime.
 
-| Backend | Flags | Credential |
+Declare backends with `--celln-fleet-backend` (repeatable):
+
+```sh
+sympozium install -n celln-agents --celln-fleet ... \
+  --celln-fleet-backend name=native,provider=deepseek,model=deepseek-chat,credential-file=/path/to/deepseek-key \
+  --celln-fleet-backend name=claude,provider=anthropic,model=claude-sonnet-5,credential-file=/path/to/anthropic-key \
+  --celln-fleet-backend name=local,provider=llama-server,model=MODEL.gguf,endpoint=http://HOST:8080/v1/chat/completions,allow-insecure=true
+```
+
+Keys: `name` (DNS label, at most 32 characters, unique), `provider`, `model`,
+`endpoint`, `protocol` (`openai-chat` or `anthropic-messages`),
+`credential-file`, `allow-insecure`. Provider presets:
+
+| Provider | Defaults | Credential |
 | --- | --- | --- |
-| DeepSeek | none (model `deepseek-chat`) | `--celln-fleet-model-credential-file` with the API key |
-| OpenAI | `--celln-fleet-model-provider openai --celln-fleet-model MODEL` | the OpenAI API key |
-| Anthropic | `--celln-fleet-model-provider anthropic --celln-fleet-model MODEL` | the Anthropic API key |
-| llama-server | `--celln-fleet-model-provider llama-server --celln-fleet-model MODEL.gguf --celln-fleet-model-endpoint http://HOST:8080/v1/chat/completions --celln-fleet-model-allow-insecure` | none |
+| `deepseek` | `openai-chat`, `https://api.deepseek.com/chat/completions`, model `deepseek-chat` | the DeepSeek API key |
+| `openai` | `openai-chat`, `https://api.openai.com/v1/chat/completions` | the OpenAI API key |
+| `anthropic` | `anthropic-messages`, `https://api.anthropic.com/v1/messages` | the Anthropic API key |
+| `llama-server` | `openai-chat`; `endpoint` required, e.g. `http://HOST:8080/v1/chat/completions` | none |
 
 Any other OpenAI- or Anthropic-compatible service works with a custom
-provider name plus `--celln-fleet-model-endpoint` and
-`--celln-fleet-model-protocol openai-chat|anthropic-messages`.
+provider name plus `endpoint` and `protocol`. Without `--celln-fleet-backend`
+the `--celln-fleet-model-*` flags and `--celln-fleet-model-credential-file`
+define the single backend named `native`.
 
+- Each backend's key is published once as its own Secret in `celln-system`
+  (`celln-fleet-model-credential` for `native`,
+  `celln-fleet-model-credential-<name>` otherwise) and mounted read-only into
+  every dispatcher under `/etc/celln-native/[<name>/]model-token`. Omit
+  `credential-file` to keep an existing Secret; keyless backends get a
+  placeholder.
+- Every node configures every backend from the same package, so all backends
+  share the package's tools, persona and ceilings and differ only in their
+  model route and credential profile (`<scope>` or `<scope>-<name>`). Two
+  backends may even share an origin and model over different protocols (a
+  llama-server's OpenAI and Anthropic routes): each profile is annotated
+  with its protocol and its wrappers bind to the matching policy route.
 - The endpoint must be reachable from the KVM nodes. Use an IP address for a
   host on a VPN or LAN if the cluster cannot resolve its name.
-- Plain HTTP or a private address needs `--celln-fleet-model-allow-insecure`.
-  The approval is recorded on the node's model profile and on each tenant's
-  connection; a cluster Secret is never sent over plain HTTP.
+- Plain HTTP or a private address needs `allow-insecure=true`. The approval
+  is recorded on the node's model profile and on each tenant's connection; a
+  cluster Secret is never sent over plain HTTP.
 - A model request may run for the whole turn, so slow local models are fine
   within the turn deadline.
-- The backend is fixed for a scope. To change it, install a new scope.
+- The backend set is fixed for a scope (at most 32). To add or change one,
+  install a new scope.
 
 ## Leases and budgets
 

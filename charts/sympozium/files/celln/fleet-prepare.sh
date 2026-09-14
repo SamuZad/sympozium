@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Prepares one KVM node's native Celln authority root from an operator-signed
 # starter package and publishes the resulting starter configuration once per
-# scope. Every step is idempotent for the same package hash. Nothing here
-# issues a run, reads the model credential or starts a guest outside the
-# package's own admission checks.
+# scope: one configuration per model backend, all from the same package.
+# Every step is idempotent for the same package hash. Nothing here issues a
+# run, reads a model credential or starts a guest outside the package's own
+# admission checks.
 set -euo pipefail
 
 : "${FLEET_STATE:?}" "${FLEET_PACKAGE_IMAGE:?}" "${FLEET_PACKAGE_HASH:?}" "${FLEET_PUBLISHER:?}"
-: "${FLEET_PRINCIPAL:?}" "${FLEET_MODEL_CREDENTIAL_FILE:?}" "${FLEET_PARENT_CLIENTS:?}"
+: "${FLEET_PRINCIPAL:?}" "${FLEET_SCOPE:?}" "${FLEET_BACKENDS:?}" "${FLEET_PARENT_CLIENTS:?}"
 : "${FLEET_CONFIGURATION_CONFIGMAP:?}" "${FLEET_NAMESPACE:?}" "${NODE_NAME:?}"
 
 celln=/usr/local/bin/celln
@@ -63,27 +64,37 @@ if [ ! -f "$admitted" ]; then
 	: >"$admitted"
 fi
 
-configuration="$FLEET_STATE/configuration-$hex"
-if [ ! -f "$configuration/configured.json" ]; then
+# Configure every backend from the same admitted package. Each backend gets
+# its own model connection, credential profile (scope for native, scope-name
+# otherwise) and configuration directory; the host limits are shared.
+backend_names="$(python3 -c 'import json, sys
+for b in json.loads(sys.argv[1]):
+    print(b["name"])' "$FLEET_BACKENDS")"
+for backend in $backend_names; do
+	configuration="$FLEET_STATE/configuration-$hex-$backend"
+	if [ -f "$configuration/configured.json" ]; then
+		continue
+	fi
 	rm -rf "$configuration"
-	output="$FLEET_STATE/.configure-$hex-$$"
+	output="$FLEET_STATE/.configure-$hex-$backend-$$"
 	rm -rf "$output"
 	plan="$(mktemp "$FLEET_STATE/.plan-XXXXXX")"
-	python3 - "$package" "$FLEET_PACKAGE_HASH" "$FLEET_PRINCIPAL" "$FLEET_MODEL_CREDENTIAL_FILE" "$output" >"$plan" <<'PY'
+	python3 - "$package" "$FLEET_PACKAGE_HASH" "$FLEET_PRINCIPAL" "$backend" "$output" >"$plan" <<'PY'
 import json, os, sys
-package, package_hash, principal, credential, output = sys.argv[1:]
+package, package_hash, principal, name, output = sys.argv[1:]
+backend = next(b for b in json.loads(os.environ["FLEET_BACKENDS"]) if b["name"] == name)
+scope = os.environ["FLEET_SCOPE"]
 plan = {"apiVersion": "celln.native-starter-config/v1", "package": package, "packageHash": package_hash,
-        "principal": principal, "credentialFile": credential, "output": output}
-endpoint = os.environ.get("FLEET_MODEL_ENDPOINT", "")
-if endpoint:
+        "principal": principal, "credentialFile": backend["credentialFile"], "output": output}
+if backend.get("endpoint"):
     # The operator's model route; Celln validates it again before configuring.
     plan["modelConnection"] = {
-        "provider": os.environ["FLEET_MODEL_PROVIDER"],
-        "protocol": os.environ["FLEET_MODEL_PROTOCOL"],
-        "endpoint": endpoint,
-        "model": os.environ["FLEET_MODEL_NAME"],
-        "credentialProfile": os.environ["FLEET_SCOPE"],
-        "allowInsecure": os.environ.get("FLEET_MODEL_ALLOW_INSECURE", "false") == "true",
+        "provider": backend["provider"],
+        "protocol": backend["protocol"],
+        "endpoint": backend["endpoint"],
+        "model": backend["model"],
+        "credentialProfile": scope if name == "native" else f"{scope}-{name}",
+        "allowInsecure": bool(backend.get("allowInsecure", False)),
     }
 limits = {}
 for key, env in (("leaseSeconds", "FLEET_LIMIT_LEASE_SECONDS"), ("maxTurns", "FLEET_LIMIT_MAX_TURNS"),
@@ -98,17 +109,21 @@ PY
 	"$celln" --root "$root" starter-configure "$plan" --approve-starter-effects
 	rm -f "$plan"
 	mv "$output" "$configuration"
-fi
+done
 
-# Publish the scope's starter configuration exactly once. Every node derives
-# identical files from the same package, so a second publisher only verifies.
+# Publish the scope's starter configuration exactly once, keyed
+# <backend>.<file>. Every node derives identical files from the same package,
+# so a second publisher only verifies.
 api=https://kubernetes.default.svc
 credentials=/var/run/secrets/celln-fleet
 resource="$api/api/v1/namespaces/$FLEET_NAMESPACE/configmaps"
-body="$(python3 - "$FLEET_CONFIGURATION_CONFIGMAP" "$FLEET_NAMESPACE" "$configuration" "$FLEET_PACKAGE_HASH" "$NODE_NAME" <<'PY'
+body="$(python3 - "$FLEET_CONFIGURATION_CONFIGMAP" "$FLEET_NAMESPACE" "$FLEET_STATE/configuration-$hex" "$FLEET_PACKAGE_HASH" "$NODE_NAME" <<'PY'
 import json, os, sys
-name, namespace, directory, package_hash, node = sys.argv[1:]
-data = {f: open(os.path.join(directory, f)).read() for f in ("catalogue.json", "configured.json", "native-template.json")}
+name, namespace, prefix, package_hash, node = sys.argv[1:]
+data = {}
+for backend in [b["name"] for b in json.loads(os.environ["FLEET_BACKENDS"])]:
+    for f in ("catalogue.json", "configured.json", "native-template.json"):
+        data[f"{backend}.{f}"] = open(os.path.join(f"{prefix}-{backend}", f)).read()
 print(json.dumps({"apiVersion": "v1", "kind": "ConfigMap",
                   "metadata": {"name": name, "namespace": namespace,
                                "labels": {"app.kubernetes.io/part-of": "sympozium"},
@@ -142,6 +157,9 @@ fi
 python3 - "$published" "$body" <<'PY'
 import json, sys
 existing = json.load(open(sys.argv[1])).get("data", {})
+# Configurations published before backends were named carry unprefixed keys
+# for the single backend named native.
+existing = {k if k.count(".") > 1 else f"native.{k}": v for k, v in existing.items()}
 ours = json.loads(sys.argv[2])["data"]
 if existing != ours:
     sys.exit("published starter configuration differs from this node's package; one scope carries exactly one package")

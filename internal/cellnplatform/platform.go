@@ -32,7 +32,18 @@ const (
 	ManagedByLabel = "sympozium.ai/managed-by"
 	ManagedByValue = "celln-platform"
 
-	// The wrapper names every namespace shares; a run selects them by name.
+	// BackendLabel names the model backend a runtime profile serves. A scope
+	// publishes one profile per backend; wrappers are named after it.
+	BackendLabel = "celln.sympozium.ai/backend"
+	// DefaultBackend is the backend of a scope installed with a single model
+	// route; its wrappers keep the original names.
+	DefaultBackend = "native"
+	// ProtocolAnnotation records the wire protocol a runtime profile's model
+	// route speaks, so a policy carrying several routes to the same origin
+	// and model (one per protocol) binds each backend to its own route.
+	ProtocolAnnotation = "celln.sympozium.ai/protocol"
+
+	// The wrapper names of the default backend; a run selects them by name.
 	WrapperRuntimeName    = "celln-native"
 	WrapperAgentName      = "celln-agent"
 	WrapperConnectionName = "celln-native"
@@ -76,10 +87,29 @@ func Selector(mode, scope string, exclusions []string) (metav1.LabelSelector, er
 
 // Wrappers are the names a namespace's runs select.
 type Wrappers struct {
+	Backend    string   `json:"backend"`
 	Runtime    string   `json:"runtime"`
 	Agent      string   `json:"agent"`
 	Connection string   `json:"connection"`
 	Created    []string `json:"created"`
+}
+
+// Backend is the model backend a profile serves (DefaultBackend when unlabeled).
+func Backend(profile *api.CellnRuntimeProfile) string {
+	if b := profile.Labels[BackendLabel]; b != "" {
+		return b
+	}
+	return DefaultBackend
+}
+
+// WrapperNames are the wrapper objects a namespace holds for one backend: the
+// default backend keeps the original names, every other backend carries its
+// name so several backends coexist in one namespace.
+func WrapperNames(backend string) Wrappers {
+	if backend == "" || backend == DefaultBackend {
+		return Wrappers{Backend: DefaultBackend, Runtime: WrapperRuntimeName, Agent: WrapperAgentName, Connection: WrapperConnectionName}
+	}
+	return Wrappers{Backend: backend, Runtime: "celln-" + backend, Agent: "celln-agent-" + backend, Connection: "celln-" + backend}
 }
 
 // Authorised is one profile a namespace may run and the policy admitting it.
@@ -161,24 +191,34 @@ func TenantWrappers(namespace string, profile *api.CellnRuntimeProfile, policy *
 	if err != nil {
 		return nil, err
 	}
+	// The first matching route wins unless the profile names its protocol,
+	// in which case the route speaking that protocol does.
 	var route *api.CellnExecutionPolicyRoute
+	protocol := profile.Annotations[ProtocolAnnotation]
 	for i := range policy.Spec.Routes {
 		r := &policy.Spec.Routes[i]
-		if r.Auth == "host-profile" && (!harness.AllowInsecure || r.AllowInsecure) && slices.Contains(r.Models, harness.Model) && slices.Contains(r.EndpointOrigins, origin) {
+		if r.Auth != "host-profile" || (harness.AllowInsecure && !r.AllowInsecure) || !slices.Contains(r.Models, harness.Model) || !slices.Contains(r.EndpointOrigins, origin) {
+			continue
+		}
+		if protocol == "" || r.Protocol == protocol {
 			route = r
 			break
+		}
+		if route == nil {
+			route = r
 		}
 	}
 	if route == nil {
 		return nil, fmt.Errorf("policy %q has no host-profile route for %s at %s", policy.Name, harness.Model, origin)
 	}
+	names := WrapperNames(Backend(profile))
 	meta := func(name string) metav1.ObjectMeta {
-		return metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: map[string]string{ManagedByLabel: ManagedByValue}}
+		return metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: map[string]string{ManagedByLabel: ManagedByValue, BackendLabel: names.Backend}}
 	}
 	return []client.Object{
-		&api.AgentRuntime{ObjectMeta: meta(WrapperRuntimeName), Spec: api.AgentRuntimeSpec{CellnProfileRef: &api.CellnRuntimeProfileRef{Name: profile.Name, Revision: profile.Spec.Revision}, SupportOwner: "celln-platform"}},
-		&api.Agent{ObjectMeta: meta(WrapperAgentName), Spec: api.AgentSpec{RuntimeRef: WrapperRuntimeName}},
-		&api.ModelConnection{ObjectMeta: meta(WrapperConnectionName), Spec: api.ModelConnectionSpec{Provider: route.Provider, Protocol: route.Protocol, Endpoint: harness.URL, CredentialProfile: native.CredentialProfile, Models: []string{harness.Model}, AllowInsecure: harness.AllowInsecure}},
+		&api.AgentRuntime{ObjectMeta: meta(names.Runtime), Spec: api.AgentRuntimeSpec{CellnProfileRef: &api.CellnRuntimeProfileRef{Name: profile.Name, Revision: profile.Spec.Revision}, SupportOwner: "celln-platform"}},
+		&api.Agent{ObjectMeta: meta(names.Agent), Spec: api.AgentSpec{RuntimeRef: names.Runtime}},
+		&api.ModelConnection{ObjectMeta: meta(names.Connection), Spec: api.ModelConnectionSpec{Provider: route.Provider, Protocol: route.Protocol, Endpoint: harness.URL, CredentialProfile: native.CredentialProfile, Models: []string{harness.Model}, AllowInsecure: harness.AllowInsecure}},
 	}, nil
 }
 
@@ -198,7 +238,8 @@ func EnsureWrappers(ctx context.Context, c client.Client, namespace, profileName
 	if err != nil {
 		return Wrappers{}, err
 	}
-	result := Wrappers{Runtime: WrapperRuntimeName, Agent: WrapperAgentName, Connection: WrapperConnectionName, Created: []string{}}
+	result := WrapperNames(Backend(&authorised[index].Profile))
+	result.Created = []string{}
 	for _, object := range objects {
 		if err := c.Create(ctx, object); err != nil {
 			if apierrors.IsAlreadyExists(err) {

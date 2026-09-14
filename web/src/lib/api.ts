@@ -150,8 +150,12 @@ export interface CellnPlatformProfile {
   endpoint: string;
   credentialProfile: string;
   systemPrompt: string;
+  /** Fleet model backend this profile runs on ("native" is the default). */
+  backend: string;
   /** Name of the AgentRuntime wrapper a run selects (created on first use). */
   wrapper: string;
+  /** Name of the Agent the wrappers create for this backend. */
+  agent: string;
   /** The policy's per-parent maxima and the budget a new conversation should ask for. */
   ceilings: EnduringLimits;
   sessionDefaults: EnduringLimits;
