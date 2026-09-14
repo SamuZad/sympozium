@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Multi-node fleet proof on Kind: label N KVM nodes, every node prepares the
-# reviewed starter package, one router discovers them, enduring parents are
-# issued through the gateway on distinct owners, a follow-up turn keeps live
-# context, and removing a node's label drains its owner honestly.
+# reviewed starter package and sizes its own capacity, one router discovers
+# them, enduring parents are issued through the gateway (several on one node),
+# a follow-up turn keeps live context, any ordinary namespace runs with
+# wrappers created on first use while an excluded one is refused, and removing
+# a node's label drains its owner honestly.
 #
 # Requires: kind, docker, kubectl, helm, /dev/kvm, a readable host kernel in
 # /boot, DEEPSEEK_API_KEY, a celln bundle (bin/celln + share/celln with pilot
@@ -131,21 +133,36 @@ first_node="$(node_of "$(launch_of "$first")")"
 [ -n "$first_node" ] || fail "owner of $first not found"
 pass "$first issued through the gateway to $first_node and completed a real model turn"
 
-# The gateway places by incarnation hash, not by load, and Celln holds one
-# parent per node: a second run either lands on the other owner and runs, or
-# is refused there terminally. Both are honest outcomes; neither is re-placed.
-second="$(kc -n "$NAMESPACE" create -f "$WORK/fleet-out/installation/run.json" -o jsonpath='{.metadata.name}')"
-wait_for "issuance of $second" 120 bash -c "[ -n \"\$(kubectl --context kind-$CLUSTER -n $NAMESPACE get agentrun $second -o jsonpath='{.status.cellnParent.binding.launchProfile}')\" ]"
-second_node="$(node_of "$(launch_of "$second")")"
-[ -n "$second_node" ] || fail "owner of $second not found"
-if [ "$second_node" != "$first_node" ]; then
-	wait_for "parent $second ready" 240 run_ready "$second"
-	wait_for "initial turn of $second" 240 bash -c "kubectl --context kind-$CLUSTER -n $NAMESPACE get agentrun $second -o jsonpath='{.status.cellnParent.initialTurn.result.succeeded}' | grep -q true"
-	pass "$second issued to the other owner $second_node and completed a real model turn"
+# The gateway places by incarnation hash, not by load. With per-parent broker
+# charging (celln#112) and node-sized capacity a node holds many parents, so
+# keep creating runs until one lands on the first owner and prove both live
+# there. FLEET_EXPECT_COLOCATION=0 restores the one-parent-per-node assertion
+# for Celln bundles without it.
+extra=()
+colocated=""
+for attempt in 1 2 3 4 5 6; do
+	run="$(kc -n "$NAMESPACE" create -f "$WORK/fleet-out/installation/run.json" -o jsonpath='{.metadata.name}')"
+	extra+=("$run")
+	wait_for "issuance of $run" 120 bash -c "[ -n \"\$(kubectl --context kind-$CLUSTER -n $NAMESPACE get agentrun $run -o jsonpath='{.status.cellnParent.binding.launchProfile}')\" ]"
+	node="$(node_of "$(launch_of "$run")")"
+	[ -n "$node" ] || fail "owner of $run not found"
+	if [ "$node" != "$first_node" ]; then
+		wait_for "parent $run ready" 240 run_ready "$run"
+		pass "$run issued to the other owner $node"
+		continue
+	fi
+	colocated="$run"
+	break
+done
+[ -n "$colocated" ] || fail "no run hashed to $first_node in ${#extra[@]} attempts"
+if [ "${FLEET_EXPECT_COLOCATION:-1}" = 1 ]; then
+	wait_for "parent $colocated ready beside $first on $first_node" 240 run_ready "$colocated"
+	wait_for "initial turn of $colocated" 240 bash -c "kubectl --context kind-$CLUSTER -n $NAMESPACE get agentrun $colocated -o jsonpath='{.status.cellnParent.initialTurn.result.succeeded}' | grep -q true"
+	run_ready "$first" || fail "$first lost readiness when $colocated joined $first_node"
+	pass "$colocated and $first are both live on $first_node and $colocated completed a real model turn"
 else
-	wait_for "capacity refusal of $second" 120 bash -c "kubectl --context kind-$CLUSTER -n $NAMESPACE get agentrun $second -o jsonpath='{.status.conditions[?(@.type==\"CellnParentReady\")].reason}' | grep -q ReconciliationRequired"
-	run_ready "$second" && fail "$second became ready on an owner that already holds a parent"
-	pass "$second hashed to $first_node and was refused there (one parent per node); not re-placed"
+	wait_for "capacity refusal of $colocated" 120 bash -c "kubectl --context kind-$CLUSTER -n $NAMESPACE get agentrun $colocated -o jsonpath='{.status.conditions[?(@.type==\"CellnParentReady\")].reason}' | grep -qE 'CreateRefused|ReconciliationRequired'"
+	pass "$colocated hashed to $first_node and was refused there (one parent per node); not re-placed"
 fi
 
 log "Follow-up turn keeps live context on the same owner"
@@ -168,13 +185,11 @@ echo "$answer" | grep -qi violet || fail "follow-up turn lost context: $answer"
 [ "$(kc -n "$NAMESPACE" get agentrunturn "$first-turn-2" -o jsonpath='{.status.execution.child}')" != "$(kc -n "$NAMESPACE" get agentrun "$first" -o jsonpath='{.status.cellnParent.initialTurn.child}')" ] || fail "turn reused the initial child"
 pass "distinct child read back: $(echo "$answer" | tr '\n' ' ')"
 
-# One parent per node: release the fleet before another namespace is tried,
-# and prove a live parent can be stopped through the gateway on the way.
-kc -n "$NAMESPACE" delete agentrun "$first" --timeout=120s >/dev/null || fail "$first could not be deleted while its owner was live"
-if run_ready "$second"; then
-	kc -n "$NAMESPACE" delete agentrun "$second" --timeout=120s >/dev/null || fail "$second could not be deleted while its owner was live"
-fi
-pass "$first deleted through the gateway; fleet released"
+# Every run deletes cleanly through the gateway, live or refused.
+for run in "$first" "${extra[@]}"; do
+	kc -n "$NAMESPACE" delete agentrun "$run" --timeout=180s >/dev/null || fail "$run could not be deleted"
+done
+pass "$first and ${#extra[@]} other runs deleted through the gateway"
 
 log "Any ordinary namespace runs on the fleet; wrappers are created on first use; an excluded one is refused"
 tenant="$NAMESPACE-b"
