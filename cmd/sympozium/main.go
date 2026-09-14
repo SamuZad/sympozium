@@ -1601,7 +1601,7 @@ func runInstall(imageTag string, setValues []string) error {
 
 	// ── Pre-flight: Gateway API CRDs ────────────────────────────────────
 	fmt.Println("  Installing Gateway API CRDs...")
-	if err := kubectlRetry(3, "apply", "--server-side", "--force-conflicts", "-f", gatewayAPICRDsURL); err != nil {
+	if err := kubectlRetry(4, "apply", "--server-side", "--force-conflicts", "-f", gatewayAPICRDsURL); err != nil {
 		return fmt.Errorf("install Gateway API CRDs: %w", err)
 	}
 
@@ -1609,7 +1609,7 @@ func runInstall(imageTag string, setValues []string) error {
 	fmt.Println("  Checking cert-manager...")
 	if err := kubectlQuiet("get", "namespace", "cert-manager"); err != nil {
 		fmt.Println("  Installing cert-manager...")
-		if err := kubectl("apply", "-f",
+		if err := kubectlRetry(4, "apply", "-f",
 			"https://github.com/cert-manager/cert-manager/releases/download/v1.17.1/cert-manager.yaml"); err != nil {
 			return fmt.Errorf("install cert-manager: %w", err)
 		}
