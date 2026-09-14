@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.10.64](https://github.com/sympozium-ai/sympozium/compare/v0.10.63...v0.10.64) (2026-09-14)
+
+
+### Features
+
+* **celln:** choose the fleet's model backend — llama-server, OpenAI, Anthropic or DeepSeek ([8cce038](https://github.com/sympozium-ai/sympozium/commit/8cce038290feb962cdf07fb67bd1c43040f7b652))
+* **celln:** fleet model backends — llama-server, OpenAI, Anthropic, DeepSeek ([7566d1c](https://github.com/sympozium-ai/sympozium/commit/7566d1c2baf9f348f853fcaad964d734413897aa))
+* **celln:** policy routes approve plain-HTTP endpoints explicitly for node-held credentials ([cc6f537](https://github.com/sympozium-ai/sympozium/commit/cc6f53792011ae5d87f71ae070197e86799443cd))
+* **celln:** start many enduring conversations per Agent from the API and UI ([de2874d](https://github.com/sympozium-ai/sympozium/commit/de2874dd21c167ef7a2ce5e8fe15ac435a8e5052))
+* **celln:** start many enduring conversations per Agent from the API and UI ([2f749a2](https://github.com/sympozium-ai/sympozium/commit/2f749a2f3a6b1601d6b4c40b3f4bb1eb2f58f3fc))
+
+
+### Bug Fixes
+
+* **install:** Helm follows $KUBECONFIG like kubectl; drop symptom workarounds ([aedfb12](https://github.com/sympozium-ai/sympozium/commit/aedfb126ec0ff8110064b75e856cdbd78d84b9a7))
+* **install:** refresh Helm discovery after CRDs and always wait for cert-manager's webhook ([3142b5d](https://github.com/sympozium-ai/sympozium/commit/3142b5d517346691643d5cd3670178ff4aa787e8))
+* **install:** retry the cert-manager manifest download ([cfa6a06](https://github.com/sympozium-ai/sympozium/commit/cfa6a06bae54fef9f173e3749d88621e81350331))
+* **install:** retry the Helm release when an admission webhook is briefly unreachable ([510e49a](https://github.com/sympozium-ai/sympozium/commit/510e49a2ea8d0dab1046826e70af14c22ef14145))
+* **install:** wait for CRDs to be established and retry the Gateway API download ([96678a3](https://github.com/sympozium-ai/sympozium/commit/96678a3741aea728139c037aae821a4696520d58))
+
 ## [0.10.63](https://github.com/sympozium-ai/sympozium/compare/v0.10.62...v0.10.63) (2026-09-14)
 
 
