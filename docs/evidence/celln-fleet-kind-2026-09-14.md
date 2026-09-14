@@ -191,6 +191,23 @@ skipped when it was already present; GitHub 504s on release manifests aborted
 the install (now retried, and the journey can use a cached cert-manager
 manifest); and the journey leaked its API port-forward.
 
+## Day-long ceilings and capacity-aware placement (Celln v0.5.16)
+
+Two more journeys ran on the **released** Celln v0.5.16 bundle (host limits,
+celln#120; capacity-aware placement, celln#122) with the installer defaults:
+DeepSeek on `fleet-ds` and llama-server on `fleet-ci`.
+
+| Check | Result |
+| --- | --- |
+| Ceilings | Policy `maxParentLeaseSeconds 86400, maxTurns 256, maxModelRequests 768, maxOutputTokens 393216`; the node's reviewed parent request carries `timeoutMs 86400000`; the sample conversation asks for `14400 s / 64 turns / 192 / 98304`. |
+| Placement | Both fleets: the first parent landed on one owner, the second on the emptier owner, the third tied and co-located with the first (`fleet-ds`: `gc5sk` → worker, `8pdfs` → worker2, `9kt44` → worker; `fleet-ci`: `69696` → worker, `dkt5s` → worker2, `v9f7w` → worker). |
+| Everything else | Real turns, follow-up context, deletes, two API conversations of one Agent in a label-free namespace, excluded namespace refused, node leave → ContextLost, clean delete — all passed on both fleets. |
+
+The first DeepSeek attempt failed before any run: its generated NATS
+password began with a digit, `nats.conf` references it as a bare variable,
+NATS crash-looped and the controller never became ready (about one install
+in six). Fixed in the chart in PR #542.
+
 ## Environment caveats
 
 - Kind nodes have no kernel in `/boot`; the dispatcher's readiness gate
