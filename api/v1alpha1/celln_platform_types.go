@@ -175,7 +175,7 @@ type CellnExecutionPolicyTool struct {
 
 // CellnExecutionPolicyRoute is explicit model endpoint authority. A tenant
 // ModelConnection may choose only a route contained by one of these entries.
-// +kubebuilder:validation:XValidation:rule="self.endpointOrigins.all(x, x.startsWith('https://') || (self.auth == 'none' && (x.startsWith('http://127.0.0.1') || x.startsWith('http://localhost') || x.startsWith('http://[::1]'))))",message="credential-bearing routes require https; http is restricted to explicit no-auth loopback origins"
+// +kubebuilder:validation:XValidation:rule="self.endpointOrigins.all(x, x.startsWith('https://') || (self.auth == 'none' && (x.startsWith('http://127.0.0.1') || x.startsWith('http://localhost') || x.startsWith('http://[::1]'))) || (self.auth == 'host-profile' && has(self.allowInsecure) && self.allowInsecure))",message="credential-bearing routes require https; http is restricted to no-auth loopback origins or host-profile routes with allowInsecure"
 type CellnExecutionPolicyRoute struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=64
@@ -192,6 +192,11 @@ type CellnExecutionPolicyRoute struct {
 	EndpointOrigins []string `json:"endpointOrigins"`
 	// +kubebuilder:validation:Enum=secret;none;host-profile
 	Auth string `json:"auth"`
+	// AllowInsecure approves plain-HTTP or private endpoint origins for a
+	// host-profile route (for example a LAN llama-server). The credential stays
+	// on the node; a cluster Secret route can never use plain HTTP.
+	// +optional
+	AllowInsecure bool `json:"allowInsecure,omitempty"`
 }
 
 type CellnExecutionPolicyCeilings struct {

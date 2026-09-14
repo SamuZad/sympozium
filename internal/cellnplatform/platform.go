@@ -164,7 +164,7 @@ func TenantWrappers(namespace string, profile *api.CellnRuntimeProfile, policy *
 	var route *api.CellnExecutionPolicyRoute
 	for i := range policy.Spec.Routes {
 		r := &policy.Spec.Routes[i]
-		if r.Auth == "host-profile" && slices.Contains(r.Models, harness.Model) && slices.Contains(r.EndpointOrigins, origin) {
+		if r.Auth == "host-profile" && (!harness.AllowInsecure || r.AllowInsecure) && slices.Contains(r.Models, harness.Model) && slices.Contains(r.EndpointOrigins, origin) {
 			route = r
 			break
 		}

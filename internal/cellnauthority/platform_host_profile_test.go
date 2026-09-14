@@ -108,7 +108,7 @@ func TestPlatformResolverBindsHostProfileRouteToRuntimeNative(t *testing.T) {
 	}
 	// An operator-approved plain-HTTP endpoint (a LAN llama-server) is allowed
 	// for a node-held credential and never for a cluster Secret.
-	insecure := func(endpoint string, allow bool, origin string) {
+	insecure := func(endpoint string, allow bool, origin string, routeApproved bool) {
 		t.Helper()
 		if err := f.client.Get(ctx, types.NamespacedName{Namespace: "tenant", Name: "model"}, &connection); err != nil {
 			t.Fatal(err)
@@ -123,6 +123,7 @@ func TestPlatformResolverBindsHostProfileRouteToRuntimeNative(t *testing.T) {
 		}
 		for i := range policies.Items {
 			policies.Items[i].Spec.Routes[0].EndpointOrigins = []string{origin}
+			policies.Items[i].Spec.Routes[0].AllowInsecure = routeApproved
 			if err := f.client.Update(ctx, &policies.Items[i]); err != nil {
 				t.Fatal(err)
 			}
@@ -135,7 +136,11 @@ func TestPlatformResolverBindsHostProfileRouteToRuntimeNative(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	insecure("http://10.1.2.3:8080/v1/chat/completions", true, "http://10.1.2.3:8080")
+	insecure("http://10.1.2.3:8080/v1/chat/completions", true, "http://10.1.2.3:8080", false)
+	if _, err := f.resolver.Resolve(ctx, f.runKey, request); PlatformReason(err) != ReasonRouteMismatch {
+		t.Fatalf("plain-HTTP endpoint admitted without the policy route's approval: %v", err)
+	}
+	insecure("http://10.1.2.3:8080/v1/chat/completions", true, "http://10.1.2.3:8080", true)
 	if resolved, err := f.resolver.Resolve(ctx, f.runKey, request); err != nil || resolved.Decision.Route.EndpointOrigin != "http://10.1.2.3:8080" {
 		t.Fatalf("approved insecure host-profile endpoint refused: %v", err)
 	}

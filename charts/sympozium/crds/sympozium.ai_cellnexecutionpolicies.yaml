@@ -142,6 +142,12 @@ spec:
                     CellnExecutionPolicyRoute is explicit model endpoint authority. A tenant
                     ModelConnection may choose only a route contained by one of these entries.
                   properties:
+                    allowInsecure:
+                      description: |-
+                        AllowInsecure approves plain-HTTP or private endpoint origins for a
+                        host-profile route (for example a LAN llama-server). The credential stays
+                        on the node; a cluster Secret route can never use plain HTTP.
+                      type: boolean
                     auth:
                       enum:
                       - secret
@@ -180,10 +186,12 @@ spec:
                   type: object
                   x-kubernetes-validations:
                   - message: credential-bearing routes require https; http is restricted
-                      to explicit no-auth loopback origins
+                      to no-auth loopback origins or host-profile routes with allowInsecure
                     rule: self.endpointOrigins.all(x, x.startsWith('https://') ||
                       (self.auth == 'none' && (x.startsWith('http://127.0.0.1') ||
-                      x.startsWith('http://localhost') || x.startsWith('http://[::1]'))))
+                      x.startsWith('http://localhost') || x.startsWith('http://[::1]')))
+                      || (self.auth == 'host-profile' && has(self.allowInsecure) &&
+                      self.allowInsecure))
                 maxItems: 32
                 type: array
                 x-kubernetes-list-type: atomic
