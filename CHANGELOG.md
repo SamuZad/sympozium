@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.10.63](https://github.com/sympozium-ai/sympozium/compare/v0.10.62...v0.10.63) (2026-09-14)
+
+
+### Features
+
+* **api,web:** tenant path for platform runtimes ([3799827](https://github.com/sympozium-ai/sympozium/commit/3799827f738c18fa532f1f360133c6c121263a49))
+* **celln:** allow an insecure development registry for the fleet package ([2a8f4ef](https://github.com/sympozium-ai/sympozium/commit/2a8f4efb70f5ca5f9b8e516373b4471fbe6e25a7))
+* **cellnauthority:** native provisioning material on runtime profiles and host-profile routes ([d795eaf](https://github.com/sympozium-ai/sympozium/commit/d795eaf7c06149bf9c8cca5c1a211212af4cc282))
+* **celln:** default-open namespace authorisation and on-demand tenant wrappers ([1f6acce](https://github.com/sympozium-ai/sympozium/commit/1f6acce7f69941c1ca3238605492a17b9513c85a))
+* **celln:** enduring parents from any authorised namespace (P0) ([f5abc12](https://github.com/sympozium-ai/sympozium/commit/f5abc1279a0cb17a5dca202be7aac5d99777d9dc))
+* **celln:** fleet installer stamps the platform catalogue and tenant wrappers ([68ea419](https://github.com/sympozium-ai/sympozium/commit/68ea4191c0d17ecc19079e9b05b6d230c6d870e9))
+* **celln:** fleet node defaults hold two parents ([46e2014](https://github.com/sympozium-ai/sympozium/commit/46e201451a7c6e42bb4fc974e0569f7fa9fcd360))
+* **celln:** fleet nodes size their capacity from node memory ([6a20f1c](https://github.com/sympozium-ai/sympozium/commit/6a20f1c0773538f421099f4b449475d99a635a3c))
+* **cellnparent:** platform-backed parent admission for any authorised namespace ([2e3a021](https://github.com/sympozium-ai/sympozium/commit/2e3a021d60f716943a2cef0ebf9889d5daea88a4))
+* **cellnparent:** provision parents through the Celln gateway ([9caf1d2](https://github.com/sympozium-ai/sympozium/commit/9caf1d2c085076ceb555fe5aae32c3bb10eec486))
+* **celln:** per-node native fleet — gateway-issued parents, label-to-join nodes ([9eabc23](https://github.com/sympozium-ai/sympozium/commit/9eabc23e3e455b10412102cc7a0d16cc3d423eda))
+* **celln:** per-node native fleet installed by labeling KVM nodes ([97168f9](https://github.com/sympozium-ai/sympozium/commit/97168f928d97735a370822e960131e7916d23df1))
+* **celln:** zero-ceremony namespaces, node-sized capacity, terminal refusals (P1a + P1b) ([f98fdf3](https://github.com/sympozium-ai/sympozium/commit/f98fdf337c8f0f49bbd3ab8d3fd6bbbf755a62f3))
+
+
+### Bug Fixes
+
+* 415: Gate sequential edges for subagent batch children ([#466](https://github.com/sympozium-ai/sympozium/issues/466)) ([2e8a8b8](https://github.com/sympozium-ai/sympozium/commit/2e8a8b816295b58b4113d761350de03687a2c389))
+* **celln:** a create the owner refuses is terminal and deletable ([a06152e](https://github.com/sympozium-ai/sympozium/commit/a06152e32f5004fab701311edd77ca3c31fd0fcc))
+* **celln:** a fleet parent holds two egress contexts; default egressSlots to maxCells ([4d9d43c](https://github.com/sympozium-ai/sympozium/commit/4d9d43ca3a99eee2cc7bfbded6ee46324f246006))
+* **cellnauthority:** a spec.model that mirrors the connection route is not an override ([027cfb5](https://github.com/sympozium-ai/sympozium/commit/027cfb596604a2eb40918478b31a00e7d715dc3c))
+* **cellnauthority:** compare the pinned connection revision with the value the controller pins ([9b042b8](https://github.com/sympozium-ai/sympozium/commit/9b042b896bbe32e05c29647cf395ddb4e61471f4))
+* **cellnparent:** admit native parents with the profile's per-turn allowance and retry from the pinned choice ([929ce6b](https://github.com/sympozium-ai/sympozium/commit/929ce6b08b7f5d7dd5029ced4b994a715ac1da43))
+* **cellnparent:** treat an owner that left the plane as context loss ([298682c](https://github.com/sympozium-ai/sympozium/commit/298682cdc499e763a8e2269022b0133e16cfcb57))
+* **celln:** publish fleet trust after the chart creates celln-system ([9854fa9](https://github.com/sympozium-ai/sympozium/commit/9854fa9fd4c523b44258e26404b6a1957b6850c4))
+* **celln:** wait for the controller rollout before binding the fleet catalogue ([4504be0](https://github.com/sympozium-ai/sympozium/commit/4504be0d90ea8adf575f4dee79bd0e76ecfd05df))
+* **controller:** route legacy enduring selections to the prepared parent path ([a69f82c](https://github.com/sympozium-ai/sympozium/commit/a69f82ceeadd8d2343e0b92adccb94e05eb6d960))
+* **controller:** serve AgentRunTurn on the unified native parent path ([127dab7](https://github.com/sympozium-ai/sympozium/commit/127dab77b71d7c707526890e83dabb69c505cba8))
+
 ## [0.10.62](https://github.com/sympozium-ai/sympozium/compare/v0.10.61...v0.10.62) (2026-09-13)
 
 
