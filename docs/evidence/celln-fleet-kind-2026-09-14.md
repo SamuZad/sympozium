@@ -159,6 +159,38 @@ allowed plain HTTP only for no-auth loopback routes. Policy routes now carry
 an explicit `allowInsecure` for host-profile credentials. OpenAI and Anthropic
 presets are covered by unit tests; no live keys were available for this trial.
 
+## Anthropic protocol and two backends side by side
+
+A sixth trial ran the full journey with the llama-server backend over the
+Anthropic Messages protocol (`--celln-fleet-model-protocol
+anthropic-messages`, endpoint `http://100.81.163.75:8080/v1/messages`), with
+sympozium-ai/celln#118 in the dispatcher. llama-server returns `thinking`
+content blocks for reasoning models, which the broker used to refuse; they
+are now dropped. Every step passed: first turn *Done. "violet" written to
+notes.txt (now revision 1)*, two parents on one node, follow-up *violet
+revision: 1*, deletes, label-free tenant namespace, excluded namespace,
+node loss.
+
+A second cluster, `fleet-ds`, ran the DeepSeek backend at the same time. Each
+fleet then got a brand-new namespace, prepared only through
+`/api/v1/celln-platform/wrappers`, and one enduring run asked *"Where is
+Botswana? Answer in two sentences without using any tools."*:
+
+| Namespace | Backend | Answer |
+| --- | --- | --- |
+| `botswana-llama` (`fleet-ci`) | llama-server, Qwen3.8-27B, `anthropic-messages` | *Botswana is a landlocked country located in southern Africa. It is bordered by South Africa, Namibia, Zimbabwe, and Zambia.* |
+| `botswana-deepseek` (`fleet-ds`) | DeepSeek, `deepseek-chat`, `openai-chat` | *Botswana is a landlocked country in Southern Africa, bordered by South Africa to the south, Namibia to the west and north, Zimbabwe to the northeast, and Zambia to the north. Its capital is Gaborone, located in the country's southeastern corner near the South African border.* |
+
+Two clusters were used because a fleet scope has one model backend; several
+backends in one cluster is #535.
+
+Running two installs on one host exposed installer defects, all fixed: Helm
+ignored `$KUBECONFIG` and installed into whichever cluster `~/.kube/config`
+selected; CRDs were not awaited as established; cert-manager readiness was
+skipped when it was already present; GitHub 504s on release manifests aborted
+the install (now retried, and the journey can use a cached cert-manager
+manifest); and the journey leaked its API port-forward.
+
 ## Environment caveats
 
 - Kind nodes have no kernel in `/boot`; the dispatcher's readiness gate
