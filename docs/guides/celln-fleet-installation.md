@@ -90,6 +90,14 @@ sympozium install -n celln-agents --celln-fleet \
 kubectl label node kvm-a kvm-b celln.dev/kvm=true
 ```
 
+Before it touches the cluster the installer sends each backend a one-token
+chat request with the key it is about to publish. A provider that is down,
+an endpoint that answers the wrong protocol, a wrong model name or a bad key
+stops the install with that answer, rather than surfacing later as a lost
+parent. Pass `--celln-fleet-skip-preflight` when only the nodes can reach
+the endpoint (for example a LAN llama-server the operator's machine cannot
+see).
+
 The command runs two phases and is safe to rerun:
 
 1. Publishes the parent principal and model credential, then installs the
