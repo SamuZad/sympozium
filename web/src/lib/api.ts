@@ -1476,6 +1476,10 @@ export const api = {
     create: (data: { name: string; spec: ModelConnection["spec"]; apiKey?: string }) => apiFetch<ModelConnection>("/api/v1/model-connections", { method: "POST", body: JSON.stringify(data) }),
   },
 
+  clusterCellnTools: {
+    list: () => apiFetch<CellnTool[]>("/api/v1/cluster-celln-tools"),
+  },
+
   cellnTools: {
     list: () => apiFetch<CellnTool[]>("/api/v1/celln-tools"),
     preview: (agentRef: string, cellnSelection: CellnSelection, executionLifecycle?: "enduring") => apiFetch<CellnPermissionPreview>("/api/v1/celln-selection/preview", { method: "POST", body: JSON.stringify({ agentRef, cellnSelection, executionLifecycle }) }),

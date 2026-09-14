@@ -188,6 +188,7 @@ func (s *Server) buildMux(frontendFS fs.FS, expected *tokenReader) http.Handler 
 	mux.HandleFunc("GET /api/v1/model-connections", s.listModelConnections)
 	mux.HandleFunc("POST /api/v1/model-connections", s.createModelConnection)
 	mux.HandleFunc("GET /api/v1/celln-tools", s.listCellnTools)
+	mux.HandleFunc("GET /api/v1/cluster-celln-tools", s.listClusterCellnTools)
 	mux.HandleFunc("POST /api/v1/celln-selection/preview", s.previewCellnSelection)
 	mux.HandleFunc("POST /api/v1/runtimes/install-defaults", s.installDefaultRuntimes)
 	// Persistent harness sessions. The API server owns the only browser-facing
@@ -486,6 +487,21 @@ func (s *Server) listCellnTools(w http.ResponseWriter, r *http.Request) {
 	sort.Slice(list.Items, func(i, j int) bool { return list.Items[i].Name < list.Items[j].Name })
 	if list.Items == nil {
 		list.Items = []sympoziumv1alpha1.CellnTool{}
+	}
+	writeJSON(w, list.Items)
+}
+
+// listClusterCellnTools lists the platform's shared tool catalogue. Listing is
+// discovery only: policy decides which revisions a namespace may select.
+func (s *Server) listClusterCellnTools(w http.ResponseWriter, r *http.Request) {
+	var list sympoziumv1alpha1.ClusterCellnToolList
+	if err := s.client.List(r.Context(), &list); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sort.Slice(list.Items, func(i, j int) bool { return list.Items[i].Name < list.Items[j].Name })
+	if list.Items == nil {
+		list.Items = []sympoziumv1alpha1.ClusterCellnTool{}
 	}
 	writeJSON(w, list.Items)
 }
@@ -1285,6 +1301,11 @@ func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
 	if req.AgentRef == "" || req.Task == "" {
 		http.Error(w, "agentRef and task are required", http.StatusBadRequest)
 		return
+	}
+	// A shared-catalogue selection may omit legacy toolRefs; the persisted
+	// field is still an explicit (empty) list, never a null lending nothing.
+	if req.CellnSelection != nil && req.CellnSelection.ToolRefs == nil && len(req.CellnSelection.ClusterToolRefs) != 0 {
+		req.CellnSelection.ToolRefs = []sympoziumv1alpha1.CellnCatalogueToolRef{}
 	}
 	// Explicit catalogue selections are validated before Agent lookup so malformed
 	// overrides fail closed without depending on inheritance.

@@ -226,13 +226,22 @@ func ConfigureFleet(ctx context.Context, store client.Client, o Options) ([]stri
 	if _, err := read(filepath.Join(o.OutputDir, "registrations.json"), &registration); err != nil {
 		return nil, err
 	}
-	if registration.LocalProvisioner == nil || registration.RemoteProvisioner != nil || len(registration.HostTemplates) != 1 || len(registration.Registrations) != 0 {
-		return nil, fmt.Errorf("fleet wiring requires a fresh local starter registration")
+	journal, approvals := filepath.Join(FleetJournalRoot, "journal"), filepath.Join(FleetJournalRoot, "approvals")
+	if p := registration.Platform; p != nil {
+		// Platform admission (InstallPlatform) is already gateway-issued and
+		// namespace-free; it only needs the controller's claim paths.
+		if registration.LocalProvisioner != nil || registration.RemoteProvisioner != nil || len(registration.HostTemplates) != 0 || len(registration.Registrations) != 0 || p.Target != o.OwnerTarget || p.TokenFile != fleetControllerTokenFile || p.Journal != journal || p.Approvals != approvals || registration.Journal != journal || registration.Approvals != approvals || p.ClusterID == "" {
+			return nil, fmt.Errorf("fleet wiring requires a platform registration bound to the shared gateway and controller claim")
+		}
+	} else {
+		if registration.LocalProvisioner == nil || registration.RemoteProvisioner != nil || len(registration.HostTemplates) != 1 || len(registration.Registrations) != 0 {
+			return nil, fmt.Errorf("fleet wiring requires a fresh local starter registration")
+		}
+		registration.Journal = journal
+		registration.Approvals = approvals
+		registration.RemoteProvisioner = &cellnparent.RemoteProvisioner{Journal: journal, Approvals: approvals, Target: o.OwnerTarget, TokenFile: fleetControllerTokenFile}
+		registration.LocalProvisioner = nil
 	}
-	registration.Journal = filepath.Join(FleetJournalRoot, "journal")
-	registration.Approvals = filepath.Join(FleetJournalRoot, "approvals")
-	registration.RemoteProvisioner = &cellnparent.RemoteProvisioner{Journal: registration.Journal, Approvals: registration.Approvals, Target: o.OwnerTarget, TokenFile: fleetControllerTokenFile}
-	registration.LocalProvisioner = nil
 	data, err := json.Marshal(registration)
 	if err != nil {
 		return nil, err

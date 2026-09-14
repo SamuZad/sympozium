@@ -45,7 +45,7 @@ import {
 import { cn } from "@/lib/utils";
 import { providersForPlane } from "@/lib/creation";
 import { PlanePicker } from "@/components/plane-picker";
-import { useCapabilities, useModels, useCellnTools } from "@/hooks/use-api";
+import { useCapabilities, useModels, useCellnTools, useClusterCellnTools, useModelConnections } from "@/hooks/use-api";
 import { persistentHarnesses, persistentHarnessName } from "@/lib/persistent-harness";
 import { modelConnectionName, modelConnectionEndpoint } from "@/lib/agent-execution";
 import { api } from "@/lib/api";
@@ -235,6 +235,8 @@ export interface WizardResult {
   executionLifecycle?: "one-shot" | "enduring";
   /** Immutable catalogue revisions requested as defaults; never permission grants. */
   borrowedTools?: CellnSelection["toolRefs"];
+  /** Shared platform catalogue revisions when the runtime is a profile wrapper. */
+  clusterTools?: CellnSelection["clusterToolRefs"];
 }
 
 interface OnboardingWizardProps {
@@ -603,7 +605,9 @@ export function OnboardingWizard({
   isPending,
 }: OnboardingWizardProps) {
   const persistentRuntimes = persistentHarnesses(availableRuntimes);
-  const nativeRuntimes = availableRuntimes.filter((runtime) => runtime.spec.celln?.contractVersion === "celln.json-tools/v1");
+  // A namespaced native runtime or a wrapper of a cluster-scoped platform
+  // profile (the fleet's shape) both run the enduring Celln parent.
+  const nativeRuntimes = availableRuntimes.filter((runtime) => runtime.spec.celln?.contractVersion === "celln.json-tools/v1" || !!runtime.spec.cellnProfileRef);
   const defaultRuntimeRef = availableRuntimes.some(
     (runtime) => runtime.metadata.name === defaults?.runtimeRef,
   ) ? defaults?.runtimeRef || "" : "";
@@ -676,7 +680,16 @@ export function OnboardingWizard({
       policyRef: isDefaultCatalog ? "harness-examples" : current.policyRef,
     }));
   }, [open, runtimeImplicit, singleRuntimeRef, form.runtimeRef, incompatibleSkillsKey]);
-  const catalogue = useCellnTools();
+  const selectedRuntime = selectableRuntimes.find((runtime) => runtime.metadata.name === form.runtimeRef);
+  // A wrapper runtime draws its tools from the shared cluster catalogue and its
+  // model route from the namespace's host-profile ModelConnection; nothing is
+  // created for it here because the platform policy owns both.
+  const wrapperRuntime = celln && !!selectedRuntime?.spec.cellnProfileRef;
+  const namespacedCatalogue = useCellnTools();
+  const clusterCatalogue = useClusterCellnTools();
+  const catalogue = wrapperRuntime ? clusterCatalogue : namespacedCatalogue;
+  const connections = useModelConnections();
+  const hostConnections = useMemo(() => (connections.data || []).filter((connection) => !!connection.spec.credentialProfile && !connection.spec.disabled), [connections.data]);
   const toolsInitialized = useRef(defaults?.borrowedTools !== undefined);
   useEffect(() => {
     if (!celln || toolsInitialized.current || !catalogue.data) return;
@@ -684,9 +697,13 @@ export function OnboardingWizard({
     const borrowedTools = catalogue.data.filter((tool) => tool.spec.invocationABI === "celln.json-stdio/v1" && tool.spec.lane === "tool").map((tool) => ({ name: tool.metadata.name, revision: tool.spec.revision }));
     setForm((current) => ({ ...current, borrowedTools }));
   }, [celln, catalogue.data]);
-  const selectedRuntime = selectableRuntimes.find((runtime) => runtime.metadata.name === form.runtimeRef);
+  useEffect(() => {
+    if (!wrapperRuntime || form.modelConnectionRef || hostConnections.length === 0) return;
+    const connection = hostConnections[0];
+    setForm((current) => ({ ...current, modelConnectionRef: connection.metadata.name, provider: connection.spec.provider, model: connection.spec.models[0] || current.model, credentialProfile: connection.spec.credentialProfile || "" }));
+  }, [wrapperRuntime, form.modelConnectionRef, hostConnections]);
   const compatibleRuntime = celln
-    ? selectedRuntime?.spec.celln?.contractVersion === "celln.json-tools/v1"
+    ? selectedRuntime?.spec.celln?.contractVersion === "celln.json-tools/v1" || wrapperRuntime
     : !form.runtimeRef || !!selectedRuntime?.spec.image;
   // Provider choices come from the shared creation model so the Run dialog and
   // this wizard can never drift into showing a provider the plane cannot reach.
@@ -843,7 +860,15 @@ export function OnboardingWizard({
       !celln &&
       !!result.runtimeRef &&
       compatibleRuntime;
-    if (persistentHarness || celln) {
+    if (wrapperRuntime) {
+      if (!result.modelConnectionRef) {
+        setConnectionError("This namespace has no ModelConnection with a host credential profile for the platform runtime; ask the operator to add one.");
+        return;
+      }
+      result.clusterTools = (result.borrowedTools || []).map((tool) => ({ ...tool }));
+      result.borrowedTools = [];
+    }
+    if (persistentHarness || (celln && !wrapperRuntime)) {
       const spec = modelConnectionSpec(result, celln);
       if (celln && !result.allowInsecure && !spec.endpoint.startsWith("https://")) {
         setConnectionError(
@@ -1177,11 +1202,11 @@ export function OnboardingWizard({
           {catalogue.isLoading && <p>Loading tool catalogue…</p>}
           {catalogue.isError && <p role="alert">Cannot load the tool catalogue. Retry before creating this Agent.</p>}
           {catalogue.isError && <Button type="button" onClick={() => catalogue.refetch()}>Retry catalogue</Button>}
-          {!catalogue.isLoading && !catalogue.isError && catalogue.data?.length === 0 && <p>No tools installed in this namespace. An empty selection lends no tools.</p>}
+          {!catalogue.isLoading && !catalogue.isError && catalogue.data?.length === 0 && <p>{wrapperRuntime ? "The platform catalogue has no shared tools." : "No tools installed in this namespace."} An empty selection lends no tools.</p>}
           {(catalogue.data || []).map((tool) => {
             const selected = (form.borrowedTools || []).some((ref) => ref.name === tool.metadata.name && ref.revision === tool.spec.revision);
             const supported = tool.spec.invocationABI === "celln.json-stdio/v1" && tool.spec.lane === "tool";
-            const suggested = ["workspace-read", "workspace-write", "https-fetch"].includes(tool.metadata.name);
+            const suggested = ["workspace-read", "workspace-write", "https-fetch"].some((name) => tool.metadata.name === name || tool.metadata.name.endsWith("-" + name));
             return <label key={tool.metadata.name} className="block rounded border p-3 text-sm">
               <span className="flex items-center gap-2">
                 <input type="checkbox" disabled={!supported || (!selected && (form.borrowedTools || []).length >= 16)} checked={selected}
@@ -1199,7 +1224,21 @@ export function OnboardingWizard({
         </div>}
 
         {/* ── Provider step ─────────────────────────────────────────── */}
-        {step === "provider" && (
+        {step === "provider" && wrapperRuntime && (
+          <div className="space-y-2 rounded-md border p-3" data-testid="platform-model-route">
+            <Label>Model route</Label>
+            {connections.isLoading && <p className="text-xs">Loading model connections…</p>}
+            {!connections.isLoading && hostConnections.length === 0 && <p role="alert" className="text-xs">No ModelConnection with a host credential profile exists in this namespace. The operator's fleet installation creates one; without it this runtime cannot run.</p>}
+            {hostConnections.length > 0 && (
+              <Select value={form.modelConnectionRef || ""} onValueChange={(name) => { const connection = hostConnections.find((c) => c.metadata.name === name); if (connection) setForm({ ...form, modelConnectionRef: name, provider: connection.spec.provider, model: connection.spec.models[0] || form.model, credentialProfile: connection.spec.credentialProfile || "" }); }}>
+                <SelectTrigger><SelectValue placeholder="Choose a model connection" /></SelectTrigger>
+                <SelectContent>{hostConnections.map((connection) => <SelectItem key={connection.metadata.name} value={connection.metadata.name}>{connection.metadata.name} — {connection.spec.provider} / {connection.spec.models.join(", ")}</SelectItem>)}</SelectContent>
+              </Select>
+            )}
+            <p className="text-xs text-muted-foreground">The platform profile fixes the persona and the owner-installed credential; policy caps the ceilings. No key is entered here.</p>
+          </div>
+        )}
+        {step === "provider" && !wrapperRuntime && (
           <div className="space-y-4">
             <div className="space-y-2">
               <Label>AI Provider</Label>

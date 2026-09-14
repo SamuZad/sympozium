@@ -106,6 +106,58 @@ If the wait expires, label a node, inspect the `prepare` init container's log
 in `celln-system`, and rerun the same command: existing trust, credential,
 configuration and installation records are verified, never replaced.
 
+## Authorising namespaces
+
+The installer publishes the reviewed starter configuration **once per scope**
+as cluster-scoped objects — `CellnRuntimeProfile` `celln-native-<scope>`
+(carrying the native parent/worker material), three `ClusterCellnTool`s
+`celln-<scope>-<tool>`, and a `CellnExecutionPolicy` `celln-fleet-<scope>`
+that admits every namespace labeled `celln.sympozium.ai/scope=<scope>` with a
+`host-profile` model route and the reviewed ceilings — and labels the `-n`
+namespace with its wrapper objects. Any other namespace needs only:
+
+```sh
+kubectl label namespace team-b celln.sympozium.ai/scope=<scope>   # operator: authorises the namespace
+kubectl -n team-b apply -f - <<EOF                              # tenant: ordinary workload objects
+apiVersion: sympozium.ai/v1alpha1
+kind: AgentRuntime
+metadata: {name: celln-native}
+spec:
+  cellnProfileRef: {name: celln-native-<scope>, revision: v1}
+  image: ""                      # required by the schema; unused for a profile wrapper
+---
+apiVersion: sympozium.ai/v1alpha1
+kind: Agent
+metadata: {name: celln-agent}
+spec:
+  runtimeRef: celln-native
+  agents: {default: {model: ""}} # required by the schema; the run's connection sets the model
+---
+apiVersion: sympozium.ai/v1alpha1
+kind: ModelConnection
+metadata: {name: celln-native}
+spec: {provider: deepseek, protocol: openai-chat, endpoint: https://api.deepseek.com/chat/completions, credentialProfile: <scope>, models: [deepseek-chat]}
+EOF
+```
+
+The same three objects can be copied from the install namespace
+(`kubectl -n <install-ns> get modelconnection,agentruntime,agent -o yaml`).
+No per-namespace install, grant ConfigMaps or copied tools. Enduring runs in
+that namespace select `runtimeRef: celln-native`, `clusterToolRefs` from the
+shared catalogue, `model.connectionRef: celln-native` and the profile's
+persona; the controller resolves policy, profile, tools and route into one
+immutable decision, issues the parent through the gateway, and re-checks that
+authority before every later turn. A run in an unlabeled namespace is held
+with `CellnParentReady=AdmissionPending (AUTH_POLICY_WITHDRAWN)`; nothing is
+issued. The UI wizard offers wrapper runtimes on the Celln plane, lists the
+shared catalogue for them and uses the namespace's host-profile
+`ModelConnection` instead of asking for a key.
+
+The `ModelConnection`'s `credentialProfile` names the owner-installed model
+credential (the scope); `CellnExecutionPolicy` routes with `auth: host-profile`
+are the interim boundary until the model gateway (P1) attaches to native
+parents and routes switch to `auth: secret`.
+
 ## Verify
 
 ```sh
@@ -114,9 +166,9 @@ kubectl -n celln-system get pods -l app.kubernetes.io/name=celln-node -o wide
 kubectl -n celln-system logs -l app.kubernetes.io/name=celln-router | grep backends
 ```
 
-Then create an enduring run in the installed namespace with the three starter
-tools, as in the [native installation guide](celln-native-installation.md);
-the installer leaves a ready-made `run.json` under the output directory.
+Then create an enduring run in an authorised namespace with the shared starter
+tools; the installer leaves a ready-made `run.json` under the output directory
+(change its namespace for another authorised namespace).
 The run's `status.cellnParent.binding.target` is the gateway; the gateway's
 `provisions` and `parents` ledgers on the ownership claim record which owner
 holds it, and that owner's `authority/parent-journal` carries the incarnation.

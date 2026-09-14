@@ -32,7 +32,15 @@ type RegistrationConfig struct {
 	// gateway-bound owner issues each parent, so no authority root is mounted.
 	RemoteProvisioner *RemoteProvisioner      `json:"remoteProvisioner,omitempty"`
 	HostTemplates     []HostProvisionTemplate `json:"hostTemplates,omitempty"`
+	// Platform admits runs from the platform decision (policy, cluster profile
+	// and tools) instead of this namespace-bound grant set; it excludes the
+	// prepared modes and needs no grant sources.
+	Platform *PlatformProvisioner `json:"platform,omitempty"`
 }
+
+// SupportsPlatform reports whether wrapper-shaped selections (a platform
+// runtime profile, cluster tools) can be admitted here.
+func (d *RegistrationDispatcher) SupportsPlatform() bool { return d.config.Platform != nil }
 
 // hostProvisioner issues one run's permit/launch profile on its owner and
 // publishes the resulting one-use approval.
@@ -77,13 +85,19 @@ func readRegistrationConfig(path string) (RegistrationConfig, error) {
 	if len(config.HostTemplates) > 1024 || len(provisioners) > 1 || (len(provisioners) == 0 && len(config.HostTemplates) > 0) || (len(provisioners) == 1 && (len(config.Registrations) > 0 || provisioners[0].Journal != config.Journal || provisioners[0].Approvals != config.Approvals)) {
 		return config, fmt.Errorf("exclusive provisioning mode and matching durable directories required")
 	}
-	refs := []types.NamespacedName{config.OperatorSource, config.RuntimeSource, config.AgentSource}
-	seen := map[types.NamespacedName]bool{}
-	for _, ref := range refs {
-		if ref.Namespace == "" || ref.Name == "" || seen[ref] {
-			return config, fmt.Errorf("three distinct explicit parent grant sources required")
+	if p := config.Platform; p != nil {
+		if len(provisioners) != 0 || len(config.HostTemplates) != 0 || len(config.Registrations) != 0 || p.Journal != config.Journal || p.Approvals != config.Approvals || p.ClusterID == "" || p.Target == "" || !filepath.IsAbs(p.TokenFile) {
+			return config, fmt.Errorf("platform admission excludes prepared registrations and requires cluster identity, gateway target and credential")
 		}
-		seen[ref] = true
+	} else {
+		refs := []types.NamespacedName{config.OperatorSource, config.RuntimeSource, config.AgentSource}
+		seen := map[types.NamespacedName]bool{}
+		for _, ref := range refs {
+			if ref.Namespace == "" || ref.Name == "" || seen[ref] {
+				return config, fmt.Errorf("three distinct explicit parent grant sources required")
+			}
+			seen[ref] = true
+		}
 	}
 	for _, path := range []string{config.Journal, config.Approvals} {
 		info, err := os.Stat(path)
@@ -121,8 +135,11 @@ func (d *RegistrationDispatcher) Admit(ctx context.Context, key types.Namespaced
 		return err
 	}
 	old := d.config
-	if config.Journal != old.Journal || config.Approvals != old.Approvals || config.OperatorSource != old.OperatorSource || config.RuntimeSource != old.RuntimeSource || config.AgentSource != old.AgentSource || !reflect.DeepEqual(config.LocalProvisioner, old.LocalProvisioner) || !reflect.DeepEqual(config.RemoteProvisioner, old.RemoteProvisioner) {
+	if config.Journal != old.Journal || config.Approvals != old.Approvals || config.OperatorSource != old.OperatorSource || config.RuntimeSource != old.RuntimeSource || config.AgentSource != old.AgentSource || !reflect.DeepEqual(config.LocalProvisioner, old.LocalProvisioner) || !reflect.DeepEqual(config.RemoteProvisioner, old.RemoteProvisioner) || !reflect.DeepEqual(config.Platform, old.Platform) {
 		return fmt.Errorf("parent admission routing changed; preserve original journal")
+	}
+	if config.Platform != nil {
+		return config.Platform.Admit(ctx, d.reader, key)
 	}
 	loader := cellnauthority.Loader{Reader: d.reader, OperatorSource: config.OperatorSource, RuntimeSource: config.RuntimeSource, AgentSource: config.AgentSource}
 	if provisioner := config.provisioner(); provisioner != nil {

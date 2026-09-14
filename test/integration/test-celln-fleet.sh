@@ -93,6 +93,7 @@ kc label node --overwrite -l '!node-role.kubernetes.io/control-plane' celln.dev/
 pass "images loaded; workers labeled celln.dev/kvm=true"
 
 log "sympozium install --celln-fleet"
+rm -rf "$WORK/fleet-out" # the installer refuses an existing private output directory
 KUBECONFIG="$WORK/kubeconfig" kind export kubeconfig --name "$CLUSTER" --kubeconfig "$WORK/kubeconfig" >/dev/null
 KUBECONFIG="$WORK/kubeconfig" "$SYMPOZIUM" install -n "$NAMESPACE" --celln-fleet \
 	--celln-fleet-scope "$SCOPE" \
@@ -113,7 +114,7 @@ kc -n sympozium-system get deploy sympozium-controller-manager -o jsonpath='{.sp
 pass "two owners prepared from one package; controller unpinned; catalogue installed in $NAMESPACE"
 
 log "Enduring runs are issued through the gateway to fleet owners"
-run_ready() { [ "$(kc -n "$NAMESPACE" get agentrun "$1" -o jsonpath='{.status.conditions[?(@.type=="CellnParentReady")].status}')" = True ]; }
+run_ready() { [ "$(kc -n "${2:-$NAMESPACE}" get agentrun "$1" -o jsonpath='{.status.conditions[?(@.type=="CellnParentReady")].status}')" = True ]; }
 node_of() { # launch profile -> node whose owner issued it
 	for pod in $(kc -n celln-system get pods -l app.kubernetes.io/name=celln-node -o name); do
 		if kc -n celln-system exec "$pod" -c dispatcher -- test -e "/var/lib/sympozium-celln/$SCOPE/authority/trusted-parent-launches/${1#blake3:}.json" 2>/dev/null; then
@@ -167,18 +168,53 @@ echo "$answer" | grep -qi violet || fail "follow-up turn lost context: $answer"
 [ "$(kc -n "$NAMESPACE" get agentrunturn "$first-turn-2" -o jsonpath='{.status.execution.child}')" != "$(kc -n "$NAMESPACE" get agentrun "$first" -o jsonpath='{.status.cellnParent.initialTurn.child}')" ] || fail "turn reused the initial child"
 pass "distinct child read back: $(echo "$answer" | tr '\n' ' ')"
 
-log "Removing a node's label drains its owner and reports context loss"
-kc label node "$first_node" celln.dev/kvm- >/dev/null
-wait_for "owner drain on $first_node" 120 bash -c "[ \$(kubectl --context kind-$CLUSTER -n celln-system get pods -l app.kubernetes.io/name=celln-node --field-selector spec.nodeName=$first_node -o name | wc -l) = 0 ]"
-wait_for "context loss report for $first" 180 bash -c "kubectl --context kind-$CLUSTER -n $NAMESPACE get agentrun $first -o jsonpath='{.status.error}' | grep -q 'context lost or stopped'"
-if [ "$second_node" != "$first_node" ]; then
-	run_ready "$second" || fail "$second on $second_node was affected by draining $first_node"
-	pass "$first reports ContextLost with owner outcome; $second on $second_node still Ready"
-else
-	pass "$first reports ContextLost with owner outcome after its owner left"
+# One parent per node: release the fleet before another namespace is tried,
+# and prove a live parent can be stopped through the gateway on the way.
+kc -n "$NAMESPACE" delete agentrun "$first" --timeout=120s >/dev/null || fail "$first could not be deleted while its owner was live"
+if run_ready "$second"; then
+	kc -n "$NAMESPACE" delete agentrun "$second" --timeout=120s >/dev/null || fail "$second could not be deleted while its owner was live"
 fi
-kc -n "$NAMESPACE" delete agentrun "$first" --timeout=120s >/dev/null || fail "$first could not be deleted after its owner left"
-pass "$first deleted; cleanup released after owner removal"
+pass "$first deleted through the gateway; fleet released"
 
-kc label node --overwrite "$first_node" celln.dev/kvm=true >/dev/null
+log "A second namespace needs only wrapper objects; an unlabeled one is refused"
+tenant="$NAMESPACE-b"
+denied="$NAMESPACE-denied"
+profile="celln-native-$SCOPE"
+for ns in "$tenant" "$denied"; do
+	kc create namespace "$ns" >/dev/null 2>&1 || true
+	# The tenant's three wrapper objects are copies of the installed ones.
+	for kind in modelconnection agentruntime agent; do
+		kc -n "$NAMESPACE" get "$kind" -o json | python3 -c "
+import json, sys
+for item in json.load(sys.stdin)['items']:
+    print(json.dumps({'apiVersion': item['apiVersion'], 'kind': item['kind'], 'metadata': {'name': item['metadata']['name'], 'namespace': sys.argv[1]}, 'spec': item['spec']}))" "$ns" | kc apply -f - >/dev/null
+	done
+done
+kc label namespace "$tenant" --overwrite "celln.sympozium.ai/scope=$SCOPE" >/dev/null
+tenant_run="$(python3 -c "
+import json, sys
+r = json.load(open(sys.argv[1])); r['metadata']['namespace'] = sys.argv[2]; print(json.dumps(r))" "$WORK/fleet-out/installation/run.json" "$tenant" | kc create -f - -o jsonpath='{.metadata.name}')"
+wait_for "parent $tenant_run ready in $tenant" 240 run_ready "$tenant_run" "$tenant"
+wait_for "initial turn of $tenant_run" 240 bash -c "kubectl --context kind-$CLUSTER -n $tenant get agentrun $tenant_run -o jsonpath='{.status.cellnParent.initialTurn.result.succeeded}' | grep -q true"
+[ "$(kc -n "$tenant" get configmap -o name | grep -c grant-)" = 0 ] || fail "grant ConfigMaps appeared in $tenant"
+[ "$(kc -n "$tenant" get cellntool -o name | wc -l)" = 0 ] || fail "namespaced tools appeared in $tenant"
+tenant_node="$(node_of "$(kc -n "$tenant" get agentrun "$tenant_run" -o jsonpath='{.status.cellnParent.binding.launchProfile}')")"
+[ -n "$tenant_node" ] || fail "owner of $tenant_run not found"
+pass "$tenant_run ran in $tenant on $tenant_node from wrapper objects only (no install, no grants, no copied tools)"
+denied_run="$(python3 -c "
+import json, sys
+r = json.load(open(sys.argv[1])); r['metadata']['namespace'] = sys.argv[2]; print(json.dumps(r))" "$WORK/fleet-out/installation/run.json" "$denied" | kc create -f - -o jsonpath='{.metadata.name}')"
+wait_for "policy refusal for $denied_run" 90 bash -c "kubectl --context kind-$CLUSTER -n $denied get agentrun $denied_run -o jsonpath='{.status.conditions[?(@.type==\"CellnParentReady\")].message}' | grep -q AUTH_POLICY_WITHDRAWN"
+[ -z "$(kc -n "$denied" get agentrun "$denied_run" -o jsonpath='{.status.cellnParent}')" ] || fail "$denied_run was issued a parent without policy"
+pass "$denied_run in unlabeled $denied refused with AUTH_POLICY_WITHDRAWN and no parent"
+
+log "Removing a node's label drains its owner and reports context loss"
+kc label node "$tenant_node" celln.dev/kvm- >/dev/null
+wait_for "owner drain on $tenant_node" 120 bash -c "[ \$(kubectl --context kind-$CLUSTER -n celln-system get pods -l app.kubernetes.io/name=celln-node --field-selector spec.nodeName=$tenant_node -o name | wc -l) = 0 ]"
+wait_for "context loss report for $tenant_run" 180 bash -c "kubectl --context kind-$CLUSTER -n $tenant get agentrun $tenant_run -o jsonpath='{.status.error}' | grep -q 'context lost or stopped'"
+pass "$tenant_run reports ContextLost with owner outcome after its owner left"
+kc -n "$tenant" delete agentrun "$tenant_run" --timeout=120s >/dev/null || fail "$tenant_run could not be deleted after its owner left"
+pass "$tenant_run deleted; cleanup released after owner removal"
+
+kc label node --overwrite "$tenant_node" celln.dev/kvm=true >/dev/null
 pass "celln fleet integration complete (work dir: $WORK)"

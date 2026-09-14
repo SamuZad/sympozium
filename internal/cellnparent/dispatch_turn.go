@@ -29,6 +29,12 @@ func ReconcileTurn(ctx context.Context, writer client.Client, reader client.Read
 	if turn.Spec.CancelRequested && !attempted {
 		return false, ErrReconcile
 	}
+	// New work needs live authority; an attempted turn is only observed.
+	if !attempted {
+		if err := revalidatePlatformAuthority(ctx, reader, config, run); err != nil {
+			return false, err
+		}
+	}
 	binding, transport, err := loadBinding(config, run, attempted)
 	if err != nil {
 		return false, err

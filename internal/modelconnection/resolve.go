@@ -32,11 +32,7 @@ func Resolve(ctx context.Context, reader client.Reader, namespace string, model 
 	if !slices.Contains(connection.Spec.Models, model.Model) {
 		return model, fmt.Errorf("model %q is not listed in connection %q", model.Model, model.ConnectionRef)
 	}
-	raw, _ := json.Marshal(struct {
-		UID  types.UID
-		Spec api.ModelConnectionSpec
-	}{connection.UID, connection.Spec})
-	revision := fmt.Sprintf("sha256:%x", sha256.Sum256(raw))
+	revision := Revision(&connection)
 	if model.ConnectionRevision != "" && model.ConnectionRevision != revision {
 		return model, fmt.Errorf("model connection changed; create a new run")
 	}
@@ -57,6 +53,17 @@ func Resolve(ctx context.Context, reader client.Reader, namespace string, model 
 	model.AllowInsecure = s.AllowInsecure
 	model.ConnectionRevision = revision
 	return model, nil
+}
+
+// Revision is the identity a run pins when it is resolved against a
+// connection: the object's UID and its spec. Every later authority check must
+// compare against this same value, never a digest of its own.
+func Revision(connection *api.ModelConnection) string {
+	raw, _ := json.Marshal(struct {
+		UID  types.UID
+		Spec api.ModelConnectionSpec
+	}{connection.UID, connection.Spec})
+	return fmt.Sprintf("sha256:%x", sha256.Sum256(raw))
 }
 
 // Route returns the host-visible identity. The connection revision is separately

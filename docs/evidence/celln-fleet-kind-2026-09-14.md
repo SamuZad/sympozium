@@ -70,6 +70,50 @@ accepts a same-owner refusal as the honest outcome, and per-parent broker
 accounting is filed against Celln. Load-aware placement is a possible later
 gateway improvement.
 
+## Any authorised namespace (P0, PR #536)
+
+A third trial on a fresh `fleet-ci` cluster ran the same install with the
+controller in **platform admission mode**: no grant ConfigMaps, no copied
+tools, one `CellnRuntimeProfile` (with native material), three
+`ClusterCellnTool`s and one `CellnExecutionPolicy` for the scope, and the
+install namespace labeled `celln.sympozium.ai/scope=trial`.
+
+| Step | Result |
+| --- | --- |
+| Install namespace | `celln-starter-jp65f` resolved through policy, provisioned through the gateway on `fleet-ci-worker2`, answered the initial DeepSeek turn; `celln-starter-2bq6v` hashed to the other owner `fleet-ci-worker` and ran too (an earlier attempt of this trial saw the second run hash to the occupied node and be refused for capacity, not re-placed). |
+| Follow-up turn | Distinct child on the same incarnation read back *Content: violet / Revision: 1*. |
+| Release | Both live parents were deleted through the gateway; the fleet was free again. |
+| Second namespace `celln-agents-b` | Operator labeled the namespace; tenant applied only the three wrapper objects copied from the install namespace. `celln-starter-5djrt` was admitted on `fleet-ci-worker` and answered its initial turn. No grant ConfigMaps, no namespaced tools. |
+| Unlabeled namespace `celln-agents-denied` | Same wrapper objects, no label: the run was held with `CellnParentReady=AdmissionPending: Platform policy refused admission (AUTH_POLICY_WITHDRAWN)` and no parent was issued. |
+| Node leave | Unlabeling `fleet-ci-worker` drained its owner; `celln-starter-5djrt` reported *context lost or stopped* and deleted cleanly. |
+
+### Defects found and fixed on the way
+
+- The platform resolver treated the controller's own persisted route
+  (`spec.model.provider/protocol/baseURL/credentialProfile`) as an inline
+  override and refused every run with `AUTH_ROUTE_MISMATCH`; then it compared
+  the run's pinned connection revision against a digest computed differently
+  from the one the controller pins. Mirrored values are accepted and one
+  `modelconnection.Revision` serves both sides.
+- The provision plan clamped the per-turn output allowance to the run total
+  divided by turns (1024), below the owner's model profile (1536), so the
+  owner refused every plan with an opaque `409 parent provisioning refused`.
+  The resolver's turn cap now follows a native profile's per-turn allowance
+  bounded by the run total; a run whose budget affords less than one turn is
+  refused with `AUTH_LIMIT_RANGE` before anything is pinned.
+- A failed issuance could never be retried: each retry resolved under a new
+  clock, pinned a different choice and failed with "already assigned
+  differently". The choice record now carries the frozen resolution; retries
+  revalidate it and re-send byte-identical plans, so the gateway's owner
+  affinity and the owner's ledger see one plan per incarnation.
+- Owner refusals were reduced to "remote parent issuer failed" before reaching
+  the log; the status and bounded error text are now kept.
+- The guide's tenant wrapper YAML omitted `spec.image` and `spec.agents`,
+  which the CRDs require even for profile wrappers.
+
+Deleting a capacity-refused run still loops on "parent or turn not found"
+(#534, P2); the journey does not delete refused runs.
+
 ## Environment caveats
 
 - Kind nodes have no kernel in `/boot`; the dispatcher's readiness gate

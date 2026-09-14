@@ -7,6 +7,7 @@ import (
 	"time"
 
 	api "github.com/sympozium-ai/sympozium/api/v1alpha1"
+	"github.com/sympozium-ai/sympozium/internal/cellnauthority"
 	"github.com/sympozium-ai/sympozium/internal/cellnparent"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -18,6 +19,10 @@ import (
 
 type ParentAdmission interface {
 	Admit(context.Context, types.NamespacedName) error
+	// SupportsPlatform reports whether wrapper-shaped selections (platform
+	// runtime profile, cluster tools) are admitted here rather than held for
+	// the scoped receiver.
+	SupportsPlatform() bool
 }
 
 func (r *AgentRunReconciler) parentReader() client.Reader {
@@ -35,7 +40,7 @@ func (r *AgentRunReconciler) reconcileCellnParent(ctx context.Context, run *api.
 	}
 	if r.ParentAdmission != nil && run.Status.CellnParent == nil {
 		if err := r.ParentAdmission.Admit(ctx, client.ObjectKeyFromObject(run)); err != nil {
-			if statusErr := r.recordParentAdmissionPending(ctx, run); statusErr != nil {
+			if statusErr := r.recordParentAdmissionPending(ctx, run, err); statusErr != nil {
 				return ctrl.Result{}, statusErr
 			}
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, fmt.Errorf("parent admission unavailable; no execution attempted: %w", err)
@@ -113,7 +118,7 @@ func (r *AgentRunReconciler) reconcileCellnParent(ctx context.Context, run *api.
 
 // Report admission without leaking operator paths or overwriting a concurrently
 // bound parent. This observation grants no authority and does not start work.
-func (r *AgentRunReconciler) recordParentAdmissionPending(ctx context.Context, observed *api.AgentRun) error {
+func (r *AgentRunReconciler) recordParentAdmissionPending(ctx context.Context, observed *api.AgentRun, cause error) error {
 	var fresh api.AgentRun
 	if err := r.parentReader().Get(ctx, client.ObjectKeyFromObject(observed), &fresh); err != nil {
 		return err
@@ -122,7 +127,13 @@ func (r *AgentRunReconciler) recordParentAdmissionPending(ctx context.Context, o
 		return nil
 	}
 	before := fresh.DeepCopy()
-	meta.SetStatusCondition(&fresh.Status.Conditions, metav1.Condition{Type: "CellnParentReady", Status: metav1.ConditionFalse, Reason: "AdmissionPending", Message: "Waiting for a matching operator-prepared parent registration and current grants. Ask the operator to check admission; do not create a replacement run.", ObservedGeneration: fresh.Generation})
+	message := "Waiting for a matching operator-prepared parent registration and current grants. Ask the operator to check admission; do not create a replacement run."
+	// A platform refusal has a stable, secret-free reason code worth showing;
+	// anything else stays generic so operator paths never reach tenant status.
+	if reason := cellnauthority.PlatformReason(cause); reason != "" {
+		message = "Platform policy refused admission (" + reason + "). Ask the operator to authorise this namespace, runtime profile, tools and model route; do not create a replacement run."
+	}
+	meta.SetStatusCondition(&fresh.Status.Conditions, metav1.Condition{Type: "CellnParentReady", Status: metav1.ConditionFalse, Reason: "AdmissionPending", Message: message, ObservedGeneration: fresh.Generation})
 	if apiequality.Semantic.DeepEqual(before.Status, fresh.Status) {
 		return nil
 	}

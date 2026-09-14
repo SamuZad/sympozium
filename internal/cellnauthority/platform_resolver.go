@@ -11,6 +11,7 @@ import (
 	"time"
 
 	api "github.com/sympozium-ai/sympozium/api/v1alpha1"
+	"github.com/sympozium-ai/sympozium/internal/modelconnection"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -40,6 +41,10 @@ func (e *PlatformResolutionError) Error() string { return e.Reason + ": " + e.De
 func deny(reason, format string, args ...any) error {
 	return &PlatformResolutionError{Reason: reason, Detail: fmt.Sprintf(format, args...)}
 }
+
+// Refuse builds a platform refusal with a stable reason code for callers that
+// extend the resolver's authority (plan construction, issuance gates).
+func Refuse(reason, format string, args ...any) error { return deny(reason, format, args...) }
 
 func PlatformReason(err error) string {
 	var target *PlatformResolutionError
@@ -498,7 +503,9 @@ func resolveDecisionRoute(s platformSnapshot, required bool) (DecisionRouteBindi
 	if err := c.Spec.Validate(); err != nil || c.Spec.Disabled || c.DeletionTimestamp != nil || !slices.Contains(c.Spec.Models, s.Run.Spec.Model.Model) {
 		return empty, deny(ReasonRouteMismatch, "model connection is disabled, incompatible, or does not list the model")
 	}
-	if s.Run.Spec.Model.Provider != "" && s.Run.Spec.Model.Provider != c.Spec.Provider || s.Run.Spec.Model.BaseURL != "" && s.Run.Spec.Model.BaseURL != c.Spec.Endpoint || s.Run.Spec.Model.Protocol != "" && s.Run.Spec.Model.Protocol != c.Spec.Protocol || s.Run.Spec.Model.AuthSecretRef != "" || s.Run.Spec.Model.CredentialProfile != "" || s.Run.Spec.Model.ModelRef != "" || s.Run.Spec.Model.AllowInsecure || len(s.Run.Spec.Model.ProviderHeaders) != 0 || s.Run.Spec.Model.ProviderHeadersSecretRef != "" || len(s.Run.Spec.Model.NodeSelector) != 0 || (s.Run.Spec.Model.Thinking != "" && s.Run.Spec.Model.Thinking != "off") {
+	// The controller persists the connection's own route into spec.model when it
+	// freezes the run; values that mirror the connection are not overrides.
+	if s.Run.Spec.Model.Provider != "" && s.Run.Spec.Model.Provider != c.Spec.Provider || s.Run.Spec.Model.BaseURL != "" && s.Run.Spec.Model.BaseURL != c.Spec.Endpoint || s.Run.Spec.Model.Protocol != "" && s.Run.Spec.Model.Protocol != c.Spec.Protocol || s.Run.Spec.Model.AuthSecretRef != "" || s.Run.Spec.Model.CredentialProfile != "" && s.Run.Spec.Model.CredentialProfile != c.Spec.CredentialProfile || s.Run.Spec.Model.ModelRef != "" || s.Run.Spec.Model.AllowInsecure && !c.Spec.AllowInsecure || len(s.Run.Spec.Model.ProviderHeaders) != 0 || s.Run.Spec.Model.ProviderHeadersSecretRef != "" || len(s.Run.Spec.Model.NodeSelector) != 0 || (s.Run.Spec.Model.Thinking != "" && s.Run.Spec.Model.Thinking != "off") {
 		return empty, deny(ReasonRouteMismatch, "inline model authority or route override is forbidden")
 	}
 	auth := "none"
@@ -506,11 +513,17 @@ func resolveDecisionRoute(s platformSnapshot, required bool) (DecisionRouteBindi
 		auth = "secret"
 	}
 	if c.Spec.CredentialProfile != "" {
-		return empty, deny(ReasonRouteMismatch, "shared namespace execution requires gateway Secret custody, not a host credential profile")
+		// An owner-installed credential profile is an explicit operator route
+		// (policy auth "host-profile"), never tenant custody: the runtime
+		// profile's native material names the only profile a wrapper may use.
+		if s.Profile.Spec.Native == nil || s.Profile.Spec.Native.CredentialProfile != c.Spec.CredentialProfile {
+			return empty, deny(ReasonRouteMismatch, "host credential profile is not the runtime profile's installed model credential")
+		}
+		auth = "host-profile"
 	}
 	var origin string
 	var err error
-	if auth == "secret" {
+	if auth != "none" {
 		origin, err = api.ModelEndpointOriginInsecure(c.Spec.Endpoint, c.Spec.AllowInsecure)
 		if err == nil && !strings.HasPrefix(strings.ToLower(origin), "https://") {
 			err = fmt.Errorf("credential-bearing model endpoint must use HTTPS")
@@ -538,7 +551,7 @@ func resolveDecisionRoute(s platformSnapshot, required bool) (DecisionRouteBindi
 	if err != nil {
 		return empty, err
 	}
-	if revision := s.Run.Spec.Model.ConnectionRevision; revision != "" && revision != specDigest {
+	if revision := s.Run.Spec.Model.ConnectionRevision; revision != "" && revision != modelconnection.Revision(c) {
 		return empty, deny(ReasonRouteMismatch, "pinned model connection revision changed")
 	}
 	route := DecisionRouteBinding{ModelConnectionUID: &uid, ModelConnectionSpecSHA256: specDigest, Provider: c.Spec.Provider, Protocol: c.Spec.Protocol, Model: s.Run.Spec.Model.Model, EndpointOrigin: origin, Auth: auth}
@@ -590,7 +603,12 @@ func resolveBudget(s platformSnapshot, request PlatformResolveRequest, modelRequ
 	}
 	turnDeadline := request.Now.Unix() + turnSeconds
 	turnCap := runCap
-	if maxTurns > 1 {
+	if native := s.Profile.Spec.Native; native != nil && native.TurnModelRequests > 0 && native.TurnOutputTokens > 0 {
+		// A native profile's per-turn allowance is what the owner enforces for
+		// every turn; the run's total still caps the sum.
+		turnCap.Requests = min(turnCap.Requests, native.TurnModelRequests)
+		turnCap.OutputTokens = min(turnCap.OutputTokens, native.TurnOutputTokens)
+	} else if maxTurns > 1 {
 		turnCap.Requests = min(turnCap.Requests, max(int64(1), turnCap.Requests/maxTurns))
 		turnCap.OutputTokens = min(turnCap.OutputTokens, max(int64(1), turnCap.OutputTokens/maxTurns))
 	}

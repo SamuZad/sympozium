@@ -146,6 +146,7 @@ spec:
                       enum:
                       - secret
                       - none
+                      - host-profile
                       type: string
                     endpointOrigins:
                       items:

@@ -65,11 +65,17 @@ func TestLegacyEnduringSelectionReachesParentDispatcherWithoutScopedReceiver(t *
 		t.Fatalf("legacy enduring selection held although the parent path is prepared: scoped=%v err=%v", scoped, err)
 	}
 	if scoped, err := prepared.sharedCatalogueSelected(context.Background(), shared); err != nil || !scoped {
-		t.Fatalf("shared enduring intent reached the legacy parent path: scoped=%v err=%v", scoped, err)
+		t.Fatalf("shared enduring intent reached namespace-grant issuance: scoped=%v err=%v", scoped, err)
+	}
+	platform := &AgentRunReconciler{ParentAdmission: stubParentAdmission{platform: true}}
+	for name, run := range map[string]*api.AgentRun{"legacy": legacy, "shared": shared} {
+		if scoped, err := platform.sharedCatalogueSelected(context.Background(), run); err != nil || scoped {
+			t.Fatalf("%s: platform-capable admission did not take the enduring selection: scoped=%v err=%v", name, scoped, err)
+		}
 	}
 	for name, r := range map[string]*AgentRunReconciler{
 		"nothing-configured": {},
-		"scoped-receiver":    {ScopedDispatcher: &cellnscoped.Dispatcher{}, ParentAdmission: stubParentAdmission{}},
+		"scoped-receiver":    {ScopedDispatcher: &cellnscoped.Dispatcher{}, ParentAdmission: stubParentAdmission{platform: true}},
 	} {
 		if scoped, err := r.sharedCatalogueSelected(context.Background(), legacy); err != nil || !scoped {
 			t.Fatalf("%s: enduring selection escaped to legacy issuance: scoped=%v err=%v", name, scoped, err)
@@ -77,9 +83,10 @@ func TestLegacyEnduringSelectionReachesParentDispatcherWithoutScopedReceiver(t *
 	}
 }
 
-type stubParentAdmission struct{}
+type stubParentAdmission struct{ platform bool }
 
 func (stubParentAdmission) Admit(context.Context, types.NamespacedName) error { return nil }
+func (s stubParentAdmission) SupportsPlatform() bool                          { return s.platform }
 
 func TestScopedTerminalRetainsFinalizerWhenCleanupIsUnconfirmed(t *testing.T) {
 	run := &api.AgentRun{

@@ -153,6 +153,67 @@ spec:
                 required:
                 - hash
                 type: object
+              native:
+                description: |-
+                  Native is the reviewed parent/worker provisioning material an owner
+                  issues an enduring parent from. The fleet installer publishes it from
+                  the starter configuration; every platform decision binds it through the
+                  profile spec digest. It carries no credential.
+                properties:
+                  admissionWindowMs:
+                    format: int64
+                    maximum: 300000
+                    minimum: 1
+                    type: integer
+                  credentialProfile:
+                    description: |-
+                      CredentialProfile names the owner-installed model credential; a tenant
+                      ModelConnection using this runtime must reference exactly this profile.
+                    pattern: ^[A-Za-z0-9_-]{1,64}$
+                    type: string
+                  modelProfile:
+                    pattern: ^blake3:[0-9a-f]{64}$
+                    type: string
+                  parent:
+                    description: |-
+                      Parent and Worker are the complete owner-side ExecutionRequest objects;
+                      Template is the native JSON-harness configuration bound into the model
+                      profile. They are opaque here and verified by the owner at issuance.
+                    x-kubernetes-preserve-unknown-fields: true
+                  reservedMemoryBytes:
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  systemPrompt:
+                    description: |-
+                      SystemPrompt is the persona bound into the model profile; a run using
+                      this runtime must carry it exactly.
+                    maxLength: 8192
+                    type: string
+                  template:
+                    x-kubernetes-preserve-unknown-fields: true
+                  turnModelRequests:
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  turnOutputTokens:
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  worker:
+                    x-kubernetes-preserve-unknown-fields: true
+                required:
+                - admissionWindowMs
+                - credentialProfile
+                - modelProfile
+                - parent
+                - reservedMemoryBytes
+                - systemPrompt
+                - template
+                - turnModelRequests
+                - turnOutputTokens
+                - worker
+                type: object
               platform:
                 enum:
                 - linux/amd64

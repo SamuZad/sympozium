@@ -63,19 +63,26 @@ type ownerIssuer struct {
 // verifies the returned incarnation independently.
 type issueFunc func(ctx context.Context, plan []byte, principal, expected string) (localProvisionResult, error)
 
-func provisionAndApprove(ctx context.Context, loader cellnauthority.Loader, intent ProvisionIntent, template HostProvisionTemplate, owner ownerIssuer, choiceVersion string, host any, issue issueFunc) (RunApproval, error) {
-	var zero RunApproval
-	if err := validateOwnerOrigin(owner.Target); err != nil {
-		return zero, err
+func (o ownerIssuer) validate() error {
+	if err := validateOwnerOrigin(o.Target); err != nil {
+		return err
 	}
-	for _, directory := range []string{owner.Journal, owner.Approvals} {
+	for _, directory := range []string{o.Journal, o.Approvals} {
 		info, err := os.Stat(directory)
 		if !filepath.IsAbs(directory) || err != nil || !info.IsDir() {
-			return zero, fmt.Errorf("existing absolute local provision directories required")
+			return fmt.Errorf("existing absolute local provision directories required")
 		}
 	}
-	if !filepath.IsAbs(owner.TokenFile) || (owner.CAFile != "" && !filepath.IsAbs(owner.CAFile)) {
-		return zero, fmt.Errorf("absolute operator executable and credential paths required")
+	if !filepath.IsAbs(o.TokenFile) || (o.CAFile != "" && !filepath.IsAbs(o.CAFile)) {
+		return fmt.Errorf("absolute operator executable and credential paths required")
+	}
+	return nil
+}
+
+func provisionAndApprove(ctx context.Context, loader cellnauthority.Loader, intent ProvisionIntent, template HostProvisionTemplate, owner ownerIssuer, choiceVersion string, host any, issue issueFunc) (RunApproval, error) {
+	var zero RunApproval
+	if err := owner.validate(); err != nil {
+		return zero, err
 	}
 	raw, err := BuildHostProvisionPlan(ctx, loader, intent, template)
 	if err != nil {

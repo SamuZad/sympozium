@@ -39,7 +39,7 @@ func (p RemoteProvisioner) issue(ctx context.Context, plan []byte, _, expected s
 	defer transport.Close()
 	launch, err := transport.Provision(ctx, plan, expected)
 	if err != nil {
-		return localProvisionResult{}, fmt.Errorf("remote parent issuer failed; preserve issuance state")
+		return localProvisionResult{}, fmt.Errorf("remote parent issuer failed; preserve issuance state: %w", err)
 	}
 	return localProvisionResult{APIVersion: "celln.parent-provisioned/v1", LaunchProfile: launch, Incarnation: expected}, nil
 }

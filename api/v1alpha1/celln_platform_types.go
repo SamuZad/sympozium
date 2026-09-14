@@ -1,6 +1,9 @@
 package v1alpha1
 
-import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+import (
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
 
 // CellnRuntimeProfileRef identifies one immutable operator-published runtime
 // revision. Name alone is never sufficient authority.
@@ -59,6 +62,46 @@ type CellnRuntimeProfileSpec struct {
 	Limits     AgentRuntimeCellnLimits `json:"limits"`
 	// +optional
 	JSON *CellnHarnessJSONLimits `json:"json,omitempty"`
+
+	// Native is the reviewed parent/worker provisioning material an owner
+	// issues an enduring parent from. The fleet installer publishes it from
+	// the starter configuration; every platform decision binds it through the
+	// profile spec digest. It carries no credential.
+	// +optional
+	Native *CellnNativeProvisioning `json:"native,omitempty"`
+}
+
+// CellnNativeProvisioning mirrors the owner-side provision plan fields whose
+// values are fixed by the admitted package rather than by the run.
+type CellnNativeProvisioning struct {
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=300000
+	AdmissionWindowMs int64 `json:"admissionWindowMs"`
+	// Parent and Worker are the complete owner-side ExecutionRequest objects;
+	// Template is the native JSON-harness configuration bound into the model
+	// profile. They are opaque here and verified by the owner at issuance.
+	// +kubebuilder:pruning:PreserveUnknownFields
+	Parent apiextensionsv1.JSON `json:"parent"`
+	// +kubebuilder:pruning:PreserveUnknownFields
+	Worker apiextensionsv1.JSON `json:"worker"`
+	// +kubebuilder:pruning:PreserveUnknownFields
+	Template apiextensionsv1.JSON `json:"template"`
+	// +kubebuilder:validation:Pattern=`^blake3:[0-9a-f]{64}$`
+	ModelProfile string `json:"modelProfile"`
+	// CredentialProfile names the owner-installed model credential; a tenant
+	// ModelConnection using this runtime must reference exactly this profile.
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9_-]{1,64}$`
+	CredentialProfile string `json:"credentialProfile"`
+	// +kubebuilder:validation:Minimum=1
+	ReservedMemoryBytes int64 `json:"reservedMemoryBytes"`
+	// +kubebuilder:validation:Minimum=1
+	TurnModelRequests int64 `json:"turnModelRequests"`
+	// +kubebuilder:validation:Minimum=1
+	TurnOutputTokens int64 `json:"turnOutputTokens"`
+	// SystemPrompt is the persona bound into the model profile; a run using
+	// this runtime must carry it exactly.
+	// +kubebuilder:validation:MaxLength=8192
+	SystemPrompt string `json:"systemPrompt"`
 }
 
 // +kubebuilder:object:root=true
@@ -147,7 +190,7 @@ type CellnExecutionPolicyRoute struct {
 	// +kubebuilder:validation:MaxItems=16
 	// +listType=set
 	EndpointOrigins []string `json:"endpointOrigins"`
-	// +kubebuilder:validation:Enum=secret;none
+	// +kubebuilder:validation:Enum=secret;none;host-profile
 	Auth string `json:"auth"`
 }
 

@@ -73,6 +73,14 @@ export function useCellnTools() {
   return useQuery({ queryKey: ["celln-tools"], queryFn: api.cellnTools.list });
 }
 
+export function useClusterCellnTools() {
+  return useQuery({ queryKey: ["cluster-celln-tools"], queryFn: api.clusterCellnTools.list });
+}
+
+export function useModelConnections() {
+  return useQuery({ queryKey: ["model-connections"], queryFn: api.modelConnections.list });
+}
+
 export function useInstallDefaultRuntimes() {
   const qc = useQueryClient();
   return useMutation({
