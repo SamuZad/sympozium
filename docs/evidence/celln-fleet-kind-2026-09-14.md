@@ -52,13 +52,15 @@ credential was the operator's own DeepSeek key.
 A second trial on a fresh `fleet-ci` cluster created two runs back to back
 with the default 2 GiB node budget. Both incarnations hashed to the same owner
 (`fleet-ci-worker2` held both launch profiles); the first parent came up Ready
-and the owner refused the second create for capacity (two 1.25 GiB parents do
-not fit), so that run reported *Parent outcome unavailable; preserving original
-incarnation without replay* and the gateway's status read reached the owner
-(`parent owner not found`). The gateway does not re-place a refused
-incarnation, by design. Size `celln.fleet.memoryBytes` for the parents a node
-should hold; the integration script now uses 4 GiB and starts runs one at a
-time. Load-aware placement is a possible later gateway improvement.
+and the owner refused the second create for capacity — each parent reserves
+one egress slot and the fleet defaulted to `egressSlots: 1`, and two 1.25 GiB
+parents also exceed a 2 GiB budget — so that run reported *Parent outcome
+unavailable; preserving original incarnation without replay* and the gateway's
+status read reached the owner (`parent owner not found`). The gateway does not
+re-place a refused incarnation, by design. The fleet defaults now hold two
+parents per node (`maxCells: 4`, `egressSlots: 2`, `memoryBytes: 4 GiB`); size
+them for the parents a node should hold. The integration script starts runs
+one at a time. Load-aware placement is a possible later gateway improvement.
 
 ## Environment caveats
 

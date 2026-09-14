@@ -106,7 +106,6 @@ KUBECONFIG="$WORK/kubeconfig" "$SYMPOZIUM" install -n "$NAMESPACE" --celln-fleet
 	--celln-router-image "$CELLN_IMAGE" \
 	--celln-installer-image "ghcr.io/sympozium-ai/sympozium/celln-installer:$TAG" \
 	--set celln.fleet.package.insecureRegistry=true \
-	--set celln.fleet.memoryBytes=4294967296 \
 	--set "controller.image.tag=$TAG" --set "apiserver.image.tag=$TAG" --set "webhook.image.tag=$TAG" >"$WORK/install.log" 2>&1 || { tail -20 "$WORK/install.log"; fail "fleet install"; }
 owners="$(kc -n celln-system get pods -l app.kubernetes.io/name=celln-node --field-selector status.phase=Running -o name | wc -l)"
 [ "$owners" -eq 2 ] || fail "expected 2 running owners, got $owners"
@@ -116,7 +115,7 @@ pass "two owners prepared from one package; controller unpinned; catalogue insta
 log "Enduring runs are issued through the gateway to fleet owners"
 run_ready() { [ "$(kc -n "$NAMESPACE" get agentrun "$1" -o jsonpath='{.status.conditions[?(@.type=="CellnParentReady")].status}')" = True ]; }
 # The gateway places each incarnation by hash, not by load, and a create the
-# owner refuses is terminal for that run; the node budget above holds two
+# owner refuses is terminal for that run; the default node budget holds two
 # parents so placement never decides the outcome. Runs start one at a time.
 runs=()
 for _ in 1 2; do

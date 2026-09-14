@@ -140,6 +140,14 @@ journey on a three-node Kind cluster, including a node-leave drain.
   journal claim; remove them only after every run has been deleted and
   cleanup confirmed.
 
+## Capacity
+
+The gateway places each parent by incarnation hash, not by load, and an owner
+that refuses a create for capacity ends that run (`Parent outcome unavailable`)
+rather than re-placing it. A parent and its per-turn child cost two cells and
+one egress slot; the defaults (`maxCells: 4`, `egressSlots: 2`, `memoryBytes:
+4 GiB`) hold two parents per node. Raise them together for busier nodes.
+
 ## Limits
 
 Single active turn per parent, no parent migration or checkpoint recovery,
