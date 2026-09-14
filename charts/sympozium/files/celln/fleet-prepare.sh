@@ -70,10 +70,22 @@ if [ ! -f "$configuration/configured.json" ]; then
 	rm -rf "$output"
 	plan="$(mktemp "$FLEET_STATE/.plan-XXXXXX")"
 	python3 - "$package" "$FLEET_PACKAGE_HASH" "$FLEET_PRINCIPAL" "$FLEET_MODEL_CREDENTIAL_FILE" "$output" >"$plan" <<'PY'
-import json, sys
+import json, os, sys
 package, package_hash, principal, credential, output = sys.argv[1:]
-print(json.dumps({"apiVersion": "celln.native-starter-config/v1", "package": package, "packageHash": package_hash,
-                  "principal": principal, "credentialFile": credential, "output": output}))
+plan = {"apiVersion": "celln.native-starter-config/v1", "package": package, "packageHash": package_hash,
+        "principal": principal, "credentialFile": credential, "output": output}
+endpoint = os.environ.get("FLEET_MODEL_ENDPOINT", "")
+if endpoint:
+    # The operator's model route; Celln validates it again before configuring.
+    plan["modelConnection"] = {
+        "provider": os.environ["FLEET_MODEL_PROVIDER"],
+        "protocol": os.environ["FLEET_MODEL_PROTOCOL"],
+        "endpoint": endpoint,
+        "model": os.environ["FLEET_MODEL_NAME"],
+        "credentialProfile": os.environ["FLEET_SCOPE"],
+        "allowInsecure": os.environ.get("FLEET_MODEL_ALLOW_INSECURE", "false") == "true",
+    }
+print(json.dumps(plan))
 PY
 	"$celln" --root "$root" starter-configure "$plan" --approve-starter-effects
 	rm -f "$plan"

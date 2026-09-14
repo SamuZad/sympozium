@@ -24,6 +24,13 @@
 {{- if or (not $model.secret) (not (hasPrefix "/" $credential)) (contains ".." $credential) (eq (dir $credential) "/") (hasSuffix "/" $credential) }}
 {{- fail "celln.fleet.modelCredential requires a Secret and a clean absolute file path in a dedicated directory" }}
 {{- end }}
+{{- $modelRoute := $fleet.model | default dict }}
+{{- if and $modelRoute.endpoint (or (not $modelRoute.name) (not (has ($modelRoute.protocol | default "") (list "openai-chat" "anthropic-messages"))) (not $modelRoute.provider)) }}
+{{- fail "celln.fleet.model.endpoint needs provider, name and protocol openai-chat or anthropic-messages" }}
+{{- end }}
+{{- if and $modelRoute.endpoint (hasPrefix "http://" $modelRoute.endpoint) (not $modelRoute.allowInsecure) }}
+{{- fail "celln.fleet.model.endpoint is plain HTTP; set celln.fleet.model.allowInsecure=true to approve it" }}
+{{- end }}
 {{- $capacity := $fleet.capacity | default "auto" }}
 {{- if not (has $capacity (list "auto" "fixed")) }}
 {{- fail "celln.fleet.capacity must be auto or fixed" }}
@@ -191,6 +198,18 @@ spec:
               value: {{ $fleet.principal | quote }}
             - name: FLEET_MODEL_CREDENTIAL_FILE
               value: {{ $credential | quote }}
+            - name: FLEET_SCOPE
+              value: {{ $fleet.scope | quote }}
+            - name: FLEET_MODEL_PROVIDER
+              value: {{ $modelRoute.provider | default "" | quote }}
+            - name: FLEET_MODEL_PROTOCOL
+              value: {{ $modelRoute.protocol | default "" | quote }}
+            - name: FLEET_MODEL_ENDPOINT
+              value: {{ $modelRoute.endpoint | default "" | quote }}
+            - name: FLEET_MODEL_NAME
+              value: {{ $modelRoute.name | default "" | quote }}
+            - name: FLEET_MODEL_ALLOW_INSECURE
+              value: {{ $modelRoute.allowInsecure | default false | quote }}
             - name: FLEET_PARENT_CLIENTS
               value: /etc/celln-fleet/clients/trusted-parent-clients.json
             - name: FLEET_CONFIGURATION_CONFIGMAP

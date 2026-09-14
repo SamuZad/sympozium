@@ -90,29 +90,29 @@ func TestPublishFleetModelCredentialKeepsExistingSecret(t *testing.T) {
 	ctx := context.Background()
 	store := fleetStore()
 	path := filepath.Join(t.TempDir(), "model-token")
-	if err := PublishFleetModelCredential(ctx, store, path); err == nil {
+	if err := PublishFleetModelCredential(ctx, store, path, FleetModel{}); err == nil {
 		t.Fatal("missing file accepted")
 	}
-	if err := os.WriteFile(path, []byte("sk-test-model-credential\n"), 0600); err != nil {
+	if err := os.WriteFile(path, []byte("sk-test-model-credential-0001\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := PublishFleetModelCredential(ctx, store, path); err != nil {
+	if err := PublishFleetModelCredential(ctx, store, path, FleetModel{}); err != nil {
 		t.Fatal(err)
 	}
 	var secret corev1.Secret
-	if err := store.Get(ctx, types.NamespacedName{Namespace: "celln-system", Name: FleetModelCredentialSecret}, &secret); err != nil || string(secret.Data["token"]) != "sk-test-model-credential" {
+	if err := store.Get(ctx, types.NamespacedName{Namespace: "celln-system", Name: FleetModelCredentialSecret}, &secret); err != nil || string(secret.Data["token"]) != "sk-test-model-credential-0001" {
 		t.Fatalf("credential not published verbatim: %v %q", err, secret.Data)
 	}
-	if err := PublishFleetModelCredential(ctx, store, path); err != nil {
+	if err := PublishFleetModelCredential(ctx, store, path, FleetModel{}); err != nil {
 		t.Fatalf("identical rerun refused: %v", err)
 	}
-	if err := os.WriteFile(path, []byte("sk-rotated-model-credential\n"), 0600); err != nil {
+	if err := os.WriteFile(path, []byte("sk-rotated-model-credential-01\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := PublishFleetModelCredential(ctx, store, path); err == nil {
+	if err := PublishFleetModelCredential(ctx, store, path, FleetModel{}); err == nil {
 		t.Fatal("existing credential replaced")
 	}
-	if err := PublishFleetModelCredential(ctx, store, ""); err != nil {
+	if err := PublishFleetModelCredential(ctx, store, "", FleetModel{}); err != nil {
 		t.Fatalf("existing credential not kept: %v", err)
 	}
 }
@@ -196,5 +196,75 @@ func TestConfigureFleetRebindsIssuanceToGateway(t *testing.T) {
 	write()
 	if _, err := ConfigureFleet(ctx, fleetStore(), o); err == nil {
 		t.Fatal("registration without local starter issuance accepted")
+	}
+}
+
+func TestFleetModelPresetsAndRefusals(t *testing.T) {
+	ok := map[string]FleetModel{
+		"deepseek default": {},
+		"openai":           {Provider: ModelProviderOpenAI, Name: "gpt-test"},
+		"anthropic":        {Provider: ModelProviderAnthropic, Name: "claude-test"},
+		"llama-server":     {Provider: ModelProviderLlamaServer, Name: "qwen.gguf", Endpoint: "http://100.81.163.75:8080/v1/chat/completions", AllowInsecure: true},
+		"custom gateway":   {Provider: "litellm", Name: "m", Endpoint: "https://gateway.example/v1/chat/completions", Protocol: "openai-chat"},
+	}
+	want := map[string][3]string{
+		"deepseek default": {"deepseek", "openai-chat", "https://api.deepseek.com/chat/completions"},
+		"openai":           {"openai", "openai-chat", "https://api.openai.com/v1/chat/completions"},
+		"anthropic":        {"anthropic", "anthropic-messages", "https://api.anthropic.com/v1/messages"},
+		"llama-server":     {"llama-server", "openai-chat", "http://100.81.163.75:8080/v1/chat/completions"},
+		"custom gateway":   {"litellm", "openai-chat", "https://gateway.example/v1/chat/completions"},
+	}
+	for name, m := range ok {
+		got, err := m.Resolve("trial")
+		if err != nil || [3]string{got.Provider, got.Protocol, got.Endpoint} != want[name] || got.Name == "" {
+			t.Fatalf("%s: %+v %v", name, got, err)
+		}
+	}
+	for name, m := range map[string]FleetModel{
+		"openai without model":      {Provider: ModelProviderOpenAI},
+		"llama without endpoint":    {Provider: ModelProviderLlamaServer, Name: "q"},
+		"plain http unapproved":     {Provider: ModelProviderLlamaServer, Name: "q", Endpoint: "http://10.0.0.5:8080/v1/chat/completions"},
+		"custom without protocol":   {Provider: "litellm", Name: "m", Endpoint: "https://gateway.example/v1/chat/completions"},
+		"unsupported protocol":      {Provider: "litellm", Name: "m", Endpoint: "https://gateway.example/v1/x", Protocol: "gemini"},
+		"endpoint with credentials": {Provider: ModelProviderOpenAI, Name: "m", Endpoint: "https://user:pw@api.openai.com/v1/chat/completions"},
+		"comma breaks helm --set":   {Provider: ModelProviderOpenAI, Name: "a,b"},
+	} {
+		if _, err := m.Resolve("trial"); err == nil {
+			t.Fatalf("%s accepted", name)
+		}
+	}
+	o := validFleet()
+	o.Model = ok["llama-server"]
+	values, err := FleetValues(o)
+	joined := strings.Join(values, "\n")
+	if err != nil || !strings.Contains(joined, "celln.fleet.model.endpoint=http://100.81.163.75:8080/v1/chat/completions") || !strings.Contains(joined, "celln.fleet.model.allowInsecure=true") || !strings.Contains(joined, "celln.fleet.model.name=qwen.gguf") {
+		t.Fatalf("model route not rendered into values: %v %s", err, joined)
+	}
+	o.Model = FleetModel{Provider: ModelProviderOpenAI}
+	if _, err := FleetValues(o); err == nil {
+		t.Fatal("fleet values rendered without a model name")
+	}
+}
+
+func TestKeylessModelPublishesPlaceholderAndShortKeysAreRefused(t *testing.T) {
+	ctx := context.Background()
+	store := fleetStore()
+	llama := FleetModel{Provider: ModelProviderLlamaServer}
+	if err := PublishFleetModelCredential(ctx, store, "", FleetModel{Provider: ModelProviderOpenAI}); err == nil {
+		t.Fatal("a provider that needs a key was installed without one")
+	}
+	if err := PublishFleetModelCredential(ctx, store, "", llama); err != nil {
+		t.Fatal(err)
+	}
+	var secret corev1.Secret
+	if err := store.Get(ctx, types.NamespacedName{Namespace: "celln-system", Name: FleetModelCredentialSecret}, &secret); err != nil || len(secret.Data["token"]) < 24 {
+		t.Fatalf("keyless backend placeholder missing or too short for Celln: %v %q", err, secret.Data)
+	}
+	short := filepath.Join(t.TempDir(), "short")
+	if err := os.WriteFile(short, []byte("sk-short\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := PublishFleetModelCredential(ctx, fleetStore(), short, FleetModel{}); err == nil {
+		t.Fatal("credential Celln would refuse was published")
 	}
 }

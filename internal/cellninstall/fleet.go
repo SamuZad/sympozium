@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	api "github.com/sympozium-ai/sympozium/api/v1alpha1"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -48,6 +49,87 @@ type FleetOptions struct {
 	Scope, Principal, Publisher string
 	PackageImage, PackageHash   string
 	ModelCredentialPath         string
+	// Model is the one model route every node configures for this scope. An
+	// empty Provider keeps Celln's reviewed default (DeepSeek).
+	Model FleetModel
+}
+
+// FleetModel selects the scope's model backend. Provider presets fill the
+// protocol and endpoint; an explicit endpoint or protocol overrides them.
+type FleetModel struct {
+	Provider      string
+	Protocol      string
+	Endpoint      string
+	Name          string
+	AllowInsecure bool
+}
+
+// Fleet model provider presets.
+const (
+	ModelProviderDeepSeek    = "deepseek"
+	ModelProviderOpenAI      = "openai"
+	ModelProviderAnthropic   = "anthropic"
+	ModelProviderLlamaServer = "llama-server"
+)
+
+// fleetModelPlaceholderCredential is published for backends that take no key
+// (llama-server). Celln requires a bounded printable credential file; local
+// servers ignore the bearer.
+const fleetModelPlaceholderCredential = "sympozium-local-model-no-credential"
+
+// Resolve applies the provider preset and validates the route exactly as the
+// tenant ModelConnection will be validated.
+func (m FleetModel) Resolve(scope string) (FleetModel, error) {
+	if m.Provider == "" {
+		m.Provider = ModelProviderDeepSeek
+	}
+	switch m.Provider {
+	case ModelProviderDeepSeek:
+		m.Protocol = firstNonEmpty(m.Protocol, "openai-chat")
+		m.Endpoint = firstNonEmpty(m.Endpoint, "https://api.deepseek.com/chat/completions")
+		m.Name = firstNonEmpty(m.Name, "deepseek-chat")
+	case ModelProviderOpenAI:
+		m.Protocol = firstNonEmpty(m.Protocol, "openai-chat")
+		m.Endpoint = firstNonEmpty(m.Endpoint, "https://api.openai.com/v1/chat/completions")
+	case ModelProviderAnthropic:
+		m.Protocol = firstNonEmpty(m.Protocol, "anthropic-messages")
+		m.Endpoint = firstNonEmpty(m.Endpoint, "https://api.anthropic.com/v1/messages")
+	case ModelProviderLlamaServer:
+		m.Protocol = firstNonEmpty(m.Protocol, "openai-chat")
+		if m.Endpoint == "" {
+			return m, fmt.Errorf("llama-server needs --celln-fleet-model-endpoint, e.g. http://HOST:8080/v1/chat/completions")
+		}
+	default:
+		if m.Endpoint == "" || m.Protocol == "" {
+			return m, fmt.Errorf("model provider %q needs an explicit endpoint and protocol (openai-chat or anthropic-messages)", m.Provider)
+		}
+	}
+	if m.Name == "" {
+		return m, fmt.Errorf("model provider %q needs --celln-fleet-model (the model name the backend serves)", m.Provider)
+	}
+	if strings.HasPrefix(strings.ToLower(m.Endpoint), "http://") && !m.AllowInsecure {
+		return m, fmt.Errorf("model endpoint %s is plain HTTP; pass --celln-fleet-model-allow-insecure to approve it (private networks only)", m.Endpoint)
+	}
+	spec := api.ModelConnectionSpec{Provider: m.Provider, Protocol: m.Protocol, Endpoint: m.Endpoint, CredentialProfile: scope, Models: []string{m.Name}, AllowInsecure: m.AllowInsecure}
+	if err := spec.Validate(); err != nil {
+		return m, fmt.Errorf("model route: %w", err)
+	}
+	if strings.ContainsAny(m.Endpoint+m.Name+m.Provider, ",= \t") {
+		return m, fmt.Errorf("model provider, endpoint and name must not contain commas, equals signs or spaces")
+	}
+	return m, nil
+}
+
+// NeedsCredential reports whether the backend requires a real provider key.
+func (m FleetModel) NeedsCredential() bool { return m.Provider != ModelProviderLlamaServer }
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // StatePath is the per-node authority location the chart derives from Scope.
@@ -69,7 +151,16 @@ func FleetValues(o FleetOptions) ([]string, error) {
 	if err := o.validate(); err != nil {
 		return nil, err
 	}
+	model, err := o.Model.Resolve(o.Scope)
+	if err != nil {
+		return nil, err
+	}
 	return []string{
+		"celln.fleet.model.provider=" + model.Provider,
+		"celln.fleet.model.protocol=" + model.Protocol,
+		"celln.fleet.model.endpoint=" + model.Endpoint,
+		"celln.fleet.model.name=" + model.Name,
+		fmt.Sprintf("celln.fleet.model.allowInsecure=%t", model.AllowInsecure),
 		"celln.dispatcher.enabled=false",
 		"celln.router.backends=null",
 		"celln.router.parentTokenSecret=" + FleetParentTokenSecret,
@@ -146,7 +237,7 @@ func fleetLabels() map[string]string {
 // Secret every dispatcher mounts at the model profile's path. The controller
 // and guests never read it. An existing Secret is kept when the file is
 // omitted or identical; it is never rotated by replacement.
-func PublishFleetModelCredential(ctx context.Context, store client.Client, path string) error {
+func PublishFleetModelCredential(ctx context.Context, store client.Client, path string, model FleetModel) error {
 	var existing corev1.Secret
 	err := store.Get(ctx, types.NamespacedName{Namespace: fleetNamespace, Name: FleetModelCredentialSecret}, &existing)
 	if err != nil && !apierrors.IsNotFound(err) {
@@ -154,6 +245,10 @@ func PublishFleetModelCredential(ctx context.Context, store client.Client, path 
 	}
 	if err == nil && path == "" {
 		return nil
+	}
+	if path == "" && !model.NeedsCredential() {
+		// A keyless local backend still needs Celln's bounded credential file.
+		return store.Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: FleetModelCredentialSecret, Namespace: fleetNamespace, Labels: fleetLabels()}, Data: map[string][]byte{"token": []byte(fleetModelPlaceholderCredential)}})
 	}
 	info, statErr := os.Lstat(path)
 	if path == "" || !filepath.IsAbs(path) || statErr != nil || !info.Mode().IsRegular() || info.Size() > 4096 {
@@ -164,8 +259,8 @@ func PublishFleetModelCredential(ctx context.Context, store client.Client, path 
 		return readErr
 	}
 	credential := strings.TrimRight(string(raw), "\r\n")
-	if len(credential) < 8 || strings.ContainsAny(credential, "\r\n") {
-		return fmt.Errorf("model credential file must hold one non-empty line")
+	if len(credential) < 24 || strings.ContainsAny(credential, "\r\n\t ") {
+		return fmt.Errorf("model credential file must hold one line of at least 24 printable characters")
 	}
 	if err == nil {
 		if string(existing.Data["token"]) != credential {

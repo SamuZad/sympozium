@@ -134,6 +134,63 @@ A run 14 on Celln v0.5.11 passed the same namespace steps. Terminal
 `CreateRefused` outcomes are covered by unit tests; with node-sized capacity
 the journey no longer hits a capacity refusal.
 
+## llama-server backend on the framework machine
+
+A fifth trial ran the same journey with the scope's model backend set to a
+llama-server on another machine reached over Tailscale
+(`--celln-fleet-model-provider llama-server --celln-fleet-model
+Qwen3.8-27B-UD-Q4_K_XL.gguf --celln-fleet-model-endpoint
+http://100.81.163.75:8080/v1/chat/completions
+--celln-fleet-model-allow-insecure`, no credential file). The Celln build
+included sympozium-ai/celln#116 (model requests bounded by the turn deadline
+instead of 45 seconds); llama-server served about 11 tokens/s.
+
+| Step | Result |
+| --- | --- |
+| Install | Nodes configured the llama-server model profile; the policy route was stamped `auth: host-profile`, origin `http://100.81.163.75:8080`, `allowInsecure: true`; a placeholder credential Secret was published. |
+| First parent | `celln-starter-ntjgc` (connection provider `llama-server`) answered *Done. Wrote "violet" to notes.txt; the file is now at revision 1.* |
+| Two parents, one node | `celln-starter-27vh7` joined it on `fleet-ci-worker2` and answered its own turn. |
+| Follow-up turn | Distinct child read back *violet (revision 1)*. |
+| Tenant and excluded namespaces | `celln-starter-l484n` ran in unlabeled `celln-agents-b` with wrappers created on first use (a llama-server connection); `celln-agents-denied` was refused `AUTH_POLICY_WITHDRAWN`. |
+| Node leave | ContextLost on `celln-starter-l484n`, clean delete. |
+
+The first attempt failed at install: the `CellnExecutionPolicy` CRD rule
+allowed plain HTTP only for no-auth loopback routes. Policy routes now carry
+an explicit `allowInsecure` for host-profile credentials. OpenAI and Anthropic
+presets are covered by unit tests; no live keys were available for this trial.
+
+## Anthropic protocol and two backends side by side
+
+A sixth trial ran the full journey with the llama-server backend over the
+Anthropic Messages protocol (`--celln-fleet-model-protocol
+anthropic-messages`, endpoint `http://100.81.163.75:8080/v1/messages`), with
+sympozium-ai/celln#118 in the dispatcher. llama-server returns `thinking`
+content blocks for reasoning models, which the broker used to refuse; they
+are now dropped. Every step passed: first turn *Done. "violet" written to
+notes.txt (now revision 1)*, two parents on one node, follow-up *violet
+revision: 1*, deletes, label-free tenant namespace, excluded namespace,
+node loss.
+
+A second cluster, `fleet-ds`, ran the DeepSeek backend at the same time. Each
+fleet then got a brand-new namespace, prepared only through
+`/api/v1/celln-platform/wrappers`, and one enduring run asked *"Where is
+Botswana? Answer in two sentences without using any tools."*:
+
+| Namespace | Backend | Answer |
+| --- | --- | --- |
+| `botswana-llama` (`fleet-ci`) | llama-server, Qwen3.8-27B, `anthropic-messages` | *Botswana is a landlocked country located in southern Africa. It is bordered by South Africa, Namibia, Zimbabwe, and Zambia.* |
+| `botswana-deepseek` (`fleet-ds`) | DeepSeek, `deepseek-chat`, `openai-chat` | *Botswana is a landlocked country in Southern Africa, bordered by South Africa to the south, Namibia to the west and north, Zimbabwe to the northeast, and Zambia to the north. Its capital is Gaborone, located in the country's southeastern corner near the South African border.* |
+
+Two clusters were used because a fleet scope has one model backend; several
+backends in one cluster is #535.
+
+Running two installs on one host exposed installer defects, all fixed: Helm
+ignored `$KUBECONFIG` and installed into whichever cluster `~/.kube/config`
+selected; CRDs were not awaited as established; cert-manager readiness was
+skipped when it was already present; GitHub 504s on release manifests aborted
+the install (now retried, and the journey can use a cached cert-manager
+manifest); and the journey leaked its API port-forward.
+
 ## Environment caveats
 
 - Kind nodes have no kernel in `/boot`; the dispatcher's readiness gate

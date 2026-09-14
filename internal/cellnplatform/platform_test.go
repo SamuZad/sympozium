@@ -105,3 +105,28 @@ func TestEnsureWrappersCreatesMissingObjectsOnceAndNeverOverwrites(t *testing.T)
 		t.Fatalf("connection not bound to the policy route: %+v %v", connection.Spec, err)
 	}
 }
+
+// An operator-approved insecure profile yields a tenant connection that
+// carries the approval and binds the policy's plain-HTTP route.
+func TestTenantWrappersCarryInsecureApprovalFromProfile(t *testing.T) {
+	raw := func(s string) apiextensionsv1.JSON { return apiextensionsv1.JSON{Raw: []byte(s)} }
+	profile := &api.CellnRuntimeProfile{ObjectMeta: metav1.ObjectMeta{Name: "celln-native-local"}, Spec: api.CellnRuntimeProfileSpec{Revision: "v1", Native: &api.CellnNativeProvisioning{CredentialProfile: "local", Template: raw(`{"model":"qwen.gguf","url":"http://100.81.163.75:8080/v1/chat/completions","allow_insecure":true}`)}}}
+	policy := &api.CellnExecutionPolicy{ObjectMeta: metav1.ObjectMeta{Name: "celln-fleet-local"}, Spec: api.CellnExecutionPolicySpec{Routes: []api.CellnExecutionPolicyRoute{{Provider: "llama-server", Protocol: "openai-chat", Models: []string{"qwen.gguf"}, EndpointOrigins: []string{"http://100.81.163.75:8080"}, Auth: "host-profile", AllowInsecure: true}}}}
+	objects, err := TenantWrappers("team-a", profile, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection := objects[2].(*api.ModelConnection)
+	if !connection.Spec.AllowInsecure || connection.Spec.Provider != "llama-server" || connection.Spec.Validate() != nil {
+		t.Fatalf("insecure approval not carried: %+v %v", connection.Spec, connection.Spec.Validate())
+	}
+	policy.Spec.Routes[0].AllowInsecure = false
+	if _, err := TenantWrappers("team-a", profile, policy); err == nil {
+		t.Fatal("policy route without insecure approval matched a plain-HTTP profile")
+	}
+	policy.Spec.Routes[0].AllowInsecure = true
+	profile.Spec.Native.Template = raw(`{"model":"qwen.gguf","url":"http://100.81.163.75:8080/v1/chat/completions"}`)
+	if _, err := TenantWrappers("team-a", profile, policy); err == nil {
+		t.Fatal("plain-HTTP profile without operator approval produced a connection")
+	}
+}

@@ -134,7 +134,7 @@ func InstallPlatform(ctx context.Context, store client.Client, o PlatformOptions
 		RuntimeProfiles:   []api.CellnExecutionPolicyRuntime{{Ref: api.CellnRuntimeProfileRef{Name: profileName, Revision: cat.Worker.Revision}}},
 		Tools:             policyTools,
 		Lifecycles:        []string{"direct-one-shot", "harness-one-shot", "enduring"},
-		Routes:            []api.CellnExecutionPolicyRoute{{Provider: configured.Model.Provider, Protocol: protocol, Models: []string{configured.Model.Model}, EndpointOrigins: []string{origin}, Auth: "host-profile"}},
+		Routes:            []api.CellnExecutionPolicyRoute{{Provider: configured.Model.Provider, Protocol: protocol, Models: []string{configured.Model.Model}, EndpointOrigins: []string{origin}, Auth: "host-profile", AllowInsecure: configured.Model.AllowInsecure}},
 		Ceilings:          api.CellnExecutionPolicyCeilings{MaxTurns: int64(limits.MaxTurns), MaxModelRequests: int64(limits.MaxModelRequests), MaxOutputTokens: limits.MaxOutputTokens, MaxParentLeaseSeconds: int64(limits.LeaseSeconds), MaxTurnSeconds: worker.Capabilities.TimeoutMs / 1000},
 	}}
 	objects = append(objects, policy)

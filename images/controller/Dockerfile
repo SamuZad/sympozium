@@ -6,7 +6,7 @@
 # See docs/design/celln-single-execution-plane.md.
 #
 # CELLN_IMAGE is the pinned Celln image from config/celln/release.json.
-ARG CELLN_IMAGE=ghcr.io/sympozium-ai/celln@sha256:d7679399be518bd8a4592dd8f96c11d9ea44c8ec41572889ab92a0fe17cb3c2f
+ARG CELLN_IMAGE=ghcr.io/sympozium-ai/celln@sha256:6f3cd99ed7edea802076ac6b5ae344252aa80148137bacb36f38b145f8b39977
 
 # The Celln CLI is amd64-only: its KVM backend has no ARM64 ABI, so Celln
 # publishes no arm64 bundle. Native parent provisioning runs only on the amd64

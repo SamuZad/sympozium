@@ -1353,7 +1353,7 @@ layers (enduring native parents); it requires the operator-reviewed
 	cmd.Flags().BoolVar(&noCelln, "no-celln", false, "Do not deploy the Celln backend (dispatcher, router, credentials, ownership PVC)")
 	cmd.Flags().BoolVar(&cellnHostInstaller, "celln-host-installer", false, "Deploy the privileged host-installer DaemonSet (bare-metal systemd dispatcher) instead of the in-cluster pod dispatcher; requires --celln-backend")
 	cmd.Flags().StringArrayVar(&cellnBackends, "celln-backend", nil, "Celln router dispatcher origin(s) http://host:port (repeatable); defaults to the in-cluster celln-dispatcher Service")
-	cmd.Flags().StringVar(&cellnRouterImage, "celln-router-image", "", "Celln router image repo:tag or repo@sha256:... (default ghcr.io/sympozium-ai/celln:v0.5.12)")
+	cmd.Flags().StringVar(&cellnRouterImage, "celln-router-image", "", "Celln router image repo:tag or repo@sha256:... (default ghcr.io/sympozium-ai/celln:v0.5.14)")
 	cmd.Flags().StringVar(&cellnInstallerImage, "celln-installer-image", "", "Celln host-installer image repo:tag (default ghcr.io/sympozium-ai/sympozium/celln-installer, tagged with this release)")
 	cmd.Flags().IntVar(&cellnRouterReplicas, "celln-router-replicas", 1, "Celln router replicas for the generated ReadWriteOnce ownership PVC")
 	cmd.Flags().BoolVar(&cellnNative, "celln-native", false, "Also install the native Celln starter catalogue and grant layers (requires the operator --celln-native-* inputs)")
@@ -1376,7 +1376,7 @@ func cellnInstallSetValues(ctx context.Context, routerImage, installerImage stri
 	if replicas <= 0 {
 		replicas = 1
 	}
-	routerRepo, routerRef, routerIsDigest := splitImageRef(routerImage, "ghcr.io/sympozium-ai/celln", "v0.5.12")
+	routerRepo, routerRef, routerIsDigest := splitImageRef(routerImage, "ghcr.io/sympozium-ai/celln", "v0.5.14")
 	installerTag := version
 	if installerTag == "" || installerTag == "dev" {
 		installerTag = "latest"
@@ -1466,13 +1466,14 @@ const (
 // newHelmConfig creates a Helm action.Configuration bound to the given namespace.
 func newHelmConfig(ns string) (*action.Configuration, error) {
 	cfg := new(action.Configuration)
-	// Use the same kubeconfig resolution as the rest of the CLI.
-	kubeconfigPath := kubeconfig
-	if kubeconfigPath == "" {
-		kubeconfigPath = clientcmd.RecommendedHomeFile
-	}
+	// Use the same kubeconfig resolution as the rest of the CLI and kubectl:
+	// --kubeconfig when given, otherwise $KUBECONFIG, otherwise ~/.kube/config.
+	// Forcing ~/.kube/config here sent Helm to whichever cluster was last
+	// created while kubectl followed $KUBECONFIG.
 	settings := helmcli.New()
-	settings.KubeConfig = kubeconfigPath
+	if kubeconfig != "" {
+		settings.KubeConfig = kubeconfig
+	}
 	settings.SetNamespace(ns)
 	if err := cfg.Init(settings.RESTClientGetter(), ns, "secret", func(format string, v ...interface{}) {
 		// Silence Helm's debug logging.
@@ -1526,7 +1527,47 @@ func applyCRDs(ch *chart.Chart) error {
 		}
 	}
 	fmt.Println("  Applying CRDs...")
-	return kubectl("apply", "--server-side", "--force-conflicts", "-f", tmpDir)
+	if err := kubectl("apply", "--server-side", "--force-conflicts", "-f", tmpDir); err != nil {
+		return err
+	}
+	// Helm maps the chart's custom resources when it builds the release; a CRD
+	// that is applied but not yet established fails the install on a busy
+	// API server ("no matches for kind").
+	if err := kubectlQuiet("wait", "--for=condition=established", "--timeout=120s", "-f", tmpDir); err != nil {
+		return fmt.Errorf("CRDs not established: %w", err)
+	}
+	return nil
+}
+
+// waitCertManagerWebhook waits until the webhook admits a server-side
+// dry-run Issuer, which is what Helm's install needs.
+func waitCertManagerWebhook(timeout time.Duration) error {
+	manifest := "apiVersion: cert-manager.io/v1\nkind: Issuer\nmetadata:\n  name: sympozium-webhook-probe\n  namespace: cert-manager\nspec:\n  selfSigned: {}\n"
+	deadline := time.Now().Add(timeout)
+	for {
+		cmd := exec.Command("kubectl", "apply", "--dry-run=server", "-f", "-")
+		cmd.Stdin = strings.NewReader(manifest)
+		if err := cmd.Run(); err == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("cert-manager webhook is not serving")
+		}
+		time.Sleep(3 * time.Second)
+	}
+}
+
+// kubectlRetry retries a command whose failure is typically transient (a
+// remote manifest download answering 5xx).
+func kubectlRetry(attempts int, args ...string) error {
+	var err error
+	for i := 0; i < attempts; i++ {
+		if err = kubectl(args...); err == nil {
+			return nil
+		}
+		time.Sleep(time.Duration(i+1) * 5 * time.Second)
+	}
+	return err
 }
 
 func runInstall(imageTag string, setValues []string) error {
@@ -1579,7 +1620,7 @@ func runInstall(imageTag string, setValues []string) error {
 
 	// ── Pre-flight: Gateway API CRDs ────────────────────────────────────
 	fmt.Println("  Installing Gateway API CRDs...")
-	if err := kubectl("apply", "--server-side", "--force-conflicts", "-f", gatewayAPICRDsURL); err != nil {
+	if err := kubectlRetry(4, "apply", "--server-side", "--force-conflicts", "-f", gatewayAPICRDsURL); err != nil {
 		return fmt.Errorf("install Gateway API CRDs: %w", err)
 	}
 
@@ -1587,22 +1628,37 @@ func runInstall(imageTag string, setValues []string) error {
 	fmt.Println("  Checking cert-manager...")
 	if err := kubectlQuiet("get", "namespace", "cert-manager"); err != nil {
 		fmt.Println("  Installing cert-manager...")
-		if err := kubectl("apply", "-f",
+		if err := kubectlRetry(4, "apply", "-f",
 			"https://github.com/cert-manager/cert-manager/releases/download/v1.17.1/cert-manager.yaml"); err != nil {
 			return fmt.Errorf("install cert-manager: %w", err)
 		}
-		fmt.Println("  Waiting for cert-manager to be ready...")
-		_ = kubectl("wait", "--for=condition=Available", "deployment/cert-manager",
-			"-n", "cert-manager", "--timeout=120s")
-		_ = kubectl("wait", "--for=condition=Available", "deployment/cert-manager-webhook",
-			"-n", "cert-manager", "--timeout=120s")
-		_ = kubectl("wait", "--for=condition=Available", "deployment/cert-manager-cainjector",
-			"-n", "cert-manager", "--timeout=120s")
-		fmt.Println("  Waiting for cert-manager webhook TLS to bootstrap...")
-		time.Sleep(10 * time.Second)
+	}
+	// Wait whoever installed it: a cert-manager applied moments ago (by this
+	// command or by an operator) refuses Helm's Certificates until its webhook
+	// serves.
+	fmt.Println("  Waiting for cert-manager to be ready...")
+	for _, d := range []string{"cert-manager", "cert-manager-webhook", "cert-manager-cainjector"} {
+		_ = kubectl("wait", "--for=condition=Available", "deployment/"+d, "-n", "cert-manager", "--timeout=180s")
+	}
+	if err := waitCertManagerWebhook(2 * time.Minute); err != nil {
+		return err
 	}
 
 	// ── Helm install or upgrade ─────────────────────────────────────────
+	if err := helmInstallOrUpgrade(ch, vals); err != nil {
+		return err
+	}
+
+	fmt.Println("\n  Sympozium installed successfully!")
+	fmt.Println("  Run: sympozium")
+	fmt.Println("\n  To access the web dashboard:")
+	fmt.Println("    sympozium serve")
+	return nil
+}
+
+// helmInstallOrUpgrade installs the release, or upgrades a deployed one,
+// recovering a failed previous release by reinstalling.
+func helmInstallOrUpgrade(ch *chart.Chart, vals map[string]interface{}) error {
 	cfg, err := newHelmConfig(helmNamespace)
 	if err != nil {
 		return err
@@ -1665,10 +1721,6 @@ func runInstall(imageTag string, setValues []string) error {
 		}
 	}
 
-	fmt.Println("\n  Sympozium installed successfully!")
-	fmt.Println("  Run: sympozium")
-	fmt.Println("\n  To access the web dashboard:")
-	fmt.Println("    sympozium serve")
 	return nil
 }
 

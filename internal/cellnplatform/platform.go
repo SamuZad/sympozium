@@ -150,20 +150,21 @@ func TenantWrappers(namespace string, profile *api.CellnRuntimeProfile, policy *
 		return nil, fmt.Errorf("runtime profile %q carries no native credential profile", profile.Name)
 	}
 	var harness struct {
-		Model string `json:"model"`
-		URL   string `json:"url"`
+		Model         string `json:"model"`
+		URL           string `json:"url"`
+		AllowInsecure bool   `json:"allow_insecure"`
 	}
 	if json.Unmarshal(native.Template.Raw, &harness) != nil || harness.Model == "" || harness.URL == "" {
 		return nil, fmt.Errorf("runtime profile %q template names no model route", profile.Name)
 	}
-	origin, err := api.ModelEndpointOriginInsecure(harness.URL, true)
+	origin, err := api.ModelEndpointOriginInsecure(harness.URL, harness.AllowInsecure)
 	if err != nil {
 		return nil, err
 	}
 	var route *api.CellnExecutionPolicyRoute
 	for i := range policy.Spec.Routes {
 		r := &policy.Spec.Routes[i]
-		if r.Auth == "host-profile" && slices.Contains(r.Models, harness.Model) && slices.Contains(r.EndpointOrigins, origin) {
+		if r.Auth == "host-profile" && (!harness.AllowInsecure || r.AllowInsecure) && slices.Contains(r.Models, harness.Model) && slices.Contains(r.EndpointOrigins, origin) {
 			route = r
 			break
 		}
@@ -177,7 +178,7 @@ func TenantWrappers(namespace string, profile *api.CellnRuntimeProfile, policy *
 	return []client.Object{
 		&api.AgentRuntime{ObjectMeta: meta(WrapperRuntimeName), Spec: api.AgentRuntimeSpec{CellnProfileRef: &api.CellnRuntimeProfileRef{Name: profile.Name, Revision: profile.Spec.Revision}, SupportOwner: "celln-platform"}},
 		&api.Agent{ObjectMeta: meta(WrapperAgentName), Spec: api.AgentSpec{RuntimeRef: WrapperRuntimeName}},
-		&api.ModelConnection{ObjectMeta: meta(WrapperConnectionName), Spec: api.ModelConnectionSpec{Provider: route.Provider, Protocol: route.Protocol, Endpoint: harness.URL, CredentialProfile: native.CredentialProfile, Models: []string{harness.Model}}},
+		&api.ModelConnection{ObjectMeta: meta(WrapperConnectionName), Spec: api.ModelConnectionSpec{Provider: route.Provider, Protocol: route.Protocol, Endpoint: harness.URL, CredentialProfile: native.CredentialProfile, Models: []string{harness.Model}, AllowInsecure: harness.AllowInsecure}},
 	}, nil
 }
 

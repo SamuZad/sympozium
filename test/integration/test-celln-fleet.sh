@@ -7,7 +7,9 @@
 # a node's label drains its owner honestly.
 #
 # Requires: kind, docker, kubectl, helm, /dev/kvm, a readable host kernel in
-# /boot, DEEPSEEK_API_KEY, a celln bundle (bin/celln + share/celln with pilot
+# /boot, a model backend (FLEET_MODEL_PROVIDER=deepseek|openai|anthropic|llama-server
+# with DEEPSEEK_API_KEY, OPENAI_API_KEY or ANTHROPIC_API_KEY, or
+# FLEET_MODEL_ENDPOINT for llama-server; FLEET_MODEL names the model), a celln bundle (bin/celln + share/celln with pilot
 # binaries, scripts, guest) matching config/celln/release.json plus #109/#110,
 # and the sympozium controller/apiserver/webhook/celln-installer images tagged
 # $SYMPOZIUM_IMAGE_TAG together with the celln image $CELLN_IMAGE. See
@@ -15,7 +17,18 @@
 set -euo pipefail
 
 : "${CELLN_BUNDLE:?bundle directory with bin/celln and share/celln}"
-: "${DEEPSEEK_API_KEY:?}"
+MODEL_PROVIDER="${FLEET_MODEL_PROVIDER:-deepseek}"
+MODEL_ARGS=(--celln-fleet-model-provider "$MODEL_PROVIDER")
+[ -n "${FLEET_MODEL:-}" ] && MODEL_ARGS+=(--celln-fleet-model "$FLEET_MODEL")
+[ -n "${FLEET_MODEL_ENDPOINT:-}" ] && MODEL_ARGS+=(--celln-fleet-model-endpoint "$FLEET_MODEL_ENDPOINT")
+[ -n "${FLEET_MODEL_PROTOCOL:-}" ] && MODEL_ARGS+=(--celln-fleet-model-protocol "$FLEET_MODEL_PROTOCOL")
+[ "${FLEET_MODEL_ALLOW_INSECURE:-}" = 1 ] && MODEL_ARGS+=(--celln-fleet-model-allow-insecure)
+case "$MODEL_PROVIDER" in
+deepseek) MODEL_KEY="${DEEPSEEK_API_KEY:?DEEPSEEK_API_KEY for the deepseek backend}" ;;
+openai) MODEL_KEY="${OPENAI_API_KEY:?OPENAI_API_KEY for the openai backend}" ;;
+anthropic) MODEL_KEY="${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY for the anthropic backend}" ;;
+*) MODEL_KEY="${FLEET_MODEL_KEY:-}" ;;
+esac
 CLUSTER="${FLEET_CLUSTER:-fleet}"
 SCOPE="${FLEET_SCOPE:-trial}"
 TAG="${SYMPOZIUM_IMAGE_TAG:-fleet-trial}"
@@ -89,10 +102,21 @@ for image in "$CELLN_IMAGE" "ghcr.io/sympozium-ai/sympozium/controller:$TAG" "gh
 done
 [ -x "$SYMPOZIUM" ] || (cd "$REPO" && go build -o "$SYMPOZIUM" ./cmd/sympozium)
 umask 077
-printf '%s\n' "$DEEPSEEK_API_KEY" >"$WORK/model-token"
+rm -f "$WORK/model-token"
+CREDENTIAL_ARGS=()
+if [ -n "$MODEL_KEY" ]; then
+	printf '%s\n' "$MODEL_KEY" >"$WORK/model-token"
+	CREDENTIAL_ARGS=(--celln-fleet-model-credential-file "$WORK/model-token")
+fi
 kc create namespace "$NAMESPACE" 2>/dev/null || true
 kc label node --overwrite -l '!node-role.kubernetes.io/control-plane' celln.dev/kvm=true >/dev/null
 pass "images loaded; workers labeled celln.dev/kvm=true"
+
+# A cached cert-manager manifest avoids depending on GitHub release downloads;
+# the installer skips cert-manager when its namespace already exists.
+if [ -n "${FLEET_CERT_MANAGER_MANIFEST:-}" ]; then
+	kc apply -f "$FLEET_CERT_MANAGER_MANIFEST" >/dev/null
+fi
 
 log "sympozium install --celln-fleet"
 rm -rf "$WORK/fleet-out" # the installer refuses an existing private output directory
@@ -102,7 +126,8 @@ KUBECONFIG="$WORK/kubeconfig" "$SYMPOZIUM" install -n "$NAMESPACE" --celln-fleet
 	--celln-fleet-package-image "$registry/celln/starter@$digest" \
 	--celln-fleet-package-hash "$package_hash" \
 	--celln-fleet-publisher "$publisher" \
-	--celln-fleet-model-credential-file "$WORK/model-token" \
+	"${CREDENTIAL_ARGS[@]}" \
+	"${MODEL_ARGS[@]}" \
 	--celln-fleet-output-dir "$WORK/fleet-out" \
 	--celln-fleet-wait 20m \
 	--celln-native-approve-starter-tools \
@@ -204,13 +229,17 @@ api_token="$(kc -n sympozium-system get secret sympozium-ui-token -o jsonpath='{
 [ -n "$api_token" ] || api_token="$(kc -n sympozium-system get deploy sympozium-apiserver -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="SYMPOZIUM_UI_TOKEN")].value}')"
 api_auth=()
 [ -n "$api_token" ] && api_auth=(-H "Authorization: Bearer $api_token")
-kc -n sympozium-system port-forward svc/sympozium-apiserver 18080:8080 >/dev/null 2>&1 &
+# Run kubectl itself in the background (not the kc function, whose subshell
+# would survive the kill) on a port no other journey holds.
+api_port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
+kubectl --context "kind-$CLUSTER" -n sympozium-system port-forward svc/sympozium-apiserver "$api_port:8080" >/dev/null 2>&1 &
 api_pf=$!
-wait_for "apiserver port-forward" 60 curl -sf "${api_auth[@]}" "http://127.0.0.1:18080/api/v1/celln-platform/profiles?namespace=$tenant" -o /dev/null
-curl -sf "${api_auth[@]}" "http://127.0.0.1:18080/api/v1/celln-platform/profiles?namespace=$tenant" | grep -q "\"name\":\"$profile\"" || fail "platform profile $profile not offered to $tenant"
-curl -sf "${api_auth[@]}" -X POST -H 'Content-Type: application/json' -d "{\"profile\":\"$profile\"}" "http://127.0.0.1:18080/api/v1/celln-platform/wrappers?namespace=$tenant" | grep -q '"connection":"celln-native"' || fail "wrappers were not created in $tenant"
-[ "$(curl -s "${api_auth[@]}" "http://127.0.0.1:18080/api/v1/celln-platform/profiles?namespace=$denied")" = "[]" ] || fail "excluded namespace $denied was offered a profile"
-[ "$(curl -s -o /dev/null -w '%{http_code}' "${api_auth[@]}" -X POST -H 'Content-Type: application/json' -d "{\"profile\":\"$profile\"}" "http://127.0.0.1:18080/api/v1/celln-platform/wrappers?namespace=$denied")" = 403 ] || fail "excluded namespace $denied was prepared"
+trap 'kill "$api_pf" 2>/dev/null || true' EXIT
+wait_for "apiserver port-forward" 60 curl -sf "${api_auth[@]}" "http://127.0.0.1:$api_port/api/v1/celln-platform/profiles?namespace=$tenant" -o /dev/null
+curl -sf "${api_auth[@]}" "http://127.0.0.1:$api_port/api/v1/celln-platform/profiles?namespace=$tenant" | grep -q "\"name\":\"$profile\"" || fail "platform profile $profile not offered to $tenant"
+curl -sf "${api_auth[@]}" -X POST -H 'Content-Type: application/json' -d "{\"profile\":\"$profile\"}" "http://127.0.0.1:$api_port/api/v1/celln-platform/wrappers?namespace=$tenant" | grep -q '"connection":"celln-native"' || fail "wrappers were not created in $tenant"
+[ "$(curl -s "${api_auth[@]}" "http://127.0.0.1:$api_port/api/v1/celln-platform/profiles?namespace=$denied")" = "[]" ] || fail "excluded namespace $denied was offered a profile"
+[ "$(curl -s -o /dev/null -w '%{http_code}' "${api_auth[@]}" -X POST -H 'Content-Type: application/json' -d "{\"profile\":\"$profile\"}" "http://127.0.0.1:$api_port/api/v1/celln-platform/wrappers?namespace=$denied")" = 403 ] || fail "excluded namespace $denied was prepared"
 kill "$api_pf" >/dev/null 2>&1 || true
 # The excluded namespace applies the same objects by hand so its refusal is the policy's, not a missing Agent.
 for kind in modelconnection agentruntime agent; do

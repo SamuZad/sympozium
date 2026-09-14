@@ -525,7 +525,10 @@ func resolveDecisionRoute(s platformSnapshot, required bool) (DecisionRouteBindi
 	var err error
 	if auth != "none" {
 		origin, err = api.ModelEndpointOriginInsecure(c.Spec.Endpoint, c.Spec.AllowInsecure)
-		if err == nil && !strings.HasPrefix(strings.ToLower(origin), "https://") {
+		// A cluster Secret never crosses plain HTTP. A host-profile credential
+		// stays on the node and the operator approved this insecure endpoint
+		// when configuring the node's model profile (e.g. a LAN llama-server).
+		if err == nil && !strings.HasPrefix(strings.ToLower(origin), "https://") && !(auth == "host-profile" && c.Spec.AllowInsecure) {
 			err = fmt.Errorf("credential-bearing model endpoint must use HTTPS")
 		}
 	} else {
@@ -537,7 +540,10 @@ func resolveDecisionRoute(s platformSnapshot, required bool) (DecisionRouteBindi
 	for _, policy := range s.Policies {
 		allowed := false
 		for _, candidate := range policy.Spec.Routes {
-			if candidate.Provider == c.Spec.Provider && candidate.Protocol == c.Spec.Protocol && candidate.Auth == auth && slices.Contains(candidate.Models, s.Run.Spec.Model.Model) && slices.Contains(candidate.EndpointOrigins, origin) {
+			// A plain-HTTP origin needs the operator's approval on the policy
+			// route itself, not only on the tenant's connection.
+			insecureApproved := strings.HasPrefix(strings.ToLower(origin), "https://") || candidate.Auth == "none" || candidate.AllowInsecure
+			if candidate.Provider == c.Spec.Provider && candidate.Protocol == c.Spec.Protocol && candidate.Auth == auth && insecureApproved && slices.Contains(candidate.Models, s.Run.Spec.Model.Model) && slices.Contains(candidate.EndpointOrigins, origin) {
 				allowed = true
 				break
 			}
