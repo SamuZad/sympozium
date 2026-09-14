@@ -55,14 +55,16 @@ func installCellnFleet(ctx context.Context, f cellnFleetFlags, imageTag string, 
 	if err := initClient(); err != nil {
 		return err
 	}
+	values := append(append([]string{}, setValues...), fleetValues...)
+	if err := runInstall(imageTag, values); err != nil {
+		return err
+	}
+	// The chart owns celln-system; the nodes and the router block on these
+	// objects until they exist, so publishing after the install is safe.
 	if err := cellninstall.PublishFleetModelCredential(ctx, k8sClient, f.modelCredentialFile); err != nil {
 		return err
 	}
 	if err := cellninstall.PrepareFleetTrust(ctx, k8sClient, f.options.Principal); err != nil {
-		return err
-	}
-	values := append(append([]string{}, setValues...), fleetValues...)
-	if err := runInstall(imageTag, values); err != nil {
 		return err
 	}
 	fmt.Println("  Fleet plane deployed. Join KVM nodes with: kubectl label node NODE celln.dev/kvm=true")
