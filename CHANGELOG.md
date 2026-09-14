@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.10.67](https://github.com/sympozium-ai/sympozium/compare/v0.10.66...v0.10.67) (2026-09-14)
+
+
+### Features
+
+* **celln:** probe every fleet backend with its key before installing ([d424d67](https://github.com/sympozium-ai/sympozium/commit/d424d67cf6deffc4a94a0a0ce51a735dfab0f9d8))
+* **celln:** probe every fleet backend with its key before installing ([48768b0](https://github.com/sympozium-ai/sympozium/commit/48768b0f17f8747adb7465f65943f7a4fcd4f60a))
+
 ## [0.10.66](https://github.com/sympozium-ai/sympozium/compare/v0.10.65...v0.10.66) (2026-09-14)
 
 
