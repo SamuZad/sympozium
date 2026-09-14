@@ -20,6 +20,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// SessionDefaults is the budget a new conversation asks for: a working
+// session that stays well inside the scope's ceilings — a four-hour parent
+// with 64 turns and the starter profile's per-turn allowance (3 requests,
+// 1536 output tokens) for each — capped by the ceilings themselves.
+func SessionDefaults(ceilings api.EnduringRunSpec) *api.EnduringRunSpec {
+	return &api.EnduringRunSpec{LeaseSeconds: min(14400, ceilings.LeaseSeconds), MaxTurns: min(64, ceilings.MaxTurns), MaxModelRequests: min(192, ceilings.MaxModelRequests), MaxOutputTokens: min(98304, ceilings.MaxOutputTokens)}
+}
+
 // ScopeLabel opts a namespace into a scope in strict ("labeled") mode; the
 // default mode admits every namespace except the system exclusions.
 const ScopeLabel = cellnplatform.ScopeLabel
@@ -202,7 +210,7 @@ func InstallPlatform(ctx context.Context, store client.Client, o PlatformOptions
 		AgentRef: "celln-agent", Backend: "celln", ExecutionLifecycle: "enduring", SystemPrompt: cat.SystemPrompt, Cleanup: "delete",
 		Model:          api.ModelSpec{ConnectionRef: "celln-native", Model: configured.Model.Model},
 		CellnSelection: &api.CellnCatalogueSelection{RuntimeRef: "celln-native", ToolRefs: []api.CellnCatalogueToolRef{}, ClusterToolRefs: clusterRefs},
-		Enduring:       &api.EnduringRunSpec{LeaseSeconds: min(600, limits.LeaseSeconds), MaxTurns: min(8, limits.MaxTurns), MaxModelRequests: min(24, limits.MaxModelRequests), MaxOutputTokens: min(8192, limits.MaxOutputTokens)},
+		Enduring:       SessionDefaults(limits),
 		Task:           api.NewStringTask("Write violet to notes.txt using workspace-write with revision 0."),
 	}}
 	if err := write("run.json", run); err != nil {

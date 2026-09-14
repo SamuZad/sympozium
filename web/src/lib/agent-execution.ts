@@ -1,4 +1,4 @@
-import type { AgentExecutionDefaults, CellnSelection } from "./api";
+import type { AgentExecutionDefaults, CellnSelection, EnduringLimits } from "./api";
 
 export interface WizardExecution {
   executionBackend?: "job" | "celln";
@@ -10,7 +10,12 @@ export interface WizardExecution {
   model: string;
   provider?: string;
   modelConnectionRef?: string;
+  /** Budget a platform profile suggests for one conversation (within its policy ceilings). */
+  enduringDefaults?: EnduringLimits;
 }
+
+/** Budget for a legacy namespaced native runtime, whose registration bounds it. */
+export const LEGACY_ENDURING_DEFAULTS: EnduringLimits = { leaseSeconds: 600, maxTurns: 8, maxModelRequests: 24, maxOutputTokens: 8192 };
 
 // Shared by API creation and YAML preview: neither may silently lose tool refs.
 export function executionFromWizard(form: WizardExecution): AgentExecutionDefaults {
@@ -27,7 +32,7 @@ export function executionFromWizard(form: WizardExecution): AgentExecutionDefaul
       ...(form.clusterTools?.length ? { clusterToolRefs: form.clusterTools.map((tool) => ({ ...tool })) } : {}),
     },
     ...(form.executionLifecycle === "enduring" ? {
-      enduring: { leaseSeconds: 600, maxTurns: 8, maxModelRequests: 24, maxOutputTokens: 8192 },
+      enduring: { ...(form.enduringDefaults || LEGACY_ENDURING_DEFAULTS) },
     } : {}),
   };
 }

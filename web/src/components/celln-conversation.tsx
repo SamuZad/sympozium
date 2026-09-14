@@ -106,11 +106,27 @@ export function CellnConversation({ run, observationUnavailable = false, retainE
       : "The requested turn ceiling is exhausted, including the initial turn. Refreshing this page does not restore the budget."
     : "";
   const completeHistory = Boolean(history.data) && !history.hasNextPage;
-  const canCompose = ready && !initialFailed && !activeTurn && !ceilingReached && !pending && !sending && completeHistory;
+  // The lease runs from the single create attempt; after it no new turn is
+  // admitted (the turn controller reports LeaseExpired), and the parent ends.
+  const leaseSeconds = run.spec.enduring?.leaseSeconds || 0;
+  const leaseEnd = parent?.admittedAt && leaseSeconds ? new Date(new Date(parent.admittedAt).getTime() + leaseSeconds * 1000) : undefined;
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!leaseEnd) return;
+    const timer = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(timer);
+  }, [leaseEnd?.getTime()]);
+  const leaseExpired = Boolean(leaseEnd && leaseEnd.getTime() <= now);
+  const leaseDetail = leaseEnd
+    ? leaseExpired
+      ? `This conversation's lease ended at ${leaseEnd.toLocaleString()}. Recorded answers remain; start a new conversation to continue.`
+      : `Lease ends ${leaseEnd.toLocaleString()} (${formatRemaining(leaseEnd.getTime() - now)} left). Turns used: ${(parent?.acceptedTurns || 0) + 1} of ${requestedTurns}.`
+    : "";
+  const canCompose = ready && !initialFailed && !activeTurn && !ceilingReached && !pending && !sending && completeHistory && !leaseExpired;
   const bytes = new TextEncoder().encode(draft).length;
   const initialConfirmed = scoped ? Boolean(scopedParent?.receiptDigest && scopedParent.output) : Boolean(parent?.initialTurn?.result?.succeeded);
   const canSend = ready && initialConfirmed && !activeTurn && !pending && !sending && !history.isError && completeHistory &&
-    !ceilingReached && draft.trim().length > 0 && bytes <= 2048 && !draft.includes("\0");
+    !ceilingReached && !leaseExpired && draft.trim().length > 0 && bytes <= 2048 && !draft.includes("\0");
 
   async function send() {
     if (!canSend) return;
@@ -184,6 +200,7 @@ export function CellnConversation({ run, observationUnavailable = false, retainE
       {observationUnavailable && <p role="alert">Run status could not be refreshed. Recorded history is shown, but sending is disabled until the current run can be checked.</p>}
       {deleting && <p role="status" data-testid="celln-delete-pending">{scopedParent?.cleanupConfirmed ? "The original scoped owner confirmed cleanup. Sending remains disabled." : "Deletion requested. Sending is disabled while the controller reconciles teardown. Acceptance of deletion is not confirmation that the parent has stopped."}</p>}
       {lifecycleDetail && <p role="status" data-testid="celln-parent-lifecycle-detail">{lifecycleDetail}</p>}
+      {leaseDetail && <p role="status" data-testid="celln-parent-lease" className={leaseExpired ? "text-amber-600" : "text-muted-foreground"}>{leaseDetail}</p>}
       <p className="text-sm text-muted-foreground" data-testid="celln-parent-turn-limit">Requested ceiling: {requestedTurns} total turns, including the initial turn. The host may enforce stricter limits; this is not a guarantee of remaining capacity.</p>
       {admissionPending && <p className="text-sm" data-testid="celln-parent-admission">{parentCondition.message}</p>}
       {initial && <div className="space-y-2 rounded border p-3"><p className="whitespace-pre-wrap">You: {initial.message}</p><p className="whitespace-pre-wrap">{initial.result ? `${initial.result.succeeded ? "Agent" : "Initial turn failed"}: ${initial.result.answer}` : initial.attempted ? "Initial turn awaiting reconciliation" : "Initial turn queued"}</p></div>}
@@ -233,4 +250,11 @@ export function CellnConversation({ run, observationUnavailable = false, retainE
       </div>
     </CardContent>
   </Card>;
+}
+
+function formatRemaining(ms: number): string {
+  const minutes = Math.max(0, Math.round(ms / 60_000));
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours} h ${minutes % 60} min`;
 }

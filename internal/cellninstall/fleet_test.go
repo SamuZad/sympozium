@@ -268,3 +268,26 @@ func TestKeylessModelPublishesPlaceholderAndShortKeysAreRefused(t *testing.T) {
 		t.Fatal("credential Celln would refuse was published")
 	}
 }
+
+func TestFleetLimitsDefaultToLongRunningAndAreBounded(t *testing.T) {
+	got, err := FleetLimits{}.Resolve()
+	if err != nil || got != DefaultFleetLimits || got.LeaseSeconds != 86400 {
+		t.Fatalf("defaults: %+v %v", got, err)
+	}
+	got, err = FleetLimits{LeaseSeconds: 3600}.Resolve()
+	if err != nil || got.LeaseSeconds != 3600 || got.MaxTurns != DefaultFleetLimits.MaxTurns {
+		t.Fatalf("partial override: %+v %v", got, err)
+	}
+	for name, l := range map[string]FleetLimits{"lease too long": {LeaseSeconds: 86401}, "lease too short": {LeaseSeconds: 30}, "no turns": {MaxTurns: -1}, "tokens below one turn": {MaxOutputTokens: 1000}} {
+		if _, err := l.Resolve(); err == nil {
+			t.Fatalf("%s accepted", name)
+		}
+	}
+	o := validFleet()
+	o.Limits = FleetLimits{LeaseSeconds: 7200}
+	values, err := FleetValues(o)
+	joined := strings.Join(values, "\n")
+	if err != nil || !strings.Contains(joined, "celln.fleet.limits.leaseSeconds=7200") || !strings.Contains(joined, "celln.fleet.limits.maxTurns=256") {
+		t.Fatalf("limits not rendered: %v %s", err, joined)
+	}
+}

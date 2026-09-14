@@ -133,6 +133,28 @@ provider name plus `--celln-fleet-model-endpoint` and
   within the turn deadline.
 - The backend is fixed for a scope. To change it, install a new scope.
 
+## Leases and budgets
+
+A parent lives for its run's `leaseSeconds` and may spend up to its run's
+turn, model-request and output-token budget. The scope's ceilings bound
+every run and are configured on every node at install time:
+
+| Flag | Default | Range |
+| --- | --- | --- |
+| `--celln-fleet-max-lease-seconds` | 86400 (24 h) | 60–86400 |
+| `--celln-fleet-max-turns` | 256 | 1–1024 |
+| `--celln-fleet-max-model-requests` | 768 | 3–6144 |
+| `--celln-fleet-max-output-tokens` | 393216 | 1536–3145728 |
+
+A new conversation asks for a working session inside those ceilings by
+default (four hours, 64 turns, 192 requests, 98304 tokens; the API reports
+them per profile as `sessionDefaults`). A run asking for more than a ceiling
+is refused with `AUTH_LIMIT_RANGE`. When a lease ends no new turn is admitted
+and the parent stops; the conversation view shows the deadline and asks for a
+new conversation. Leases are not extended in place. Every live parent holds
+two cells and its declared memory for its whole lease, so long defaults cost
+node capacity while conversations sit idle.
+
 ## Authorising namespaces
 
 The installer publishes the reviewed starter configuration **once per scope**
@@ -242,11 +264,12 @@ exact numbers, or lower `memoryPercent` on nodes that run other workloads.
 Per-parent broker charging arrived in Celln v0.5.12 (celln#112), which this
 chart pins; releases before it hold one parent per node whatever the budget says.
 
-The gateway places each parent by incarnation hash, not by load. An owner that
-refuses a create for capacity ends that run with `CellnParentReady` reason
-`CreateRefused` ("create a new run"); the incarnation is never retried and the
-run deletes cleanly. Capacity-aware placement in the gateway is tracked in
-#464 (P1b).
+The gateway provisions each new parent on the healthy owner with the most
+spare cells (then memory), as the owners advertise on `/v1/health`; equally
+free owners are chosen in hash order, so placement is deterministic. Once
+provisioned, a parent is bound to its owner. An owner that still refuses a
+create ends that run with `CellnParentReady` reason `CreateRefused` ("create a
+new run"); the incarnation is never retried and the run deletes cleanly.
 
 ## Limits
 

@@ -28,6 +28,7 @@ func TestCellnPlatformProfilesAndWrappersFollowTheNamespacePolicy(t *testing.T) 
 		NamespaceSelector: cellnplatform.OpenSelector(cellnplatform.SystemNamespaces("sympozium-system")),
 		RuntimeProfiles:   []sympoziumv1alpha1.CellnExecutionPolicyRuntime{{Ref: sympoziumv1alpha1.CellnRuntimeProfileRef{Name: profile.Name, Revision: "v1"}}},
 		Routes:            []sympoziumv1alpha1.CellnExecutionPolicyRoute{{Provider: "deepseek", Protocol: "openai-chat", Models: []string{"deepseek-chat"}, EndpointOrigins: []string{"https://api.deepseek.com"}, Auth: "host-profile"}},
+		Ceilings:          sympoziumv1alpha1.CellnExecutionPolicyCeilings{MaxTurns: 256, MaxModelRequests: 768, MaxOutputTokens: 393216, MaxParentLeaseSeconds: 86400, MaxTurnSeconds: 60},
 	}}
 	ns := func(name string) *corev1.Namespace {
 		return &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{cellnplatform.NamespaceNameLabel: name}}}
@@ -47,7 +48,7 @@ func TestCellnPlatformProfilesAndWrappersFollowTheNamespacePolicy(t *testing.T) 
 		}
 		return out
 	}
-	if got := get("team-a"); len(got) != 1 || got[0].Name != "celln-native-trial" || got[0].Provider != "deepseek" || got[0].Model != "deepseek-chat" || got[0].CredentialProfile != "trial" || got[0].Wrapper != "celln-native" || got[0].SystemPrompt != "host persona" {
+	if got := get("team-a"); len(got) != 1 || got[0].Name != "celln-native-trial" || got[0].Provider != "deepseek" || got[0].Model != "deepseek-chat" || got[0].CredentialProfile != "trial" || got[0].Wrapper != "celln-native" || got[0].SystemPrompt != "host persona" || got[0].Ceilings.LeaseSeconds != 86400 || got[0].SessionDefaults.LeaseSeconds != 14400 || got[0].SessionDefaults.MaxTurns != 64 {
 		t.Fatalf("tenant profiles: %+v", got)
 	}
 	if got := get("sympozium-system"); len(got) != 0 {
