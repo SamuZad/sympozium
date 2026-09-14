@@ -97,10 +97,15 @@ func installCellnFleet(ctx context.Context, f cellnFleetFlags, imageTag string, 
 	}); err != nil {
 		return err
 	}
-	o := cellninstall.Options{Namespace: namespace, ConfigurationDir: configuration, OutputDir: filepath.Join(f.outputDir, "installation"), StatePath: f.options.StatePath(), OwnerTarget: cellninstall.ManagedRouterURL, Scope: f.options.Scope, ControllerNamespace: helmNamespace, PackageHash: f.options.PackageHash}
-	if err := cellninstall.Install(ctx, k8sClient, o); err != nil {
+	clusterID, err := cellninstall.ClusterIdentity(ctx, k8sClient)
+	if err != nil {
 		return err
 	}
+	platform := cellninstall.PlatformOptions{Namespace: namespace, ConfigurationDir: configuration, OutputDir: filepath.Join(f.outputDir, "installation"), Scope: f.options.Scope, ClusterID: clusterID, PackageHash: f.options.PackageHash, Principal: f.options.Principal, ControllerNamespace: helmNamespace}
+	if err := cellninstall.InstallPlatform(ctx, k8sClient, platform); err != nil {
+		return err
+	}
+	o := cellninstall.Options{Namespace: namespace, OutputDir: platform.OutputDir, OwnerTarget: cellninstall.ManagedRouterURL, Scope: f.options.Scope, ControllerNamespace: helmNamespace, PackageHash: f.options.PackageHash}
 	wiring, err := cellninstall.ConfigureFleet(ctx, k8sClient, o)
 	if err != nil {
 		return err
@@ -108,6 +113,6 @@ func installCellnFleet(ctx context.Context, f cellnFleetFlags, imageTag string, 
 	if err := runInstall(imageTag, append(values, wiring...)); err != nil {
 		return err
 	}
-	fmt.Printf("  Enabled enduring Celln runs on fleet %q for namespace %s; no run submitted.\n", f.options.Scope, namespace)
+	fmt.Printf("  Enabled enduring Celln runs on fleet %q; namespace %s is labeled %s=%s and carries the wrapper objects. Authorise more namespaces with that label plus an AgentRuntime referencing profile celln-native-%s. No run submitted.\n", f.options.Scope, namespace, cellninstall.ScopeLabel, f.options.Scope, f.options.Scope)
 	return nil
 }
