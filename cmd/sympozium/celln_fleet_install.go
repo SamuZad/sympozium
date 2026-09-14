@@ -16,12 +16,13 @@ import (
 // cellnFleetFlags configure `sympozium install --celln-fleet`: one reviewed
 // package, one scope, and every node labeled celln.dev/kvm=true joins.
 type cellnFleetFlags struct {
-	enabled      bool
-	options      cellninstall.FleetOptions
-	backendSpecs []string
-	outputDir    string
-	authorise    string
-	wait         time.Duration
+	enabled       bool
+	options       cellninstall.FleetOptions
+	backendSpecs  []string
+	skipPreflight bool
+	outputDir     string
+	authorise     string
+	wait          time.Duration
 }
 
 func (f *cellnFleetFlags) register(cmd *cobra.Command) {
@@ -43,6 +44,7 @@ func (f *cellnFleetFlags) register(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&f.authorise, "celln-fleet-authorise", "all", "Which namespaces may run on the fleet: 'all' (every namespace except kube-*, cert-manager, the control-plane namespaces and namespaces labeled celln.sympozium.ai/excluded) or 'labeled' (only namespaces labeled celln.sympozium.ai/scope=<scope>)")
 	cmd.Flags().StringVar(&f.options.ModelCredentialFile, "celln-fleet-model-credential-file", "", "Local file holding the default backend's provider credential to publish once as a Secret in celln-system (omit to keep an existing Secret; not needed for llama-server)")
 	cmd.Flags().StringArrayVar(&f.backendSpecs, "celln-fleet-backend", nil, "A model backend of this fleet, repeatable: name=NAME,provider=PROVIDER,model=MODEL[,endpoint=URL][,protocol=openai-chat|anthropic-messages][,credential-file=/path][,allow-insecure=true]. Every node configures every backend and a namespace may run parents on any of them side by side. Without this flag the --celln-fleet-model-* flags define the single backend named native")
+	cmd.Flags().BoolVar(&f.skipPreflight, "celln-fleet-skip-preflight", false, "Skip the one-token chat probe of every backend with its key (use when only the nodes can reach the endpoint)")
 	cmd.Flags().StringVar(&f.outputDir, "celln-fleet-output-dir", "", "Absolute private directory for the materialized configuration and installation records")
 	cmd.Flags().DurationVar(&f.wait, "celln-fleet-wait", 15*time.Minute, "How long to wait for the first labeled node to publish the starter configuration")
 }
@@ -79,6 +81,21 @@ func installCellnFleet(ctx context.Context, f cellnFleetFlags, imageTag string, 
 	}
 	if err := initClient(); err != nil {
 		return err
+	}
+	// Every backend answers a one-token chat request with its key before the
+	// cluster changes, so a dead provider or bad key is reported here rather
+	// than as a lost parent on the first run.
+	if !f.skipPreflight {
+		for _, b := range resolved {
+			credential, err := cellninstall.PreflightCredential(ctx, k8sClient, b)
+			if err != nil {
+				return err
+			}
+			if err := cellninstall.PreflightBackend(ctx, nil, b, credential); err != nil {
+				return err
+			}
+			fmt.Printf("  Backend %s answered a probe at %s\n", b.Name, b.Model.Endpoint)
+		}
 	}
 	values := append(append([]string{}, setValues...), fleetValues...)
 	publishCredentials := func() error {
