@@ -28,7 +28,26 @@ type RegistrationConfig struct {
 	AgentSource      types.NamespacedName       `json:"agentSource"`
 	Registrations    []ParentLaunchRegistration `json:"registrations"`
 	LocalProvisioner *LocalProvisioner          `json:"localProvisioner,omitempty"`
-	HostTemplates    []HostProvisionTemplate    `json:"hostTemplates,omitempty"`
+	// RemoteProvisioner is the fleet alternative to LocalProvisioner: the
+	// gateway-bound owner issues each parent, so no authority root is mounted.
+	RemoteProvisioner *RemoteProvisioner      `json:"remoteProvisioner,omitempty"`
+	HostTemplates     []HostProvisionTemplate `json:"hostTemplates,omitempty"`
+}
+
+// hostProvisioner issues one run's permit/launch profile on its owner and
+// publishes the resulting one-use approval.
+type hostProvisioner interface {
+	ProvisionAndApprove(context.Context, cellnauthority.Loader, ProvisionIntent, HostProvisionTemplate) (RunApproval, error)
+}
+
+func (c RegistrationConfig) provisioner() hostProvisioner {
+	switch {
+	case c.LocalProvisioner != nil:
+		return *c.LocalProvisioner
+	case c.RemoteProvisioner != nil:
+		return *c.RemoteProvisioner
+	}
+	return nil
 }
 
 type RegistrationDispatcher struct {
@@ -48,8 +67,15 @@ func readRegistrationConfig(path string) (RegistrationConfig, error) {
 	if d.Decode(&config) != nil || d.Decode(new(any)) != io.EOF || config.APIVersion != "sympozium.ai/celln-parent-registrations-v1" || len(config.Registrations) > 1024 {
 		return config, fmt.Errorf("invalid prepared parent configuration")
 	}
-	if len(config.HostTemplates) > 1024 || (config.LocalProvisioner == nil && len(config.HostTemplates) > 0) || (config.LocalProvisioner != nil && (len(config.Registrations) > 0 || config.LocalProvisioner.Journal != config.Journal || config.LocalProvisioner.Approvals != config.Approvals)) {
-		return config, fmt.Errorf("exclusive local provisioning mode and matching durable directories required")
+	var provisioners []ownerIssuer
+	if p := config.LocalProvisioner; p != nil {
+		provisioners = append(provisioners, ownerIssuer{Journal: p.Journal, Approvals: p.Approvals})
+	}
+	if p := config.RemoteProvisioner; p != nil {
+		provisioners = append(provisioners, ownerIssuer{Journal: p.Journal, Approvals: p.Approvals})
+	}
+	if len(config.HostTemplates) > 1024 || len(provisioners) > 1 || (len(provisioners) == 0 && len(config.HostTemplates) > 0) || (len(provisioners) == 1 && (len(config.Registrations) > 0 || provisioners[0].Journal != config.Journal || provisioners[0].Approvals != config.Approvals)) {
+		return config, fmt.Errorf("exclusive provisioning mode and matching durable directories required")
 	}
 	refs := []types.NamespacedName{config.OperatorSource, config.RuntimeSource, config.AgentSource}
 	seen := map[types.NamespacedName]bool{}
@@ -95,11 +121,11 @@ func (d *RegistrationDispatcher) Admit(ctx context.Context, key types.Namespaced
 		return err
 	}
 	old := d.config
-	if config.Journal != old.Journal || config.Approvals != old.Approvals || config.OperatorSource != old.OperatorSource || config.RuntimeSource != old.RuntimeSource || config.AgentSource != old.AgentSource || !reflect.DeepEqual(config.LocalProvisioner, old.LocalProvisioner) {
+	if config.Journal != old.Journal || config.Approvals != old.Approvals || config.OperatorSource != old.OperatorSource || config.RuntimeSource != old.RuntimeSource || config.AgentSource != old.AgentSource || !reflect.DeepEqual(config.LocalProvisioner, old.LocalProvisioner) || !reflect.DeepEqual(config.RemoteProvisioner, old.RemoteProvisioner) {
 		return fmt.Errorf("parent admission routing changed; preserve original journal")
 	}
 	loader := cellnauthority.Loader{Reader: d.reader, OperatorSource: config.OperatorSource, RuntimeSource: config.RuntimeSource, AgentSource: config.AgentSource}
-	if config.LocalProvisioner != nil {
+	if provisioner := config.provisioner(); provisioner != nil {
 		intent, err := PrepareProvisionIntent(ctx, loader, key)
 		if err != nil {
 			return err
@@ -128,7 +154,7 @@ func (d *RegistrationDispatcher) Admit(ctx context.Context, key types.Namespaced
 		if selected == nil {
 			return fmt.Errorf("no matching operator parent host template")
 		}
-		_, err = config.LocalProvisioner.ProvisionAndApprove(ctx, loader, *intent, *selected)
+		_, err = provisioner.ProvisionAndApprove(ctx, loader, *intent, *selected)
 		return err
 	}
 	_, err = SelectRegisteredParent(ctx, loader, key, config.Registrations, config.Journal, config.Approvals)

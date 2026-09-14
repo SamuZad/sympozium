@@ -105,20 +105,24 @@ func loadBinding(path string, run *api.AgentRun, recovery bool) (api.CellnParent
 	} else if err := ValidateAdmission(run, selected.Binding); err != nil {
 		return zero, nil, err
 	}
-	var roots *x509.CertPool
-	if selected.CAFile != "" {
-		pem, err := boundedFile(selected.CAFile, 1<<20)
-		if err != nil {
-			return zero, nil, err
-		}
-		roots = x509.NewCertPool()
-		if !roots.AppendCertsFromPEM(pem) {
-			return zero, nil, fmt.Errorf("invalid parent trust bundle")
-		}
-	}
-	transport, err := New(Options{URL: selected.Binding.Target, TokenFile: selected.TokenFile, Roots: roots, AllowInsecure: os.Getenv("CELLN_ALLOW_INSECURE_HTTP") == "true"})
+	transport, err := newOwnerClient(selected.Binding.Target, selected.TokenFile, selected.CAFile)
 	if err != nil {
 		return zero, nil, err
 	}
 	return selected.Binding, transport, nil
+}
+
+func newOwnerClient(target, tokenFile, caFile string) (*Client, error) {
+	var roots *x509.CertPool
+	if caFile != "" {
+		pem, err := boundedFile(caFile, 1<<20)
+		if err != nil {
+			return nil, err
+		}
+		roots = x509.NewCertPool()
+		if !roots.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("invalid parent trust bundle")
+		}
+	}
+	return New(Options{URL: target, TokenFile: tokenFile, Roots: roots, AllowInsecure: os.Getenv("CELLN_ALLOW_INSECURE_HTTP") == "true"})
 }

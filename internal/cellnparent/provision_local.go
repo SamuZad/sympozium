@@ -39,13 +39,42 @@ func (p LocalProvisioner) ProvisionAndApprove(ctx context.Context, loader cellna
 	if err := validateOwnerOrigin(p.Target); err != nil {
 		return zero, err
 	}
-	for _, directory := range []string{p.Root, p.Journal, p.Approvals} {
+	info, err := os.Stat(p.Root)
+	if !filepath.IsAbs(p.Root) || err != nil || !info.IsDir() {
+		return zero, fmt.Errorf("existing absolute local provision directories required")
+	}
+	if !filepath.IsAbs(p.Binary) {
+		return zero, fmt.Errorf("absolute operator executable and credential paths required")
+	}
+	owner := ownerIssuer{Journal: p.Journal, Approvals: p.Approvals, Target: p.Target, TokenFile: p.TokenFile, CAFile: p.CAFile}
+	return provisionAndApprove(ctx, loader, intent, template, owner, "sympozium.ai/celln-parent-local-choice-v1", p, func(ctx context.Context, plan []byte, principal, _ string) (localProvisionResult, error) {
+		return p.invoke(ctx, plan, principal)
+	})
+}
+
+// ownerIssuer is the owner-facing half shared by every provisioner: where the
+// durable choice/approval records live and how the resulting parent is reached.
+type ownerIssuer struct {
+	Journal, Approvals, Target, TokenFile, CAFile string
+}
+
+// issueFunc obtains the launch profile for a plan. It receives the expected
+// incarnation so a remote owner can be addressed by it; the caller still
+// verifies the returned incarnation independently.
+type issueFunc func(ctx context.Context, plan []byte, principal, expected string) (localProvisionResult, error)
+
+func provisionAndApprove(ctx context.Context, loader cellnauthority.Loader, intent ProvisionIntent, template HostProvisionTemplate, owner ownerIssuer, choiceVersion string, host any, issue issueFunc) (RunApproval, error) {
+	var zero RunApproval
+	if err := validateOwnerOrigin(owner.Target); err != nil {
+		return zero, err
+	}
+	for _, directory := range []string{owner.Journal, owner.Approvals} {
 		info, err := os.Stat(directory)
 		if !filepath.IsAbs(directory) || err != nil || !info.IsDir() {
 			return zero, fmt.Errorf("existing absolute local provision directories required")
 		}
 	}
-	if !filepath.IsAbs(p.Binary) || !filepath.IsAbs(p.TokenFile) || (p.CAFile != "" && !filepath.IsAbs(p.CAFile)) {
+	if !filepath.IsAbs(owner.TokenFile) || (owner.CAFile != "" && !filepath.IsAbs(owner.CAFile)) {
 		return zero, fmt.Errorf("absolute operator executable and credential paths required")
 	}
 	raw, err := BuildHostProvisionPlan(ctx, loader, intent, template)
@@ -60,34 +89,34 @@ func (p LocalProvisioner) ProvisionAndApprove(ctx context.Context, loader cellna
 	if err != nil {
 		return zero, err
 	}
-	registration := ParentLaunchRegistration{APIVersion: "sympozium.ai/celln-parent-registration-v1", SelectionSHA256: selection, Target: p.Target, Principal: template.Principal, Incarnation: expected, TokenFile: p.TokenFile, CAFile: p.CAFile, Model: template.Model, SystemPrompt: intent.Spec.SystemPrompt, HostLimits: template.HostLimits}
+	registration := ParentLaunchRegistration{APIVersion: "sympozium.ai/celln-parent-registration-v1", SelectionSHA256: selection, Target: owner.Target, Principal: template.Principal, Incarnation: expected, TokenFile: owner.TokenFile, CAFile: owner.CAFile, Model: template.Model, SystemPrompt: intent.Spec.SystemPrompt, HostLimits: template.HostLimits}
 	sum := sha256.Sum256(raw)
 	choice, err := json.Marshal(struct {
-		APIVersion string           `json:"apiVersion"`
-		Host       LocalProvisioner `json:"host"`
-		PlanSHA256 string           `json:"planSHA256"`
-	}{"sympozium.ai/celln-parent-local-choice-v1", p, fmt.Sprintf("sha256:%x", sum)})
+		APIVersion string `json:"apiVersion"`
+		Host       any    `json:"host"`
+		PlanSHA256 string `json:"planSHA256"`
+	}{choiceVersion, host, fmt.Sprintf("sha256:%x", sum)})
 	if err != nil {
 		return zero, err
 	}
-	if err := publishParentRecord(p.Journal, "provision-"+approvalFileName(string(intent.Selection.Run.UID)), choice); err != nil {
+	if err := publishParentRecord(owner.Journal, "provision-"+approvalFileName(string(intent.Selection.Run.UID)), choice); err != nil {
 		return zero, fmt.Errorf("preserve original provision host/plan: %w", err)
 	}
 	if err := intent.Revalidate(ctx, loader); err != nil {
 		return zero, err
 	}
-	result, err := p.invoke(ctx, raw, template.Principal)
+	result, err := issue(ctx, raw, template.Principal, expected)
 	if err != nil {
 		return zero, err
 	}
 	if result.Incarnation != expected {
-		return zero, fmt.Errorf("local issuer returned another run incarnation")
+		return zero, fmt.Errorf("issuer returned another run incarnation")
 	}
 	if err := intent.Revalidate(ctx, loader); err != nil {
 		return zero, err
 	}
 	registration.LaunchProfile = result.LaunchProfile
-	return PublishRegisteredParent(ctx, loader, intent.Selection, registration, p.Journal, p.Approvals)
+	return PublishRegisteredParent(ctx, loader, intent.Selection, registration, owner.Journal, owner.Approvals)
 }
 
 type localProvisionResult struct {

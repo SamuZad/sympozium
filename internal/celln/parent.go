@@ -137,6 +137,29 @@ func (c *Client) CreateParent(ctx context.Context, profile, incarnation string) 
 	return nil
 }
 
+// ProvisionParent asks the owner the gateway binds to incarnation to issue the
+// permit and launch profile for an operator plan. Identical plans recover the
+// same launch; the owner neither creates nor claims a parent here.
+func (c *Client) ProvisionParent(ctx context.Context, plan json.RawMessage, incarnation string) (string, error) {
+	if !hashPattern.MatchString(incarnation) || len(plan) > 65536 || !json.Valid(plan) {
+		return "", errors.New("invalid frozen parent provision plan")
+	}
+	var result struct {
+		APIVersion    string `json:"apiVersion"`
+		LaunchProfile string `json:"launchProfile"`
+		Incarnation   string `json:"incarnation"`
+	}
+	status, err := c.doJSON(ctx, http.MethodPost, "/v1/parents/provision", plan, &result, false,
+		http.Header{"X-Celln-Parent-Incarnation": []string{incarnation}})
+	if err != nil {
+		return "", err
+	}
+	if status != http.StatusOK || result.APIVersion != "celln.parent-provisioned/v1" || result.Incarnation != incarnation || !hashPattern.MatchString(result.LaunchProfile) {
+		return "", ErrReconcile
+	}
+	return result.LaunchProfile, nil
+}
+
 // ParentStatus returns the live owner observation for an incarnation.
 func (c *Client) ParentStatus(ctx context.Context, id string) (ParentStatus, error) {
 	var result ParentStatus

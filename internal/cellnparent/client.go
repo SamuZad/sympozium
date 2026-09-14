@@ -78,6 +78,12 @@ func (c *Client) Create(ctx context.Context, profile, incarnation string) error 
 	return c.inner.CreateParent(ctx, profile, incarnation)
 }
 
+// Provision has the owner bound to incarnation issue the plan's permit and
+// launch profile. Identical plans recover the same launch; nothing is created.
+func (c *Client) Provision(ctx context.Context, plan []byte, incarnation string) (string, error) {
+	return c.inner.ProvisionParent(ctx, plan, incarnation)
+}
+
 func (c *Client) Status(ctx context.Context, id string) (Status, error) {
 	return c.inner.ParentStatus(ctx, id)
 }
