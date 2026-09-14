@@ -1710,6 +1710,30 @@ func runInstall(imageTag string, setValues []string) error {
 	}
 
 	// ── Helm install or upgrade ─────────────────────────────────────────
+	// A webhook that just became ready can still refuse a connection for a
+	// few seconds while its Service endpoints propagate; retry only that.
+	var helmErr error
+	for attempt := 1; attempt <= 4; attempt++ {
+		if helmErr = helmInstallOrUpgrade(ch, vals); helmErr == nil || !strings.Contains(helmErr.Error(), "failed calling webhook") {
+			break
+		}
+		fmt.Printf("  Admission webhook not reachable yet (attempt %d); retrying...\n", attempt)
+		time.Sleep(time.Duration(attempt) * 10 * time.Second)
+	}
+	if helmErr != nil {
+		return helmErr
+	}
+
+	fmt.Println("\n  Sympozium installed successfully!")
+	fmt.Println("  Run: sympozium")
+	fmt.Println("\n  To access the web dashboard:")
+	fmt.Println("    sympozium serve")
+	return nil
+}
+
+// helmInstallOrUpgrade installs the release, or upgrades a deployed one,
+// recovering a failed previous release by reinstalling.
+func helmInstallOrUpgrade(ch *chart.Chart, vals map[string]interface{}) error {
 	cfg, err := newHelmConfig(helmNamespace)
 	if err != nil {
 		return err
@@ -1772,10 +1796,6 @@ func runInstall(imageTag string, setValues []string) error {
 		}
 	}
 
-	fmt.Println("\n  Sympozium installed successfully!")
-	fmt.Println("  Run: sympozium")
-	fmt.Println("\n  To access the web dashboard:")
-	fmt.Println("    sympozium serve")
 	return nil
 }
 
