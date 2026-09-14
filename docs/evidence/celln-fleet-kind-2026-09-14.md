@@ -134,6 +134,31 @@ A run 14 on Celln v0.5.11 passed the same namespace steps. Terminal
 `CreateRefused` outcomes are covered by unit tests; with node-sized capacity
 the journey no longer hits a capacity refusal.
 
+## llama-server backend on the framework machine
+
+A fifth trial ran the same journey with the scope's model backend set to a
+llama-server on another machine reached over Tailscale
+(`--celln-fleet-model-provider llama-server --celln-fleet-model
+Qwen3.8-27B-UD-Q4_K_XL.gguf --celln-fleet-model-endpoint
+http://100.81.163.75:8080/v1/chat/completions
+--celln-fleet-model-allow-insecure`, no credential file). The Celln build
+included sympozium-ai/celln#116 (model requests bounded by the turn deadline
+instead of 45 seconds); llama-server served about 11 tokens/s.
+
+| Step | Result |
+| --- | --- |
+| Install | Nodes configured the llama-server model profile; the policy route was stamped `auth: host-profile`, origin `http://100.81.163.75:8080`, `allowInsecure: true`; a placeholder credential Secret was published. |
+| First parent | `celln-starter-ntjgc` (connection provider `llama-server`) answered *Done. Wrote "violet" to notes.txt; the file is now at revision 1.* |
+| Two parents, one node | `celln-starter-27vh7` joined it on `fleet-ci-worker2` and answered its own turn. |
+| Follow-up turn | Distinct child read back *violet (revision 1)*. |
+| Tenant and excluded namespaces | `celln-starter-l484n` ran in unlabeled `celln-agents-b` with wrappers created on first use (a llama-server connection); `celln-agents-denied` was refused `AUTH_POLICY_WITHDRAWN`. |
+| Node leave | ContextLost on `celln-starter-l484n`, clean delete. |
+
+The first attempt failed at install: the `CellnExecutionPolicy` CRD rule
+allowed plain HTTP only for no-auth loopback routes. Policy routes now carry
+an explicit `allowInsecure` for host-profile credentials. OpenAI and Anthropic
+presets are covered by unit tests; no live keys were available for this trial.
+
 ## Environment caveats
 
 - Kind nodes have no kernel in `/boot`; the dispatcher's readiness gate
