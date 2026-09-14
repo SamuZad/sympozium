@@ -68,6 +68,9 @@ func installCellnFleet(ctx context.Context, f cellnFleetFlags, imageTag string, 
 	if err != nil {
 		return err
 	}
+	if err := cellninstall.ValidateBackendCredentialFiles(resolved); err != nil {
+		return err
+	}
 	if !filepath.IsAbs(f.outputDir) || filepath.Clean(f.outputDir) != f.outputDir {
 		return fmt.Errorf("--celln-fleet-output-dir must be a clean absolute directory")
 	}
@@ -78,15 +81,35 @@ func installCellnFleet(ctx context.Context, f cellnFleetFlags, imageTag string, 
 		return err
 	}
 	values := append(append([]string{}, setValues...), fleetValues...)
+	publishCredentials := func() error {
+		for _, b := range resolved {
+			if err := cellninstall.PublishFleetBackendCredential(ctx, k8sClient, b); err != nil {
+				return fmt.Errorf("backend %s: %w", b.Name, err)
+			}
+		}
+		return nil
+	}
+	// A rerun keeps the controller wired to the fleet through this upgrade and
+	// publishes a new backend's key before the nodes configure it.
+	if wired, err := cellninstall.ExistingFleetWiring(ctx, k8sClient, helmNamespace); err != nil {
+		return err
+	} else if wired {
+		values = append(values, cellninstall.FleetWiringValues()...)
+	}
+	if rerun, err := cellninstall.FleetNamespaceExists(ctx, k8sClient); err != nil {
+		return err
+	} else if rerun {
+		if err := publishCredentials(); err != nil {
+			return err
+		}
+	}
 	if err := runInstall(imageTag, values); err != nil {
 		return err
 	}
 	// The chart owns celln-system; the nodes and the router block on these
 	// objects until they exist, so publishing after the install is safe.
-	for _, b := range resolved {
-		if err := cellninstall.PublishFleetBackendCredential(ctx, k8sClient, b); err != nil {
-			return fmt.Errorf("backend %s: %w", b.Name, err)
-		}
+	if err := publishCredentials(); err != nil {
+		return err
 	}
 	if err := cellninstall.PrepareFleetTrust(ctx, k8sClient, f.options.Principal); err != nil {
 		return err
@@ -111,10 +134,29 @@ func installCellnFleet(ctx context.Context, f cellnFleetFlags, imageTag string, 
 			}
 		}
 	}
-	if err := wait("publishing the starter configuration", func() (bool, error) {
-		return cellninstall.ReadFleetConfiguration(ctx, k8sClient, configuration)
+	expected := make([]string, 0, len(resolved))
+	for _, b := range resolved {
+		expected = append(expected, b.Name)
+	}
+	published, err := cellninstall.PublishedBackendNames(ctx, k8sClient)
+	if err != nil {
+		return err
+	}
+	if err := wait("publishing the starter configuration for every backend", func() (bool, error) {
+		return cellninstall.ReadFleetConfigurationFor(ctx, k8sClient, configuration, expected)
 	}); err != nil {
 		return err
+	}
+	if added := cellninstall.AddedBackends(published, expected); len(added) != 0 && len(published) != 0 {
+		// The nodes publish a backend once its key reached their kubelet; the
+		// running owners' mount of the same Secret follows within the
+		// kubelet's sync period. Wait it out before offering the backend.
+		fmt.Printf("  Backend(s) %s configured on every node; waiting %s for the key to reach the running owners...\n", strings.Join(added, ", "), cellninstall.FleetCredentialPropagationGrace)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(cellninstall.FleetCredentialPropagationGrace):
+		}
 	}
 	if err := wait("the controller rollout", func() (bool, error) {
 		return cellninstall.ControllerRolledOut(ctx, k8sClient, helmNamespace)

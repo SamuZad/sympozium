@@ -111,9 +111,25 @@ PY
 	mv "$output" "$configuration"
 done
 
-# Publish the scope's starter configuration exactly once, keyed
-# <backend>.<file>. Every node derives identical files from the same package,
-# so a second publisher only verifies.
+# A backend is published only once its key has reached this node's kubelet
+# (the owner's mount of the same Secret follows within the kubelet's sync
+# period), so a parent is never issued on a backend whose key is not there.
+for backend in $backend_names; do
+	credential="$(python3 -c 'import json, sys
+print(next(b["credentialFile"] for b in json.loads(sys.argv[1]) if b["name"] == sys.argv[2]))' "$FLEET_BACKENDS" "$backend")"
+	waited=0
+	until [ -s "$credential" ]; do
+		[ "$waited" -lt 600 ] || { echo "key for backend $backend never reached $credential; publish it with sympozium install" >&2; exit 1; }
+		[ $((waited % 60)) -ne 0 ] || echo "waiting for backend $backend key at $credential" >&2
+		sleep 5
+		waited=$((waited + 5))
+	done
+done
+
+# Publish the scope's starter configuration, keyed <backend>.<file>. Every
+# node derives identical files from the same package, so a later publisher
+# only verifies what is there and adds the backends it lacks (a backend added
+# to a running scope); an existing backend's files are never rewritten.
 api=https://kubernetes.default.svc
 credentials=/var/run/secrets/celln-fleet
 resource="$api/api/v1/namespaces/$FLEET_NAMESPACE/configmaps"
@@ -133,10 +149,10 @@ PY
 )"
 published="$(mktemp "$FLEET_STATE/.published-XXXXXX")"
 trap 'rm -f "$published"' EXIT
-request() {
+request() { # CONTENT_TYPE selects the body type (a merge patch when extending)
 	curl --silent --show-error --cacert "$credentials/ca.crt" \
 		--header "Authorization: Bearer $(cat "$credentials/token")" \
-		--header "Content-Type: application/json" --output "$published" --write-out '%{http_code}' "$@"
+		--header "Content-Type: ${CONTENT_TYPE:-application/json}" --output "$published" --write-out '%{http_code}' "$@"
 }
 status="$(request "$resource/$FLEET_CONFIGURATION_CONFIGMAP")"
 if [ "$status" = 404 ]; then
@@ -154,14 +170,23 @@ if [ "$status" != 200 ] && [ "$status" != 201 ]; then
 	echo "reading published starter configuration failed: HTTP $status" >&2
 	exit 1
 fi
-python3 - "$published" "$body" <<'PY'
+missing="$(python3 - "$published" "$body" <<'PY'
 import json, sys
 existing = json.load(open(sys.argv[1])).get("data", {})
 # Configurations published before backends were named carry unprefixed keys
 # for the single backend named native.
 existing = {k if k.count(".") > 1 else f"native.{k}": v for k, v in existing.items()}
 ours = json.loads(sys.argv[2])["data"]
-if existing != ours:
-    sys.exit("published starter configuration differs from this node's package; one scope carries exactly one package")
+for key, value in ours.items():
+    if key in existing and existing[key] != value:
+        sys.exit(f"published starter configuration differs from this node's package for {key}; one scope carries exactly one package")
+missing = {key: value for key, value in ours.items() if key not in existing}
+print(json.dumps({"data": missing}) if missing else "")
 PY
+)"
+if [ -n "$missing" ]; then
+	status="$(CONTENT_TYPE=application/merge-patch+json request --request PATCH --data-binary "$missing" "$resource/$FLEET_CONFIGURATION_CONFIGMAP")"
+	[ "$status" = 200 ] || { echo "extending published starter configuration failed: HTTP $status" >&2; exit 1; }
+	echo "node $NODE_NAME published $(python3 -c 'import json,sys; print(",".join(sorted({k.split(".")[0] for k in json.loads(sys.argv[1])["data"]})))' "$missing") for package $FLEET_PACKAGE_HASH"
+fi
 echo "node $NODE_NAME prepared $root for package $FLEET_PACKAGE_HASH"

@@ -10,8 +10,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/sympozium-ai/sympozium/internal/cellnparent"
 	"github.com/sympozium-ai/sympozium/internal/cellnplatform"
@@ -28,8 +30,12 @@ const (
 	FleetParentTokenSecret      = "celln-router-parent"
 	FleetParentClientsConfigMap = "celln-fleet-parent-clients"
 	FleetConfigurationConfigMap = "celln-fleet-configuration"
-	FleetModelCredentialSecret  = "celln-fleet-model-credential"
-	FleetParentConfigSecret     = "celln-parent-config"
+	// FleetModelCredentialSecret holds every backend's provider key under the
+	// backend's name; every dispatcher mounts it once at FleetCredentialDir, so
+	// a backend added later reaches running owners without a restart.
+	FleetModelCredentialSecret = "celln-fleet-model-credentials"
+	FleetCredentialDir         = "/etc/celln-native/credentials"
+	FleetParentConfigSecret    = "celln-parent-config"
 	// FleetJournalRoot is the controller's claim: journal/ and approvals/ live
 	// here instead of on an owner node.
 	FleetJournalRoot = "/var/lib/sympozium/celln-parent"
@@ -82,21 +88,9 @@ func CredentialProfileFor(scope, backend string) string {
 	return scope + "-" + backend
 }
 
-// BackendCredentialSecret is the celln-system Secret holding a backend's key.
-func BackendCredentialSecret(backend string) string {
-	if backend == cellnplatform.DefaultBackend {
-		return FleetModelCredentialSecret
-	}
-	return FleetModelCredentialSecret + "-" + backend
-}
-
-// BackendCredentialPath is where every dispatcher mounts a backend's key.
-func BackendCredentialPath(backend string) string {
-	if backend == cellnplatform.DefaultBackend {
-		return "/etc/celln-native/model-token"
-	}
-	return "/etc/celln-native/" + backend + "/model-token"
-}
+// BackendCredentialPath is where every dispatcher sees a backend's key: one
+// file per backend under the shared credentials mount.
+func BackendCredentialPath(backend string) string { return FleetCredentialDir + "/" + backend }
 
 // ResolvedBackends returns the scope's backends with routes resolved and
 // names validated: Backends when given, else the single default backend
@@ -278,8 +272,6 @@ func FleetValues(o FleetOptions) ([]string, error) {
 			prefix+"endpoint="+b.Model.Endpoint,
 			prefix+"model="+b.Model.Name,
 			fmt.Sprintf("%sallowInsecure=%t", prefix, b.Model.AllowInsecure),
-			prefix+"credentialSecret="+BackendCredentialSecret(b.Name),
-			prefix+"credentialPath="+BackendCredentialPath(b.Name),
 		)
 	}
 	return append(values,
@@ -365,42 +357,116 @@ func PublishFleetModelCredential(ctx context.Context, store client.Client, path 
 	return PublishFleetBackendCredential(ctx, store, FleetBackend{Name: cellnplatform.DefaultBackend, Model: model, CredentialFile: path})
 }
 
-// PublishFleetBackendCredential publishes one backend's provider key as its
-// celln-system Secret. An existing Secret is kept when no file is given and
-// never replaced with different content; keyless backends get a placeholder.
+// PublishFleetBackendCredential publishes one backend's provider key as the
+// backend's entry in the shared credentials Secret. An existing entry is kept
+// when no file is given and never replaced with different content; keyless
+// backends get a placeholder. Adding an entry never touches the others, so
+// owners keep serving while a backend is added.
 func PublishFleetBackendCredential(ctx context.Context, store client.Client, b FleetBackend) error {
-	name, path, model := BackendCredentialSecret(b.Name), b.CredentialFile, b.Model
+	path, model := b.CredentialFile, b.Model
 	var existing corev1.Secret
-	err := store.Get(ctx, types.NamespacedName{Namespace: fleetNamespace, Name: name}, &existing)
+	err := store.Get(ctx, types.NamespacedName{Namespace: fleetNamespace, Name: FleetModelCredentialSecret}, &existing)
 	if err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
-	if err == nil && path == "" {
+	present := err == nil && len(existing.Data[b.Name]) != 0
+	if present && path == "" {
 		return nil
 	}
-	if path == "" && !model.NeedsCredential() {
-		// A keyless local backend still needs Celln's bounded credential file.
-		return store.Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: fleetNamespace, Labels: fleetLabels()}, Data: map[string][]byte{"token": []byte(fleetModelPlaceholderCredential)}})
+	credential := fleetModelPlaceholderCredential
+	if path != "" || model.NeedsCredential() {
+		var err error
+		if credential, err = readBackendCredential(path); err != nil {
+			return err
+		}
 	}
-	info, statErr := os.Lstat(path)
-	if path == "" || !filepath.IsAbs(path) || statErr != nil || !info.Mode().IsRegular() || info.Size() > 4096 {
-		return fmt.Errorf("bounded regular absolute model credential file required")
-	}
-	raw, readErr := os.ReadFile(path)
-	if readErr != nil {
-		return readErr
-	}
-	credential := strings.TrimRight(string(raw), "\r\n")
-	if len(credential) < 24 || strings.ContainsAny(credential, "\r\n\t ") {
-		return fmt.Errorf("model credential file must hold one line of at least 24 printable characters")
-	}
-	if err == nil {
-		if string(existing.Data["token"]) != credential {
-			return fmt.Errorf("model credential Secret %s already exists with different content; omit the file to keep it", name)
+	if present {
+		if string(existing.Data[b.Name]) != credential {
+			return fmt.Errorf("model credential for backend %s already exists with different content; omit the file to keep it", b.Name)
 		}
 		return nil
 	}
-	return store.Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: fleetNamespace, Labels: fleetLabels()}, Data: map[string][]byte{"token": []byte(credential)}})
+	if apierrors.IsNotFound(err) {
+		return store.Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: FleetModelCredentialSecret, Namespace: fleetNamespace, Labels: fleetLabels()}, Data: map[string][]byte{b.Name: []byte(credential)}})
+	}
+	patch := client.MergeFrom(existing.DeepCopy())
+	if existing.Data == nil {
+		existing.Data = map[string][]byte{}
+	}
+	existing.Data[b.Name] = []byte(credential)
+	return store.Patch(ctx, &existing, patch)
+}
+
+// readBackendCredential reads one provider key file the way it is published.
+func readBackendCredential(path string) (string, error) {
+	info, statErr := os.Lstat(path)
+	if path == "" || !filepath.IsAbs(path) || statErr != nil || !info.Mode().IsRegular() || info.Size() > 4096 {
+		return "", fmt.Errorf("bounded regular absolute model credential file required")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	credential := strings.TrimRight(string(raw), "\r\n")
+	if len(credential) < 24 || strings.ContainsAny(credential, "\r\n\t ") {
+		return "", fmt.Errorf("model credential file must hold one line of at least 24 printable characters")
+	}
+	return credential, nil
+}
+
+// ValidateBackendCredentialFiles checks every named credential file before
+// anything touches the cluster, so a typo never leaves a half-upgraded fleet.
+// A backend that needs a key but names no file is checked against the
+// published Secret when it is published.
+func ValidateBackendCredentialFiles(backends []FleetBackend) error {
+	for _, b := range backends {
+		if b.CredentialFile == "" {
+			continue
+		}
+		if _, err := readBackendCredential(b.CredentialFile); err != nil {
+			return fmt.Errorf("backend %s: %w", b.Name, err)
+		}
+	}
+	return nil
+}
+
+// FleetCredentialPropagationGrace is how long a running owner may take to see
+// a new key in its Secret mount after the node published the backend (the
+// kubelet refreshes Secret volumes on its sync period, one minute by default).
+const FleetCredentialPropagationGrace = 90 * time.Second
+
+// PublishedBackendNames lists the backends the fleet configuration ConfigMap
+// carries right now; nil when nothing has been published.
+func PublishedBackendNames(ctx context.Context, store client.Client) ([]string, error) {
+	var published corev1.ConfigMap
+	if err := store.Get(ctx, types.NamespacedName{Namespace: fleetNamespace, Name: FleetConfigurationConfigMap}, &published); apierrors.IsNotFound(err) {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+	return PublishedBackends(published.Data)
+}
+
+// AddedBackends lists the expected backends that were not yet published.
+func AddedBackends(published, expected []string) []string {
+	var added []string
+	for _, name := range expected {
+		if !slices.Contains(published, name) {
+			added = append(added, name)
+		}
+	}
+	return added
+}
+
+// FleetNamespaceExists reports whether the chart has already created the
+// fleet namespace, i.e. this is a rerun on a running fleet.
+func FleetNamespaceExists(ctx context.Context, store client.Client) (bool, error) {
+	var ns corev1.Namespace
+	err := store.Get(ctx, types.NamespacedName{Name: fleetNamespace}, &ns)
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 var fleetConfigurationFiles = []string{"catalogue.json", "configured.json", "native-template.json"}
@@ -460,6 +526,13 @@ func publishedKey(backend, file string, data map[string]string) string {
 // published into dir/<backend>/ for every backend, for InstallPlatform. It
 // reports false until a node has published; existing files must be identical.
 func ReadFleetConfiguration(ctx context.Context, store client.Client, dir string) (bool, error) {
+	return ReadFleetConfigurationFor(ctx, store, dir, nil)
+}
+
+// ReadFleetConfigurationFor is ReadFleetConfiguration that also waits until
+// every expected backend has been published, so adding a backend to a
+// running scope blocks until a node has configured it.
+func ReadFleetConfigurationFor(ctx context.Context, store client.Client, dir string, expected []string) (bool, error) {
 	if !filepath.IsAbs(dir) || filepath.Clean(dir) != dir {
 		return false, fmt.Errorf("clean absolute configuration directory required")
 	}
@@ -475,6 +548,11 @@ func ReadFleetConfiguration(ctx context.Context, store client.Client, dir string
 	}
 	if len(backends) == 0 {
 		return false, fmt.Errorf("published fleet configuration carries no backend")
+	}
+	for _, name := range expected {
+		if !slices.Contains(backends, name) {
+			return false, nil
+		}
 	}
 	if err := os.Mkdir(dir, 0700); err != nil && !os.IsExist(err) {
 		return false, err
@@ -554,7 +632,35 @@ func ConfigureFleet(ctx context.Context, store client.Client, o Options) ([]stri
 	}
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: FleetParentConfigSecret, Namespace: o.ControllerNamespace, Labels: fleetLabels()}, Data: map[string][]byte{"registrations.json": data}}
 	if err := store.Create(ctx, secret); err != nil {
-		return nil, fmt.Errorf("publish %s: %w; existing wiring is never replaced", secret.Name, err)
+		if !apierrors.IsAlreadyExists(err) {
+			return nil, fmt.Errorf("publish %s: %w; existing wiring is never replaced", secret.Name, err)
+		}
+		// A rerun (more nodes, another backend) keeps the wiring it made.
+		var existing corev1.Secret
+		if err := store.Get(ctx, types.NamespacedName{Namespace: o.ControllerNamespace, Name: FleetParentConfigSecret}, &existing); err != nil {
+			return nil, err
+		}
+		if string(existing.Data["registrations.json"]) != string(data) {
+			return nil, fmt.Errorf("%s exists with different wiring; existing wiring is never replaced", secret.Name)
+		}
 	}
-	return []string{"celln.fleet.parentConfigSecret=" + FleetParentConfigSecret}, nil
+	return FleetWiringValues(), nil
+}
+
+// FleetWiringValues are the chart values that bind the controller to the
+// fleet's registration Secret.
+func FleetWiringValues() []string {
+	return []string{"celln.fleet.parentConfigSecret=" + FleetParentConfigSecret}
+}
+
+// ExistingFleetWiring reports whether the controller is already wired to the
+// fleet, so a rerun of the installer keeps that wiring through its first
+// upgrade instead of unwiring live conversations for a moment.
+func ExistingFleetWiring(ctx context.Context, store client.Client, controllerNamespace string) (bool, error) {
+	var existing corev1.Secret
+	err := store.Get(ctx, types.NamespacedName{Namespace: controllerNamespace, Name: FleetParentConfigSecret}, &existing)
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	return err == nil, err
 }

@@ -6,7 +6,9 @@
 # wrappers created on first use while an excluded one is refused, a second
 # model backend (FLEET_SECOND_BACKEND, optional) serves the same namespace side
 # by side, one-shot runs answer once on any backend as single-turn parents and
-# give their cells back, and removing a node's label drains its owner honestly.
+# give their cells back, a backend added to the running scope
+# (FLEET_ADD_BACKEND, optional) serves runs without an owner restart, and
+# removing a node's label drains its owner honestly.
 #
 # Requires: kind, docker, kubectl, helm, /dev/kvm, a readable host kernel in
 # /boot, a model backend (FLEET_MODEL_PROVIDER=deepseek|openai|anthropic|llama-server
@@ -112,16 +114,18 @@ if [ -n "$MODEL_KEY" ]; then
 	printf '%s\n' "$MODEL_KEY" >"$WORK/model-token"
 	CREDENTIAL_ARGS=(--celln-fleet-model-credential-file "$WORK/model-token")
 fi
-# With a second backend both are declared explicitly: the native backend from
-# the FLEET_MODEL_* inputs and the second from FLEET_SECOND_BACKEND.
+# With a second backend (or one added later) every backend is declared
+# explicitly: the native backend from the FLEET_MODEL_* inputs, the second
+# from FLEET_SECOND_BACKEND, and FLEET_ADD_BACKEND joins a running scope.
+native_spec="name=native,provider=$MODEL_PROVIDER"
+[ -n "${FLEET_MODEL:-}" ] && native_spec="$native_spec,model=$FLEET_MODEL"
+[ -n "${FLEET_MODEL_ENDPOINT:-}" ] && native_spec="$native_spec,endpoint=$FLEET_MODEL_ENDPOINT"
+[ -n "${FLEET_MODEL_PROTOCOL:-}" ] && native_spec="$native_spec,protocol=$FLEET_MODEL_PROTOCOL"
+[ "${FLEET_MODEL_ALLOW_INSECURE:-}" = 1 ] && native_spec="$native_spec,allow-insecure=true"
+[ -n "$MODEL_KEY" ] && native_spec="$native_spec,credential-file=$WORK/model-token"
+BACKEND_ARGS=(--celln-fleet-backend "$native_spec")
 SECOND_BACKEND=""
 if [ -n "${FLEET_SECOND_BACKEND:-}" ]; then
-	native_spec="name=native,provider=$MODEL_PROVIDER"
-	[ -n "${FLEET_MODEL:-}" ] && native_spec="$native_spec,model=$FLEET_MODEL"
-	[ -n "${FLEET_MODEL_ENDPOINT:-}" ] && native_spec="$native_spec,endpoint=$FLEET_MODEL_ENDPOINT"
-	[ -n "${FLEET_MODEL_PROTOCOL:-}" ] && native_spec="$native_spec,protocol=$FLEET_MODEL_PROTOCOL"
-	[ "${FLEET_MODEL_ALLOW_INSECURE:-}" = 1 ] && native_spec="$native_spec,allow-insecure=true"
-	[ -n "$MODEL_KEY" ] && native_spec="$native_spec,credential-file=$WORK/model-token"
 	second_spec="$FLEET_SECOND_BACKEND"
 	if [ -n "${FLEET_SECOND_MODEL_KEY:-}" ]; then
 		printf '%s\n' "$FLEET_SECOND_MODEL_KEY" >"$WORK/second-token"
@@ -129,8 +133,21 @@ if [ -n "${FLEET_SECOND_BACKEND:-}" ]; then
 	fi
 	SECOND_BACKEND="$(printf '%s' "$FLEET_SECOND_BACKEND" | tr ',' '\n' | sed -n 's/^name=//p')"
 	[ -n "$SECOND_BACKEND" ] || fail "FLEET_SECOND_BACKEND needs name=NAME"
+	BACKEND_ARGS+=(--celln-fleet-backend "$second_spec")
+fi
+ADD_BACKEND=""
+if [ -n "${FLEET_ADD_BACKEND:-}" ]; then
+	ADD_BACKEND="$(printf '%s' "$FLEET_ADD_BACKEND" | tr ',' '\n' | sed -n 's/^name=//p')"
+	[ -n "$ADD_BACKEND" ] || fail "FLEET_ADD_BACKEND needs name=NAME"
+	add_spec="$FLEET_ADD_BACKEND"
+	if [ -n "${FLEET_ADD_MODEL_KEY:-}" ]; then
+		printf '%s\n' "$FLEET_ADD_MODEL_KEY" >"$WORK/add-token"
+		add_spec="$add_spec,credential-file=$WORK/add-token"
+	fi
+fi
+if [ -n "$SECOND_BACKEND" ] || [ -n "$ADD_BACKEND" ]; then
 	CREDENTIAL_ARGS=()
-	MODEL_ARGS=(--celln-fleet-backend "$native_spec" --celln-fleet-backend "$second_spec")
+	MODEL_ARGS=("${BACKEND_ARGS[@]}")
 fi
 kc create namespace "$NAMESPACE" 2>/dev/null || true
 kc label node --overwrite -l '!node-role.kubernetes.io/control-plane' celln.dev/kvm=true >/dev/null
@@ -143,22 +160,25 @@ if [ -n "${FLEET_CERT_MANAGER_MANIFEST:-}" ]; then
 fi
 
 log "sympozium install --celln-fleet"
-rm -rf "$WORK/fleet-out" # the installer refuses an existing private output directory
+rm -rf "$WORK/fleet-out" # a fresh scope starts from an empty private output directory
 KUBECONFIG="$WORK/kubeconfig" kind export kubeconfig --name "$CLUSTER" --kubeconfig "$WORK/kubeconfig" >/dev/null
-KUBECONFIG="$WORK/kubeconfig" "$SYMPOZIUM" install -n "$NAMESPACE" --celln-fleet \
-	--celln-fleet-scope "$SCOPE" \
-	--celln-fleet-package-image "$registry/celln/starter@$digest" \
-	--celln-fleet-package-hash "$package_hash" \
-	--celln-fleet-publisher "$publisher" \
-	"${CREDENTIAL_ARGS[@]}" \
-	"${MODEL_ARGS[@]}" \
-	--celln-fleet-output-dir "$WORK/fleet-out" \
-	--celln-fleet-wait 20m \
-	--celln-native-approve-starter-tools \
-	--celln-router-image "$CELLN_IMAGE" \
-	--celln-installer-image "ghcr.io/sympozium-ai/sympozium/celln-installer:$TAG" \
-	--set celln.fleet.package.insecureRegistry=true \
-	--set "controller.image.tag=$TAG" --set "apiserver.image.tag=$TAG" --set "webhook.image.tag=$TAG" >"$WORK/install.log" 2>&1 || { tail -20 "$WORK/install.log"; fail "fleet install"; }
+fleet_install() { # extra args... ; the same command is rerun to add nodes or backends
+	KUBECONFIG="$WORK/kubeconfig" "$SYMPOZIUM" install -n "$NAMESPACE" --celln-fleet \
+		--celln-fleet-scope "$SCOPE" \
+		--celln-fleet-package-image "$registry/celln/starter@$digest" \
+		--celln-fleet-package-hash "$package_hash" \
+		--celln-fleet-publisher "$publisher" \
+		"${CREDENTIAL_ARGS[@]}" \
+		"${MODEL_ARGS[@]}" "$@" \
+		--celln-fleet-output-dir "$WORK/fleet-out" \
+		--celln-fleet-wait 20m \
+		--celln-native-approve-starter-tools \
+		--celln-router-image "$CELLN_IMAGE" \
+		--celln-installer-image "ghcr.io/sympozium-ai/sympozium/celln-installer:$TAG" \
+		--set celln.fleet.package.insecureRegistry=true \
+		--set "controller.image.tag=$TAG" --set "apiserver.image.tag=$TAG" --set "webhook.image.tag=$TAG"
+}
+fleet_install >"$WORK/install.log" 2>&1 || { tail -20 "$WORK/install.log"; fail "fleet install"; }
 owners="$(kc -n celln-system get pods -l app.kubernetes.io/name=celln-node --field-selector status.phase=Running -o name | wc -l)"
 [ "$owners" -eq 2 ] || fail "expected 2 running owners, got $owners"
 kc -n sympozium-system get deploy sympozium-controller-manager -o jsonpath='{.spec.template.spec.nodeSelector}' | grep -q hostname && fail "controller pinned to a node"
@@ -369,6 +389,29 @@ wait_for "one-shot parents released (live cells back to $cells_before)" 120 bash
 	total=0; for pod in \$(kubectl --context kind-$CLUSTER -n celln-system get pods -l app.kubernetes.io/name=celln-node --field-selector status.phase=Running -o name); do
 		n=\$(kubectl --context kind-$CLUSTER -n celln-system exec \$pod -c dispatcher -- curl -s http://127.0.0.1:8787/v1/health | python3 -c 'import json,sys; print(json.load(sys.stdin)[\"node\"][\"live_cells\"])'); total=\$((total + n)); done; echo \$total)\" = $cells_before ]"
 pass "one-shot parents stopped after answering; ${#one_shot_runs[@]} run(s) left the node's cells as they were ($cells_before live)"
+if [ -n "$ADD_BACKEND" ]; then
+	log "Adding backend $ADD_BACKEND to the running scope: owners untouched, conversations keep going"
+	owners_before="$(kc -n celln-system get pods -l app.kubernetes.io/name=celln-node -o jsonpath='{.items[*].metadata.uid}' | tr ' ' '\n' | sort)"
+	fleet_install --celln-fleet-backend "$add_spec" >"$WORK/install-add.log" 2>&1 || { tail -20 "$WORK/install-add.log"; fail "adding backend $ADD_BACKEND"; }
+	owners_after="$(kc -n celln-system get pods -l app.kubernetes.io/name=celln-node -o jsonpath='{.items[*].metadata.uid}' | tr ' ' '\n' | sort)"
+	[ "$owners_before" = "$owners_after" ] || fail "adding a backend restarted the owners"
+	kc get cellnruntimeprofile "$profile-$ADD_BACKEND" >/dev/null || fail "profile $profile-$ADD_BACKEND not installed"
+	[ "$(kc get cellnexecutionpolicy "celln-fleet-$SCOPE" -o jsonpath='{.spec.runtimeProfiles[*].ref.name}' | tr ' ' '\n' | grep -c .)" -ge 2 ] || fail "policy did not grow"
+	kc -n celln-system get configmap celln-fleet-configuration -o jsonpath='{.data}' | grep -q "$ADD_BACKEND.configured.json" || fail "nodes did not publish $ADD_BACKEND"
+	[ "$(kc -n "$tenant" get agentrun "$tenant_run" -o jsonpath='{.status.phase}')" = Running ] || fail "$tenant_run did not survive the backend addition"
+	[ -f "$WORK/fleet-out/configuration/$ADD_BACKEND/configured.json" ] || fail "installer did not materialize $ADD_BACKEND"
+	pass "backend $ADD_BACKEND joined scope $SCOPE without an owner restart; $tenant_run still running"
+	kubectl --context "kind-$CLUSTER" -n sympozium-system port-forward svc/sympozium-apiserver "$api_port:8080" >/dev/null 2>&1 &
+	api_pf=$!
+	wait_for "apiserver port-forward" 60 curl -sf "${api_auth[@]}" "http://127.0.0.1:$api_port/api/v1/celln-platform/profiles?namespace=$tenant" -o /dev/null
+	curl -sf "${api_auth[@]}" "http://127.0.0.1:$api_port/api/v1/celln-platform/profiles?namespace=$tenant" | grep -q "\"name\":\"$profile-$ADD_BACKEND\"" || fail "added backend not offered to $tenant"
+	curl -sf "${api_auth[@]}" -X POST -H 'Content-Type: application/json' -d "{\"profile\":\"$profile-$ADD_BACKEND\"}" "http://127.0.0.1:$api_port/api/v1/celln-platform/wrappers?namespace=$tenant" | grep -q "\"connection\":\"celln-$ADD_BACKEND\"" || fail "added backend wrappers were not created in $tenant"
+	added_run="$(api_one_shot "Name one river in Botswana. Reply with one short sentence; do not use tools." "$ADD_BACKEND")" || fail "API refused a one-shot on added backend $ADD_BACKEND"
+	kill "$api_pf" >/dev/null 2>&1 || true
+	wait_for "one-shot $added_run on added backend" 300 bash -c "kubectl --context kind-$CLUSTER -n $tenant get agentrun $added_run -o jsonpath='{.status.phase}' | grep -qE 'Succeeded|Failed'"
+	[ "$(kc -n "$tenant" get agentrun "$added_run" -o jsonpath='{.status.phase}')" = Succeeded ] || fail "one-shot on added backend failed: $(kc -n "$tenant" get agentrun "$added_run" -o jsonpath='{.status.error}')"
+	pass "one-shot $added_run on added backend $ADD_BACKEND succeeded: $(kc -n "$tenant" get agentrun "$added_run" -o jsonpath='{.status.result}' | cut -c1-160)"
+fi
 if [ -n "$second_run" ]; then
 	kc -n "$tenant" delete agentrun "$second_run" --timeout=180s >/dev/null || fail "$second_run could not be deleted"
 fi

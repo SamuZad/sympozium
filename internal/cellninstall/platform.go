@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 
 	api "github.com/sympozium-ai/sympozium/api/v1alpha1"
@@ -221,15 +222,20 @@ func InstallPlatform(ctx context.Context, store client.Client, o PlatformOptions
 		Routes:            routes,
 		Ceilings:          api.CellnExecutionPolicyCeilings{MaxTurns: int64(limits.MaxTurns), MaxModelRequests: int64(limits.MaxModelRequests), MaxOutputTokens: limits.MaxOutputTokens, MaxParentLeaseSeconds: int64(limits.LeaseSeconds), MaxTurnSeconds: worker.Capabilities.TimeoutMs / 1000},
 	}}
-	objects = append(objects, policy)
-	// Reserve the private output before any cluster change.
-	if err := os.Mkdir(o.OutputDir, 0700); err != nil {
+	// Reserve the private output before any cluster change; a rerun that adds
+	// a backend reuses the directory it made.
+	if err := os.Mkdir(o.OutputDir, 0700); err != nil && !os.IsExist(err) {
 		return err
 	}
 	for _, object := range objects {
 		if err := ensurePlatformObject(ctx, store, object, first.configured.PackageHash); err != nil {
 			return err
 		}
+	}
+	// The scope's one policy grows with its backends: a rerun adds the new
+	// backend's profile and route and never removes or rewrites the others.
+	if err := ensurePlatformPolicy(ctx, store, policy, first.configured.PackageHash); err != nil {
+		return err
 	}
 	var namespace corev1.Namespace
 	if err := store.Get(ctx, types.NamespacedName{Name: o.Namespace}, &namespace); err != nil {
@@ -264,12 +270,22 @@ func InstallPlatform(ctx context.Context, store client.Client, o PlatformOptions
 			}
 		}
 	}
+	// Records written once are kept on a rerun (the registration and the
+	// sample run bind the first installation); installed.json is rewritten
+	// because it lists the backends.
 	write := func(name string, value any) error {
 		raw, err := json.MarshalIndent(value, "", "  ")
 		if err != nil {
 			return err
 		}
-		f, err := os.OpenFile(filepath.Join(o.OutputDir, name), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+		flags := os.O_WRONLY | os.O_CREATE | os.O_EXCL
+		if name == "installed.json" {
+			flags = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+		}
+		f, err := os.OpenFile(filepath.Join(o.OutputDir, name), flags, 0600)
+		if os.IsExist(err) {
+			return nil
+		}
 		if err != nil {
 			return err
 		}
@@ -321,6 +337,44 @@ func ClusterIdentity(ctx context.Context, store client.Reader) (string, error) {
 		return "", fmt.Errorf("cluster identity unavailable")
 	}
 	return string(system.UID), nil
+}
+
+// ensurePlatformPolicy creates the scope's policy, or extends an existing one
+// from the same package with any runtime profile or route it lacks. Existing
+// entries, the selector and the ceilings are never rewritten here.
+func ensurePlatformPolicy(ctx context.Context, store client.Client, policy *api.CellnExecutionPolicy, packageHash string) error {
+	err := store.Create(ctx, policy)
+	if err == nil {
+		return nil
+	}
+	if !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("create %s: %w; partial installation retained, no run was submitted", policy.Name, err)
+	}
+	var existing api.CellnExecutionPolicy
+	if err := store.Get(ctx, client.ObjectKeyFromObject(policy), &existing); err != nil {
+		return err
+	}
+	if existing.Annotations[packageAnnotation] != packageHash {
+		return fmt.Errorf("%s exists from another package; one scope carries exactly one package", policy.Name)
+	}
+	patch := client.MergeFrom(existing.DeepCopy())
+	changed := false
+	for _, ref := range policy.Spec.RuntimeProfiles {
+		if !slices.ContainsFunc(existing.Spec.RuntimeProfiles, func(r api.CellnExecutionPolicyRuntime) bool { return r.Ref == ref.Ref }) {
+			existing.Spec.RuntimeProfiles = append(existing.Spec.RuntimeProfiles, ref)
+			changed = true
+		}
+	}
+	for _, route := range policy.Spec.Routes {
+		if !slices.ContainsFunc(existing.Spec.Routes, func(r api.CellnExecutionPolicyRoute) bool { return reflect.DeepEqual(r, route) }) {
+			existing.Spec.Routes = append(existing.Spec.Routes, route)
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return store.Patch(ctx, &existing, patch)
 }
 
 // ensurePlatformObject creates the object, or accepts an existing one that was

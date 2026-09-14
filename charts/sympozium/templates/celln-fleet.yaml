@@ -20,22 +20,26 @@
 {{- fail "celln.fleet requires router.parentTokenSecret for gateway parent routing" }}
 {{- end }}
 {{- /* Model backends: the celln.fleet.backends list, or the legacy single
-     backend named native built from celln.fleet.model + modelCredential.
-     Every node configures every backend and mounts every credential. */}}
+     backend named native built from celln.fleet.model. Every node configures
+     every backend; keys come from one Secret keyed by backend name, mounted
+     once, so a backend added later needs no owner restart. */}}
+{{- if ($fleet.modelCredential | default dict).secret }}
+{{- fail "celln.fleet.modelCredential is replaced by celln.fleet.modelCredentialsSecret (one Secret keyed by backend name)" }}
+{{- end }}
+{{- $credentialsSecret := $fleet.modelCredentialsSecret | default "celln-fleet-model-credentials" }}
+{{- $credentialsDir := "/etc/celln-native/credentials" }}
 {{- $backends := list }}
 {{- range $fleet.backends | default list }}
 {{- $backends = append $backends . }}
 {{- end }}
 {{- if not $backends }}
 {{- $legacyModel := $fleet.model | default dict }}
-{{- $legacyCredential := $fleet.modelCredential | default dict }}
-{{- $backends = list (dict "name" "native" "provider" ($legacyModel.provider | default "") "protocol" ($legacyModel.protocol | default "") "endpoint" ($legacyModel.endpoint | default "") "model" ($legacyModel.name | default "") "allowInsecure" ($legacyModel.allowInsecure | default false) "credentialSecret" ($legacyCredential.secret | default "") "credentialPath" ($legacyCredential.path | default "/etc/celln-native/model-token")) }}
+{{- $backends = list (dict "name" "native" "provider" ($legacyModel.provider | default "") "protocol" ($legacyModel.protocol | default "") "endpoint" ($legacyModel.endpoint | default "") "model" ($legacyModel.name | default "") "allowInsecure" ($legacyModel.allowInsecure | default false)) }}
 {{- end }}
 {{- if gt (len $backends) 32 }}
 {{- fail "celln.fleet.backends allows at most 32 model backends per scope" }}
 {{- end }}
 {{- $backendNames := dict }}
-{{- $credentialDirs := dict }}
 {{- $backendExport := list }}
 {{- range $b := $backends }}
 {{- $name := $b.name | default "" }}
@@ -43,14 +47,10 @@
 {{- fail (printf "celln.fleet.backends: names must be unique DNS labels of at most 32 characters: %q" $name) }}
 {{- end }}
 {{- $_ := set $backendNames $name true }}
-{{- $credential := $b.credentialPath | default "" }}
-{{- if or (not $b.credentialSecret) (not (hasPrefix "/" $credential)) (contains ".." $credential) (eq (dir $credential) "/") (hasSuffix "/" $credential) }}
-{{- fail (printf "celln.fleet.backends[%s] requires credentialSecret and a clean absolute credentialPath in a dedicated directory" $name) }}
+{{- if or $b.credentialSecret $b.credentialPath }}
+{{- fail (printf "celln.fleet.backends[%s]: credentialSecret/credentialPath are replaced by celln.fleet.modelCredentialsSecret keyed by backend name" $name) }}
 {{- end }}
-{{- if hasKey $credentialDirs (dir $credential) }}
-{{- fail (printf "celln.fleet.backends[%s]: credentialPath directory %s is already used by another backend" $name (dir $credential)) }}
-{{- end }}
-{{- $_ := set $credentialDirs (dir $credential) $name }}
+{{- $credential := printf "%s/%s" $credentialsDir $name }}
 {{- $endpoint := $b.endpoint | default "" }}
 {{- if and $endpoint (or (not $b.model) (not (has ($b.protocol | default "") (list "openai-chat" "anthropic-messages"))) (not $b.provider)) }}
 {{- fail (printf "celln.fleet.backends[%s].endpoint needs provider, model and protocol openai-chat or anthropic-messages" $name) }}
@@ -127,7 +127,7 @@ rules:
   - apiGroups: [""]
     resources: [configmaps]
     resourceNames: [{{ $fleet.configurationConfigMap | quote }}]
-    verbs: [get]
+    verbs: [get, patch]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -176,43 +176,48 @@ spec:
       targetPort: 8787
       protocol: TCP
 ---
+# Prepares every labeled node from the reviewed package and configures each
+# model backend, publishing the scope's starter configuration. Its template
+# carries the backend list, so adding a backend rolls only this DaemonSet;
+# the owner DaemonSet below keeps its parents. The pod then idles.
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: celln-node
+  name: celln-node-configure
   namespace: celln-system
   labels:
-    app.kubernetes.io/name: celln-node
+    app.kubernetes.io/name: celln-node-configure
     app.kubernetes.io/part-of: sympozium
 spec:
   selector:
     matchLabels:
-      app.kubernetes.io/name: celln-node
+      app.kubernetes.io/name: celln-node-configure
   updateStrategy:
     type: RollingUpdate
     rollingUpdate:
-      maxUnavailable: 1
+      maxUnavailable: 100%
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: celln-node
+        app.kubernetes.io/name: celln-node-configure
       annotations:
         celln.sympozium.ai/package: {{ $package.hash | quote }}
+        celln.sympozium.ai/backends: {{ toJson $backendExport | sha256sum | quote }}
     spec:
       serviceAccountName: celln-node
       automountServiceAccountToken: false
-      terminationGracePeriodSeconds: 60
+      terminationGracePeriodSeconds: 10
       nodeSelector:
         celln.dev/kvm: "true"
       tolerations:
         - key: node-role.kubernetes.io/control-plane
           operator: Exists
           effect: NoSchedule
-      initContainers:
-        - name: prepare
+      containers:
+        - name: configure
           image: {{ $image | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["/bin/bash", "/etc/celln-fleet/prepare.sh"]
+          command: ["/bin/bash", "-ec", "/bin/bash /etc/celln-fleet/prepare.sh && exec sleep infinity"]
           env:
             - name: NODE_NAME
               valueFrom:
@@ -266,6 +271,11 @@ spec:
             - name: publisher-credentials
               mountPath: /var/run/secrets/celln-fleet
               readOnly: true
+            # Read only to know when a backend's key has reached this node's
+            # kubelet: a backend is published once its key file is present.
+            - name: model-credentials
+              mountPath: {{ $credentialsDir | quote }}
+              readOnly: true
             - name: state
               mountPath: {{ $state | quote }}
             - name: kvm
@@ -279,6 +289,119 @@ spec:
             limits:
               memory: "2Gi"
               cpu: "2000m"
+      volumes:
+        - name: model-credentials
+          secret:
+            secretName: {{ $credentialsSecret | quote }}
+            defaultMode: 0400
+            optional: true
+        - name: prepare
+          configMap:
+            name: celln-fleet-prepare
+            defaultMode: 0555
+        - name: parent-clients
+          configMap:
+            name: {{ $fleet.parentClientsConfigMap | quote }}
+        {{- if $package.pullSecret }}
+        - name: registry
+          secret:
+            secretName: {{ $package.pullSecret | quote }}
+            defaultMode: 0400
+        {{- end }}
+        # Only this configuring step may reach the API; the owner gets no token.
+        - name: publisher-credentials
+          projected:
+            defaultMode: 0400
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3600
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+        - name: state
+          hostPath:
+            path: {{ $state | quote }}
+            type: DirectoryOrCreate
+        - name: kvm
+          hostPath:
+            path: /dev/kvm
+            type: CharDevice
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: celln-node
+  namespace: celln-system
+  labels:
+    app.kubernetes.io/name: celln-node
+    app.kubernetes.io/part-of: sympozium
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: celln-node
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: celln-node
+      annotations:
+        celln.sympozium.ai/package: {{ $package.hash | quote }}
+    spec:
+      serviceAccountName: celln-node
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      nodeSelector:
+        celln.dev/kvm: "true"
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      initContainers:
+        # The node-configure DaemonSet prepares the authority root (package
+        # admission, model backends). This owner only waits for admission so a
+        # backend change never rolls it; new model profiles are read from the
+        # root at provision time and new keys arrive through the Secret mount.
+        - name: wait-prepared
+          image: {{ $image | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              until [ -f "$FLEET_STATE/admitted-$FLEET_PACKAGE_HEX" ] && [ -f "$FLEET_STATE/authority/trusted-parent-clients.json" ]; do
+                echo "waiting for celln-node-configure to admit package $FLEET_PACKAGE_HEX on this node" >&2
+                sleep 5
+              done
+          env:
+            - name: FLEET_STATE
+              value: {{ $state | quote }}
+            - name: FLEET_PACKAGE_HEX
+              value: {{ trimPrefix "blake3:" $package.hash | quote }}
+          securityContext:
+            runAsNonRoot: false
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: state
+              mountPath: {{ $state | quote }}
+              readOnly: true
+          resources:
+            requests:
+              memory: "16Mi"
+              cpu: "10m"
+            limits:
+              memory: "64Mi"
+              cpu: "100m"
       containers:
         - name: dispatcher
           image: {{ $image | quote }}
@@ -367,11 +490,9 @@ spec:
               readOnly: true
             - name: state
               mountPath: {{ $state | quote }}
-            {{- range $b := $backendExport }}
-            - name: {{ printf "model-credential-%s" $b.name | quote }}
-              mountPath: {{ dir $b.credentialFile | quote }}
+            - name: model-credentials
+              mountPath: {{ $credentialsDir | quote }}
               readOnly: true
-            {{- end }}
             - name: kvm
               mountPath: /dev/kvm
             - name: boot
@@ -383,45 +504,16 @@ spec:
             - name: tmp
               mountPath: /tmp
       volumes:
-        - name: prepare
-          configMap:
-            name: celln-fleet-prepare
-            defaultMode: 0555
-        - name: parent-clients
-          configMap:
-            name: {{ $fleet.parentClientsConfigMap | quote }}
-        {{- if $package.pullSecret }}
-        - name: registry
-          secret:
-            secretName: {{ $package.pullSecret | quote }}
-            defaultMode: 0400
-        {{- end }}
-        # Only the preparing step may reach the API; the dispatcher gets no token.
-        - name: publisher-credentials
-          projected:
-            defaultMode: 0400
-            sources:
-              - serviceAccountToken:
-                  path: token
-                  expirationSeconds: 3600
-              - configMap:
-                  name: kube-root-ca.crt
-                  items:
-                    - key: ca.crt
-                      path: ca.crt
         - name: backend
           secret:
             secretName: {{ $backendSecret | quote }}
             defaultMode: 0440
-        {{- range $i, $b := $backendExport }}
-        - name: {{ printf "model-credential-%s" $b.name | quote }}
+        # Every backend's key, one file per backend; Secret changes reach the
+        # mount without a restart because no subPath is used.
+        - name: model-credentials
           secret:
-            secretName: {{ (index $backends $i).credentialSecret | quote }}
+            secretName: {{ $credentialsSecret | quote }}
             defaultMode: 0400
-            items:
-              - key: token
-                path: {{ base $b.credentialFile | quote }}
-        {{- end }}
         - name: state
           hostPath:
             path: {{ $state | quote }}

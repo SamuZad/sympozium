@@ -30,10 +30,9 @@ controller mounts no host state at all, and no node is ever named in values.
   token; the controller never sees the policy. Rerunning the installer verifies
   the pair and refuses to rotate it by replacement.
 - **Model credentials.** Each backend's model profile references an absolute
-  file path. In fleet mode that file is a Secret (`celln-fleet-model-credential`
-  for the `native` backend, `celln-fleet-model-credential-<name>` otherwise)
-  mounted read-only into each dispatcher; guests and the controller cannot
-  read it.
+  file path. In fleet mode that is one Secret (`celln-fleet-model-credentials`,
+  one key per backend) mounted read-only into each dispatcher; guests and the
+  controller cannot read it.
   This keeps the key inside the cluster trust boundary until the dedicated
   model gateway (#502) is attached to native parents; treat it as interim.
 - **Configuration publication.** Only the DaemonSet's init step holds a
@@ -73,9 +72,9 @@ controller mounts no host state at all, and no node is ever named in values.
    needs a `.dockerconfigjson` Secret in `celln-system` referenced by
    `celln.fleet.package.pullSecret`.
 4. The model provider credential in a local file (one line, at least 24
-   characters), or an existing `celln-fleet-model-credential` Secret in
+   characters), or an existing entry for the backend in the `celln-fleet-model-credentials` Secret in
    `celln-system`. Keyless backends such as llama-server need neither; see
-   [Choosing the model backend](#choosing-the-model-backend).
+   [Model backends](#model-backends).
 
 ## Install
 
@@ -96,10 +95,12 @@ The command runs two phases and is safe to rerun:
 1. Publishes the parent principal and model credential, then installs the
    chart with `celln.fleet.*` set. Labeled nodes pull the package by digest,
    verify `package.json` against the hash, run `starter-admit` (real guest
-   member checks on KVM) and `starter-configure` once per model backend, and
-   the first node publishes each backend's `catalogue.json`, `configured.json`
-   and `native-template.json` (keys `<backend>.<file>`) as the
-   `celln-fleet-configuration` ConfigMap. Later nodes verify they derived
+   member checks on KVM) and `starter-configure` once per model backend (the
+   `celln-node-configure` DaemonSet; the `celln-node` owner only waits for
+   admission), and the first node publishes each backend's `catalogue.json`,
+   `configured.json` and `native-template.json` (keys `<backend>.<file>`) as
+   the `celln-fleet-configuration` ConfigMap; a later node adds any backend
+   the ConfigMap lacks and verifies the rest. Later nodes verify they derived
    identical files; a different package under the same scope is refused.
 2. Waits (default 15 minutes, `--celln-fleet-wait`) for that ConfigMap,
    materializes it under the output directory, installs the catalogue and
@@ -149,12 +150,11 @@ provider name plus `endpoint` and `protocol`. Without `--celln-fleet-backend`
 the `--celln-fleet-model-*` flags and `--celln-fleet-model-credential-file`
 define the single backend named `native`.
 
-- Each backend's key is published once as its own Secret in `celln-system`
-  (`celln-fleet-model-credential` for `native`,
-  `celln-fleet-model-credential-<name>` otherwise) and mounted read-only into
-  every dispatcher under `/etc/celln-native/[<name>/]model-token`. Omit
-  `credential-file` to keep an existing Secret; keyless backends get a
-  placeholder.
+- Each backend's key is published once as its entry in the
+  `celln-fleet-model-credentials` Secret in `celln-system` (key = backend
+  name) and mounted read-only into every dispatcher as
+  `/etc/celln-native/credentials/<name>`. Omit `credential-file` to keep an
+  existing entry; keyless backends get a placeholder.
 - Every node configures every backend from the same package, so all backends
   share the package's tools, persona and ceilings and differ only in their
   model route and credential profile (`<scope>` or `<scope>-<name>`). Two
@@ -168,8 +168,13 @@ define the single backend named `native`.
   cluster Secret is never sent over plain HTTP.
 - A model request may run for the whole turn, so slow local models are fine
   within the turn deadline.
-- The backend set is fixed for a scope (at most 32). To add or change one,
-  install a new scope.
+- **Adding a backend later:** rerun the same install command with one more
+  `--celln-fleet-backend`. The node-configure DaemonSet rolls and configures
+  the new backend on every node from the already-admitted package, publishes
+  its configuration, and the installer adds its profile, route and wrappers.
+  The owner DaemonSet is not restarted, so running conversations keep going,
+  and namespaces get the new wrapper on first use. A scope holds at most 32
+  backends; changing an existing backend's route needs a new scope.
 
 ## One-shot runs
 
