@@ -63,6 +63,7 @@ export function instanceYamlFromWizard(result: WizardResult): string {
         executionBackend: result.executionBackend,
         executionLifecycle: result.executionLifecycle,
         borrowedTools: result.borrowedTools,
+        clusterTools: result.clusterTools,
         runtimeRef: result.runtimeRef,
         model: result.model,
         provider: result.provider,

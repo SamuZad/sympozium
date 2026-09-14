@@ -4,6 +4,8 @@ export interface WizardExecution {
   executionBackend?: "job" | "celln";
   executionLifecycle?: "one-shot" | "enduring";
   borrowedTools?: CellnSelection["toolRefs"];
+  /** Shared platform catalogue revisions for a runtime wrapper; excludes borrowedTools. */
+  clusterTools?: CellnSelection["clusterToolRefs"];
   runtimeRef?: string;
   model: string;
   provider?: string;
@@ -21,7 +23,8 @@ export function executionFromWizard(form: WizardExecution): AgentExecutionDefaul
     model: form.model,
     cellnSelection: {
       runtimeRef: form.runtimeRef || undefined,
-      toolRefs: (form.borrowedTools || []).map((tool) => ({ ...tool })),
+      toolRefs: form.clusterTools ? [] : (form.borrowedTools || []).map((tool) => ({ ...tool })),
+      ...(form.clusterTools?.length ? { clusterToolRefs: form.clusterTools.map((tool) => ({ ...tool })) } : {}),
     },
     ...(form.executionLifecycle === "enduring" ? {
       enduring: { leaseSeconds: 600, maxTurns: 8, maxModelRequests: 24, maxOutputTokens: 8192 },
