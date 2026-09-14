@@ -571,6 +571,10 @@ func resolveDecisionRoute(s platformSnapshot, required bool) (DecisionRouteBindi
 	return route, nil
 }
 
+// OneShotParentGraceSeconds is added to a native one-shot's turn allowance so
+// the parent's lease also covers its admission and startup.
+const OneShotParentGraceSeconds int64 = 120
+
 func resolveBudget(s platformSnapshot, request PlatformResolveRequest, modelRequired bool, runtime api.AgentRuntimeCellnLimits) (DecisionBudgetBinding, error) {
 	ceilings := s.Policies[0].Spec.Ceilings
 	for _, policy := range s.Policies[1:] {
@@ -608,6 +612,12 @@ func resolveBudget(s platformSnapshot, request PlatformResolveRequest, modelRequ
 		turnSeconds = min(turnSeconds, max(int64(1), int64(s.Run.Spec.Timeout.Duration/time.Second)))
 	}
 	turnDeadline := request.Now.Unix() + turnSeconds
+	if s.Run.Spec.ExecutionLifecycle != "enduring" && modelRequired && s.Profile.Spec.Native != nil {
+		// A native one-shot is a single-turn parent: its lease covers parent
+		// admission plus the one turn, within the policy's parent ceiling.
+		lease := min(ceilings.MaxParentLeaseSeconds, turnSeconds+OneShotParentGraceSeconds)
+		parentDeadline = request.Now.Unix() + lease
+	}
 	turnCap := runCap
 	if native := s.Profile.Spec.Native; native != nil && native.TurnModelRequests > 0 && native.TurnOutputTokens > 0 {
 		// A native profile's per-turn allowance is what the owner enforces for

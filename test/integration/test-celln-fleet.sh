@@ -5,7 +5,8 @@
 # a follow-up turn keeps live context, any ordinary namespace runs with
 # wrappers created on first use while an excluded one is refused, a second
 # model backend (FLEET_SECOND_BACKEND, optional) serves the same namespace side
-# by side, and removing a node's label drains its owner honestly.
+# by side, one-shot runs answer once on any backend as single-turn parents and
+# give their cells back, and removing a node's label drains its owner honestly.
 #
 # Requires: kind, docker, kubectl, helm, /dev/kvm, a readable host kernel in
 # /boot, a model backend (FLEET_MODEL_PROVIDER=deepseek|openai|anthropic|llama-server
@@ -315,6 +316,60 @@ if [ -n "$second_run" ]; then
 	[ "$(kc -n "$tenant" get agentrun "$second_run" -o jsonpath='{.spec.cellnSelection.runtimeRef}{" "}{.spec.model.connectionRef}')" = "celln-$SECOND_BACKEND celln-$SECOND_BACKEND" ] || fail "$second_run did not run on backend $SECOND_BACKEND"
 	second_answer="$(kc -n "$tenant" get agentrun "$second_run" -o jsonpath='{.status.cellnParent.initialTurn.result.answer}' 2>/dev/null || true)"
 	pass "$second_run answered on backend $SECOND_BACKEND in the same namespace as the native runs: ${second_answer:0:160}"
+fi
+
+log "One-shot runs on the fleet: a single-turn parent per run, any backend, finished with its answer"
+# The same API call as an enduring conversation minus the lifecycle and lease:
+# the platform admits it, one parent answers once, the run succeeds with the
+# answer and its parent is stopped so the node's cells come back.
+live_cells() { # sum of live cells across every owner
+	local total=0 n
+	for pod in $(kubectl --context "kind-$CLUSTER" -n celln-system get pods -l app.kubernetes.io/name=celln-node --field-selector status.phase=Running -o name); do
+		n="$(kubectl --context "kind-$CLUSTER" -n celln-system exec "$pod" -c dispatcher -- curl -s http://127.0.0.1:8787/v1/health | python3 -c 'import json,sys; print(json.load(sys.stdin)["node"]["live_cells"])')" || n=0
+		total=$((total + n))
+	done
+	echo "$total"
+}
+cells_before="$(live_cells)"
+kubectl --context "kind-$CLUSTER" -n sympozium-system port-forward svc/sympozium-apiserver "$api_port:8080" >/dev/null 2>&1 &
+api_pf=$!
+wait_for "apiserver port-forward" 60 curl -sf "${api_auth[@]}" "http://127.0.0.1:$api_port/api/v1/celln-platform/profiles?namespace=$tenant" -o /dev/null
+api_one_shot() { # task [backend] -> run name, via POST /api/v1/runs with the one-shot lifecycle
+	python3 -c '
+import json, sys
+r = json.load(open(sys.argv[1]))["spec"]
+backend = sys.argv[3] if len(sys.argv) > 3 else ""
+agent, runtime, connection, model = r["agentRef"], r["cellnSelection"]["runtimeRef"], r["model"]["connectionRef"], r["model"]["model"]
+if backend:
+    agent, runtime, connection = f"celln-agent-{backend}", f"celln-{backend}", f"celln-{backend}"
+    model = json.load(open(sys.argv[4]))["model"]["model"]
+print(json.dumps({"agentRef": agent, "task": sys.argv[2], "systemPrompt": r["systemPrompt"], "backend": "celln",
+  "executionLifecycle": "one-shot", "model": model, "modelConnectionRef": connection,
+  "cellnSelection": {"runtimeRef": runtime, "clusterToolRefs": r["cellnSelection"]["clusterToolRefs"], "toolRefs": []}}))' "$WORK/fleet-out/installation/run.json" "$1" ${2:+"$2" "$WORK/fleet-out/configuration/$2/configured.json"} |
+		curl -sf "${api_auth[@]}" -X POST -H 'Content-Type: application/json' --data-binary @- "http://127.0.0.1:$api_port/api/v1/runs?namespace=$tenant" |
+		python3 -c 'import json,sys; print(json.load(sys.stdin)["metadata"]["name"])'
+}
+one_shot_runs=()
+one_shot_native="$(api_one_shot "Where is Botswana? Reply with one short sentence; do not use tools.")" || fail "API refused a one-shot run on the native backend in $tenant"
+one_shot_runs+=("$one_shot_native")
+if [ -n "$SECOND_BACKEND" ]; then
+	one_shot_second="$(api_one_shot "What is the capital of Botswana? Reply with one short sentence; do not use tools." "$SECOND_BACKEND")" || fail "API refused a one-shot run on backend $SECOND_BACKEND in $tenant"
+	one_shot_runs+=("$one_shot_second")
+fi
+kill "$api_pf" >/dev/null 2>&1 || true
+for run in "${one_shot_runs[@]}"; do
+	wait_for "one-shot $run to finish" 300 bash -c "kubectl --context kind-$CLUSTER -n $tenant get agentrun $run -o jsonpath='{.status.phase}' | grep -qE 'Succeeded|Failed'"
+	[ "$(kc -n "$tenant" get agentrun "$run" -o jsonpath='{.status.phase}')" = Succeeded ] || fail "one-shot $run failed: $(kc -n "$tenant" get agentrun "$run" -o jsonpath='{.status.error}')"
+	[ -n "$(kc -n "$tenant" get agentrun "$run" -o jsonpath='{.status.cellnParent.binding.incarnation}')" ] || fail "one-shot $run did not run as a native parent"
+	answer="$(kc -n "$tenant" get agentrun "$run" -o jsonpath='{.status.result}')"
+	[ -n "$answer" ] || fail "one-shot $run finished without a result"
+	pass "one-shot $run (runtime $(kc -n "$tenant" get agentrun "$run" -o jsonpath='{.spec.cellnSelection.runtimeRef}')) succeeded: ${answer:0:160}"
+done
+wait_for "one-shot parents released (live cells back to $cells_before)" 120 bash -c "[ \"\$(
+	total=0; for pod in \$(kubectl --context kind-$CLUSTER -n celln-system get pods -l app.kubernetes.io/name=celln-node --field-selector status.phase=Running -o name); do
+		n=\$(kubectl --context kind-$CLUSTER -n celln-system exec \$pod -c dispatcher -- curl -s http://127.0.0.1:8787/v1/health | python3 -c 'import json,sys; print(json.load(sys.stdin)[\"node\"][\"live_cells\"])'); total=\$((total + n)); done; echo \$total)\" = $cells_before ]"
+pass "one-shot parents stopped after answering; ${#one_shot_runs[@]} run(s) left the node's cells as they were ($cells_before live)"
+if [ -n "$second_run" ]; then
 	kc -n "$tenant" delete agentrun "$second_run" --timeout=180s >/dev/null || fail "$second_run could not be deleted"
 fi
 kc -n "$tenant" delete agentrun "$tenant_run2" --timeout=180s >/dev/null || fail "$tenant_run2 could not be deleted"

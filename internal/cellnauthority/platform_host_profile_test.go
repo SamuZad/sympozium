@@ -70,6 +70,11 @@ func TestPlatformResolverBindsHostProfileRouteToRuntimeNative(t *testing.T) {
 	if cap := resolution.Decision.Budget.TurnCap; cap.Requests != 3 || cap.OutputTokens != 1536 {
 		t.Fatalf("turn cap does not follow the native per-turn allowance: %+v", cap)
 	}
+	// A native one-shot is a single-turn parent: its lease covers the one
+	// turn plus the admission grace, so the owner can be issued the parent.
+	if b := resolution.Decision.Budget; b.MaxTurns != 1 || b.ParentDeadlineUnix != b.TurnDeadlineUnix+OneShotParentGraceSeconds {
+		t.Fatalf("one-shot budget lacks a single-turn parent lease: %+v", b)
+	}
 	// The controller freezes the connection's route into spec.model; a mirror is
 	// not an override, a different profile is.
 	var run api.AgentRun

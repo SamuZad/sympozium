@@ -83,6 +83,19 @@ func (r *AgentRunReconciler) reconcileCellnParent(ctx context.Context, run *api.
 		}
 		meta.SetStatusCondition(&fresh.Status.Conditions, turnCondition)
 	}
+	if turnDone && fresh.Spec.ExecutionLifecycle != "enduring" && fresh.Status.CellnParent != nil && fresh.Status.CellnParent.InitialTurn != nil && fresh.Status.CellnParent.InitialTurn.Result != nil {
+		// A one-shot's answer is its result. Persist the turn observation,
+		// then finish the run; the completed reconciliation stops the parent
+		// and releases its cells.
+		result := fresh.Status.CellnParent.InitialTurn.Result
+		if err := r.Status().Update(ctx, &fresh); err != nil {
+			return ctrl.Result{}, err
+		}
+		if result.Succeeded {
+			return r.succeedRun(ctx, &fresh, result.Answer, nil)
+		}
+		return ctrl.Result{}, r.failRun(ctx, &fresh, "Celln one-shot turn failed: "+result.Answer)
+	}
 	condition := metav1.Condition{Type: "CellnParentReady", Status: metav1.ConditionFalse, Reason: "Initializing", Message: "Parent startup pending; no turn completion implied", ObservedGeneration: fresh.Generation}
 	if observeErr != nil {
 		condition.Reason = "ReconciliationRequired"

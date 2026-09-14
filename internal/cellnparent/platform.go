@@ -178,8 +178,16 @@ func (p PlatformProvisioner) Admit(ctx context.Context, reader client.Reader, ke
 func BuildPlatformProvisionPlan(run api.AgentRun, resolution cellnauthority.PlatformResolution, scope string) ([]byte, string, error) {
 	d := resolution.Decision
 	m := resolution.Execution
-	if m == nil || d.Lifecycle != "enduring-initial" || d.Parent == nil || run.Spec.Enduring == nil || string(run.UID) != d.Run.UID {
-		return nil, "", fmt.Errorf("platform plan requires an enduring-initial decision for this run")
+	// An enduring run brings its own lease and turn count; a one-shot is a
+	// single-turn parent whose lease the resolver derived from one turn.
+	enduring := d.Lifecycle == "enduring-initial" && d.Parent != nil && run.Spec.Enduring != nil && run.Spec.ExecutionLifecycle == "enduring"
+	oneShot := d.Lifecycle == "one-shot" && run.Spec.PlatformOneShotShape() && d.Budget.ParentDeadlineUnix > resolution.Request.Now.Unix()
+	if m == nil || string(run.UID) != d.Run.UID || (!enduring && !oneShot) {
+		return nil, "", fmt.Errorf("platform plan requires an enduring-initial or one-shot decision for this run")
+	}
+	leaseSeconds, requireToolCall := d.Budget.ParentDeadlineUnix-resolution.Request.Now.Unix(), false
+	if enduring {
+		leaseSeconds, requireToolCall = int64(run.Spec.Enduring.LeaseSeconds), run.Spec.Enduring.RequireToolCall
 	}
 	native := m.ProfileSpec.Native
 	if native == nil {
@@ -206,7 +214,7 @@ func BuildPlatformProvisionPlan(run api.AgentRun, resolution cellnauthority.Plat
 	if err != nil || harness.Model != d.Route.Model || origin != d.Route.EndpointOrigin {
 		return nil, "", fmt.Errorf("runtime profile model route differs from the resolved route")
 	}
-	if harness.RequireToolCall != run.Spec.Enduring.RequireToolCall {
+	if harness.RequireToolCall != requireToolCall {
 		return nil, "", fmt.Errorf("runtime profile tool-call requirement differs from run intent")
 	}
 	if !hashPattern.MatchString(native.ModelProfile) || native.ReservedMemoryBytes < 1 || native.AdmissionWindowMs < 1 || native.TurnModelRequests < 1 || native.TurnOutputTokens < 1 {
@@ -216,12 +224,16 @@ func BuildPlatformProvisionPlan(run api.AgentRun, resolution cellnauthority.Plat
 	if err != nil {
 		return nil, "", err
 	}
-	parent, err := parentRequestWithLease(native.Parent.Raw, principal, int64(run.Spec.Enduring.LeaseSeconds))
+	parent, err := parentRequestWithLease(native.Parent.Raw, principal, leaseSeconds)
 	if err != nil {
 		return nil, "", err
 	}
-	if d.Budget.MaxTurns < 1 || d.Budget.RunCap.Requests < 1 || d.Budget.RunCap.OutputTokens < 1 || int64(run.Spec.Enduring.MaxTurns) != d.Budget.MaxTurns {
-		return nil, "", fmt.Errorf("decision budget does not bound an enduring parent")
+	expectedTurns := int64(1)
+	if enduring {
+		expectedTurns = int64(run.Spec.Enduring.MaxTurns)
+	}
+	if d.Budget.MaxTurns < 1 || d.Budget.RunCap.Requests < 1 || d.Budget.RunCap.OutputTokens < 1 || expectedTurns != d.Budget.MaxTurns {
+		return nil, "", fmt.Errorf("decision budget does not bound the parent's turns")
 	}
 	// The owner admits a parent only when every turn may spend the model
 	// profile's reviewed allowance; a run whose budget affords less is refused
