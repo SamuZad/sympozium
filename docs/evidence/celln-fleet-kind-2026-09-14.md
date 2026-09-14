@@ -62,11 +62,13 @@ one egress slot and the fleet defaulted to `egressSlots: 1`, and two 1.25 GiB
 parents also exceed a 2 GiB budget — so that run reported *Parent outcome
 unavailable; preserving original incarnation without replay* and the gateway's
 status read reached the owner (`parent owner not found`). The gateway does not
-re-place a refused incarnation, by design. A live parent keeps a warm child, so it holds two
-cells and two egress contexts. The fleet defaults now hold two parents per
-node (`maxCells: 4`, `egressSlots: 4`, `memoryBytes: 4 GiB`); size them for the
-parents a node should hold. The integration script starts runs
-one at a time. Load-aware placement is a possible later gateway improvement.
+re-place a refused incarnation, by design. Raising the budget did not help:
+`current_node` in the dispatcher zeroes advertised egress whenever any parent
+is live ("parent registry does not yet carry exact broker-slot charges"), so
+Celln v0.5.11 holds exactly one parent per node. The integration script now
+accepts a same-owner refusal as the honest outcome, and per-parent broker
+accounting is filed against Celln. Load-aware placement is a possible later
+gateway improvement.
 
 ## Environment caveats
 

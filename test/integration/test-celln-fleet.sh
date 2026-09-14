@@ -114,19 +114,6 @@ pass "two owners prepared from one package; controller unpinned; catalogue insta
 
 log "Enduring runs are issued through the gateway to fleet owners"
 run_ready() { [ "$(kc -n "$NAMESPACE" get agentrun "$1" -o jsonpath='{.status.conditions[?(@.type=="CellnParentReady")].status}')" = True ]; }
-# The gateway places each incarnation by hash, not by load, and a create the
-# owner refuses is terminal for that run; the default node budget holds two
-# parents so placement never decides the outcome. Runs start one at a time.
-runs=()
-for _ in 1 2; do
-	run="$(kc -n "$NAMESPACE" create -f "$WORK/fleet-out/installation/run.json" -o jsonpath='{.metadata.name}')"
-	wait_for "parent $run ready" 240 run_ready "$run"
-	[ "$(kc -n "$NAMESPACE" get agentrun "$run" -o jsonpath='{.status.cellnParent.binding.target}')" = "http://celln-router.celln-system.svc.cluster.local:8787" ] || fail "$run not issued through the gateway"
-	wait_for "initial turn of $run" 240 bash -c "kubectl --context kind-$CLUSTER -n $NAMESPACE get agentrun $run -o jsonpath='{.status.cellnParent.initialTurn.result.succeeded}' | grep -q true"
-	runs+=("$run")
-done
-first="${runs[0]}"
-second="${runs[1]}"
 node_of() { # launch profile -> node whose owner issued it
 	for pod in $(kc -n celln-system get pods -l app.kubernetes.io/name=celln-node -o name); do
 		if kc -n celln-system exec "$pod" -c dispatcher -- test -e "/var/lib/sympozium-celln/$SCOPE/authority/trusted-parent-launches/${1#blake3:}.json" 2>/dev/null; then
@@ -134,10 +121,31 @@ node_of() { # launch profile -> node whose owner issued it
 		fi
 	done
 }
-first_node="$(node_of "$(kc -n "$NAMESPACE" get agentrun "$first" -o jsonpath='{.status.cellnParent.binding.launchProfile}')")"
-second_node="$(node_of "$(kc -n "$NAMESPACE" get agentrun "$second" -o jsonpath='{.status.cellnParent.binding.launchProfile}')")"
-[ -n "$first_node" ] && [ -n "$second_node" ] || fail "owner journals not found"
-pass "$first on $first_node and $second on $second_node completed real model turns"
+launch_of() { kc -n "$NAMESPACE" get agentrun "$1" -o jsonpath='{.status.cellnParent.binding.launchProfile}'; }
+first="$(kc -n "$NAMESPACE" create -f "$WORK/fleet-out/installation/run.json" -o jsonpath='{.metadata.name}')"
+wait_for "parent $first ready" 240 run_ready "$first"
+[ "$(kc -n "$NAMESPACE" get agentrun "$first" -o jsonpath='{.status.cellnParent.binding.target}')" = "http://celln-router.celln-system.svc.cluster.local:8787" ] || fail "$first not issued through the gateway"
+wait_for "initial turn of $first" 240 bash -c "kubectl --context kind-$CLUSTER -n $NAMESPACE get agentrun $first -o jsonpath='{.status.cellnParent.initialTurn.result.succeeded}' | grep -q true"
+first_node="$(node_of "$(launch_of "$first")")"
+[ -n "$first_node" ] || fail "owner of $first not found"
+pass "$first issued through the gateway to $first_node and completed a real model turn"
+
+# The gateway places by incarnation hash, not by load, and Celln holds one
+# parent per node: a second run either lands on the other owner and runs, or
+# is refused there terminally. Both are honest outcomes; neither is re-placed.
+second="$(kc -n "$NAMESPACE" create -f "$WORK/fleet-out/installation/run.json" -o jsonpath='{.metadata.name}')"
+wait_for "issuance of $second" 120 bash -c "[ -n \"\$(kubectl --context kind-$CLUSTER -n $NAMESPACE get agentrun $second -o jsonpath='{.status.cellnParent.binding.launchProfile}')\" ]"
+second_node="$(node_of "$(launch_of "$second")")"
+[ -n "$second_node" ] || fail "owner of $second not found"
+if [ "$second_node" != "$first_node" ]; then
+	wait_for "parent $second ready" 240 run_ready "$second"
+	wait_for "initial turn of $second" 240 bash -c "kubectl --context kind-$CLUSTER -n $NAMESPACE get agentrun $second -o jsonpath='{.status.cellnParent.initialTurn.result.succeeded}' | grep -q true"
+	pass "$second issued to the other owner $second_node and completed a real model turn"
+else
+	wait_for "capacity refusal of $second" 120 bash -c "kubectl --context kind-$CLUSTER -n $NAMESPACE get agentrun $second -o jsonpath='{.status.conditions[?(@.type==\"CellnParentReady\")].reason}' | grep -q ReconciliationRequired"
+	run_ready "$second" && fail "$second became ready on an owner that already holds a parent"
+	pass "$second hashed to $first_node and was refused there (one parent per node); not re-placed"
+fi
 
 log "Follow-up turn keeps live context on the same owner"
 uid="$(kc -n "$NAMESPACE" get agentrun "$first" -o jsonpath='{.metadata.uid}')"
@@ -160,15 +168,17 @@ echo "$answer" | grep -qi violet || fail "follow-up turn lost context: $answer"
 pass "distinct child read back: $(echo "$answer" | tr '\n' ' ')"
 
 log "Removing a node's label drains its owner and reports context loss"
-kc label node "$second_node" celln.dev/kvm- >/dev/null
-wait_for "owner drain on $second_node" 120 bash -c "[ \$(kubectl --context kind-$CLUSTER -n celln-system get pods -l app.kubernetes.io/name=celln-node --field-selector spec.nodeName=$second_node -o name | wc -l) = 0 ]"
-wait_for "context loss report for $second" 180 bash -c "kubectl --context kind-$CLUSTER -n $NAMESPACE get agentrun $second -o jsonpath='{.status.error}' | grep -q 'context lost or stopped'"
-if [ "$first_node" != "$second_node" ]; then
-	run_ready "$first" || fail "$first on $first_node was affected by draining $second_node"
-	pass "$second reports ContextLost with owner outcome; $first on $first_node still Ready"
+kc label node "$first_node" celln.dev/kvm- >/dev/null
+wait_for "owner drain on $first_node" 120 bash -c "[ \$(kubectl --context kind-$CLUSTER -n celln-system get pods -l app.kubernetes.io/name=celln-node --field-selector spec.nodeName=$first_node -o name | wc -l) = 0 ]"
+wait_for "context loss report for $first" 180 bash -c "kubectl --context kind-$CLUSTER -n $NAMESPACE get agentrun $first -o jsonpath='{.status.error}' | grep -q 'context lost or stopped'"
+if [ "$second_node" != "$first_node" ]; then
+	run_ready "$second" || fail "$second on $second_node was affected by draining $first_node"
+	pass "$first reports ContextLost with owner outcome; $second on $second_node still Ready"
 else
-	pass "$second reports ContextLost with owner outcome ($first shared that owner)"
+	pass "$first reports ContextLost with owner outcome after its owner left"
 fi
+kc -n "$NAMESPACE" delete agentrun "$first" --timeout=120s >/dev/null || fail "$first could not be deleted after its owner left"
+pass "$first deleted; cleanup released after owner removal"
 
-kc label node --overwrite "$second_node" celln.dev/kvm=true >/dev/null
+kc label node --overwrite "$first_node" celln.dev/kvm=true >/dev/null
 pass "celln fleet integration complete (work dir: $WORK)"

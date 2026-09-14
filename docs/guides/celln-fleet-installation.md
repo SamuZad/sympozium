@@ -147,10 +147,13 @@ journey on a three-node Kind cluster, including a node-leave drain.
 
 The gateway places each parent by incarnation hash, not by load, and an owner
 that refuses a create for capacity ends that run (`Parent outcome unavailable`)
-rather than re-placing it. A parent keeps a warm child, so each parent holds two cells
-and two egress contexts; the defaults (`maxCells: 4`, `egressSlots: 4`,
-`memoryBytes: 4 GiB`) hold two parents per node. Raise them together
-(`egressSlots` = `maxCells`) for busier nodes.
+rather than re-placing it. **Celln v0.5.11 holds one parent per node**: while
+any parent is live the dispatcher advertises no spare egress (its parent
+registry does not yet charge exact broker slots), so a second parent — or an
+egress-using one-shot — placed on that node is refused. Plan one parent per
+labeled node and add nodes for more; per-parent broker accounting is tracked
+in the Celln repository. `maxCells`, `memoryBytes` and `egressSlots` still
+bound one-shot work on an idle node.
 
 ## Limits
 

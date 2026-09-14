@@ -574,15 +574,16 @@ celln:
       # the controller never see it; the model gateway is the long-term home.
       secret: ""
       path: /etc/celln-native/model-token
-    # -- Per-node budget. A parent keeps a warm child, so each parent holds two
-    # cells and two egress contexts; keep egressSlots equal to maxCells. These
-    # defaults hold two parents per node, and a create the owner refuses for
+    # -- Per-node budget. A parent keeps a warm child (two cells, 1.25 GiB
+    # declared). Celln v0.5.11 stops advertising egress while any parent is
+    # live, so a node holds ONE parent regardless of these values (see
+    # docs/guides/celln-fleet-installation.md); a create the owner refuses for
     # capacity is terminal for that run.
     maxCells: 4
     memoryBytes: 4294967296
     allowEgressHosts:
       - api.deepseek.com
-    egressSlots: 4
+    egressSlots: 1
     # -- Controller-namespace Secret with registrations.json (remoteProvisioner);
     # produced by `sympozium install --celln-fleet` after the nodes publish.
     parentConfigSecret: ""
