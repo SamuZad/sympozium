@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	sigsyaml "sigs.k8s.io/yaml"
 	"sort"
 	"strconv"
 	"strings"
@@ -1535,7 +1536,90 @@ func applyCRDs(ch *chart.Chart) error {
 	if err := kubectlQuiet("wait", "--for=condition=established", "--timeout=120s", "-f", tmpDir); err != nil {
 		return fmt.Errorf("CRDs not established: %w", err)
 	}
-	return nil
+	return refreshHelmDiscovery(ch)
+}
+
+// refreshHelmDiscovery drops the on-disk discovery cache Helm shares with
+// kubectl and waits until the API server serves every CRD kind. Otherwise a
+// cache written before the CRDs existed makes Helm report "no matches for
+// kind" while building the release.
+func refreshHelmDiscovery(ch *chart.Chart) error {
+	kubeconfigPath := kubeconfig
+	if kubeconfigPath == "" {
+		kubeconfigPath = clientcmd.RecommendedHomeFile
+	}
+	settings := helmcli.New()
+	settings.KubeConfig = kubeconfigPath
+	discovery, err := settings.RESTClientGetter().ToDiscoveryClient()
+	if err != nil {
+		return fmt.Errorf("discovery client: %w", err)
+	}
+	want := map[string]bool{}
+	for _, crd := range ch.CRDObjects() {
+		var doc struct {
+			Spec struct {
+				Group string `json:"group"`
+				Names struct {
+					Kind string `json:"kind"`
+				} `json:"names"`
+				Versions []struct {
+					Name   string `json:"name"`
+					Served bool   `json:"served"`
+				} `json:"versions"`
+			} `json:"spec"`
+		}
+		if sigsyaml.Unmarshal(crd.File.Data, &doc) != nil || doc.Spec.Group == "" {
+			continue
+		}
+		for _, v := range doc.Spec.Versions {
+			if v.Served {
+				want[doc.Spec.Group+"/"+v.Name+"/"+doc.Spec.Names.Kind] = true
+			}
+		}
+	}
+	deadline := time.Now().Add(2 * time.Minute)
+	for {
+		discovery.Invalidate()
+		missing := ""
+		_, lists, _ := discovery.ServerGroupsAndResources()
+		served := map[string]bool{}
+		for _, list := range lists {
+			for _, r := range list.APIResources {
+				served[list.GroupVersion+"/"+r.Kind] = true
+			}
+		}
+		for key := range want {
+			if !served[key] {
+				missing = key
+				break
+			}
+		}
+		if missing == "" {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("API server does not yet serve %s", missing)
+		}
+		time.Sleep(2 * time.Second)
+	}
+}
+
+// waitCertManagerWebhook waits until the webhook admits a server-side
+// dry-run Issuer, which is what Helm's install needs.
+func waitCertManagerWebhook(timeout time.Duration) error {
+	manifest := "apiVersion: cert-manager.io/v1\nkind: Issuer\nmetadata:\n  name: sympozium-webhook-probe\n  namespace: cert-manager\nspec:\n  selfSigned: {}\n"
+	deadline := time.Now().Add(timeout)
+	for {
+		cmd := exec.Command("kubectl", "apply", "--dry-run=server", "-f", "-")
+		cmd.Stdin = strings.NewReader(manifest)
+		if err := cmd.Run(); err == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("cert-manager webhook is not serving")
+		}
+		time.Sleep(3 * time.Second)
+	}
 }
 
 // kubectlRetry retries a command whose failure is typically transient (a
@@ -1613,15 +1697,16 @@ func runInstall(imageTag string, setValues []string) error {
 			"https://github.com/cert-manager/cert-manager/releases/download/v1.17.1/cert-manager.yaml"); err != nil {
 			return fmt.Errorf("install cert-manager: %w", err)
 		}
-		fmt.Println("  Waiting for cert-manager to be ready...")
-		_ = kubectl("wait", "--for=condition=Available", "deployment/cert-manager",
-			"-n", "cert-manager", "--timeout=120s")
-		_ = kubectl("wait", "--for=condition=Available", "deployment/cert-manager-webhook",
-			"-n", "cert-manager", "--timeout=120s")
-		_ = kubectl("wait", "--for=condition=Available", "deployment/cert-manager-cainjector",
-			"-n", "cert-manager", "--timeout=120s")
-		fmt.Println("  Waiting for cert-manager webhook TLS to bootstrap...")
-		time.Sleep(10 * time.Second)
+	}
+	// Wait whoever installed it: a cert-manager applied moments ago (by this
+	// command or by an operator) refuses Helm's Certificates until its webhook
+	// serves.
+	fmt.Println("  Waiting for cert-manager to be ready...")
+	for _, d := range []string{"cert-manager", "cert-manager-webhook", "cert-manager-cainjector"} {
+		_ = kubectl("wait", "--for=condition=Available", "deployment/"+d, "-n", "cert-manager", "--timeout=180s")
+	}
+	if err := waitCertManagerWebhook(2 * time.Minute); err != nil {
+		return err
 	}
 
 	// ── Helm install or upgrade ─────────────────────────────────────────

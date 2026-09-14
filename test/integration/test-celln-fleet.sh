@@ -112,6 +112,12 @@ kc create namespace "$NAMESPACE" 2>/dev/null || true
 kc label node --overwrite -l '!node-role.kubernetes.io/control-plane' celln.dev/kvm=true >/dev/null
 pass "images loaded; workers labeled celln.dev/kvm=true"
 
+# A cached cert-manager manifest avoids depending on GitHub release downloads;
+# the installer skips cert-manager when its namespace already exists.
+if [ -n "${FLEET_CERT_MANAGER_MANIFEST:-}" ]; then
+	kc apply -f "$FLEET_CERT_MANAGER_MANIFEST" >/dev/null
+fi
+
 log "sympozium install --celln-fleet"
 rm -rf "$WORK/fleet-out" # the installer refuses an existing private output directory
 KUBECONFIG="$WORK/kubeconfig" kind export kubeconfig --name "$CLUSTER" --kubeconfig "$WORK/kubeconfig" >/dev/null
