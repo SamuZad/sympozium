@@ -1,5 +1,5 @@
 {
-  "version": "v0.5.10",
-  "archiveSHA256": "65b1358d580d42e295fd4d5cd878a3664ca8b59965ed3bb8a7e9857e5e2fa868",
-  "imageDigest": "sha256:a52d80fe8f492b456f6f47c49190935bff3939465c7189778eb3f3d18e767ef4"
+  "version": "v0.5.11",
+  "archiveSHA256": "3f5d537eca6c5768d637528c09ac927bae3ad7cf553faecda56a40bff375ad7c",
+  "imageDigest": "sha256:c19d3ea7027d425c187c085132de03b5bea03a37d303101cd25b300bcac2fe14"
 }
