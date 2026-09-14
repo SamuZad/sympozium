@@ -52,6 +52,44 @@ type FleetOptions struct {
 	// Model is the one model route every node configures for this scope. An
 	// empty Provider keeps Celln's reviewed default (DeepSeek).
 	Model FleetModel
+	// Limits are the scope's parent ceilings; zero fields take DefaultFleetLimits.
+	Limits FleetLimits
+}
+
+// FleetLimits bound one parent for its whole life. They become the policy
+// ceilings every run in the scope is admitted under; Celln validates them
+// again when configuring each node.
+type FleetLimits struct {
+	LeaseSeconds     int64
+	MaxTurns         int64
+	MaxModelRequests int64
+	MaxOutputTokens  int64
+}
+
+// DefaultFleetLimits favour long-running agents: a day-long parent with room
+// for a working session of turns (the starter profile spends up to 3 requests
+// and 1536 output tokens per turn).
+var DefaultFleetLimits = FleetLimits{LeaseSeconds: 86400, MaxTurns: 256, MaxModelRequests: 768, MaxOutputTokens: 393216}
+
+// Resolve fills zero fields from the defaults and applies the CRD bounds.
+func (l FleetLimits) Resolve() (FleetLimits, error) {
+	d := DefaultFleetLimits
+	if l.LeaseSeconds == 0 {
+		l.LeaseSeconds = d.LeaseSeconds
+	}
+	if l.MaxTurns == 0 {
+		l.MaxTurns = d.MaxTurns
+	}
+	if l.MaxModelRequests == 0 {
+		l.MaxModelRequests = d.MaxModelRequests
+	}
+	if l.MaxOutputTokens == 0 {
+		l.MaxOutputTokens = d.MaxOutputTokens
+	}
+	if l.LeaseSeconds < 60 || l.LeaseSeconds > 86400 || l.MaxTurns < 1 || l.MaxTurns > 1024 || l.MaxModelRequests < 3 || l.MaxModelRequests > 6144 || l.MaxOutputTokens < 1536 || l.MaxOutputTokens > 3145728 {
+		return l, fmt.Errorf("fleet limits out of range: lease 60–86400 s, turns 1–1024, model requests 3–6144, output tokens 1536–3145728")
+	}
+	return l, nil
 }
 
 // FleetModel selects the scope's model backend. Provider presets fill the
@@ -155,7 +193,15 @@ func FleetValues(o FleetOptions) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	limits, err := o.Limits.Resolve()
+	if err != nil {
+		return nil, err
+	}
 	return []string{
+		fmt.Sprintf("celln.fleet.limits.leaseSeconds=%d", limits.LeaseSeconds),
+		fmt.Sprintf("celln.fleet.limits.maxTurns=%d", limits.MaxTurns),
+		fmt.Sprintf("celln.fleet.limits.maxModelRequests=%d", limits.MaxModelRequests),
+		fmt.Sprintf("celln.fleet.limits.maxOutputTokens=%d", limits.MaxOutputTokens),
 		"celln.fleet.model.provider=" + model.Provider,
 		"celln.fleet.model.protocol=" + model.Protocol,
 		"celln.fleet.model.endpoint=" + model.Endpoint,

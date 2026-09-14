@@ -85,6 +85,14 @@ if endpoint:
         "credentialProfile": os.environ["FLEET_SCOPE"],
         "allowInsecure": os.environ.get("FLEET_MODEL_ALLOW_INSECURE", "false") == "true",
     }
+limits = {}
+for key, env in (("leaseSeconds", "FLEET_LIMIT_LEASE_SECONDS"), ("maxTurns", "FLEET_LIMIT_MAX_TURNS"),
+                 ("maxModelRequests", "FLEET_LIMIT_MAX_MODEL_REQUESTS"), ("maxOutputTokens", "FLEET_LIMIT_MAX_OUTPUT_TOKENS")):
+    value = int(os.environ.get(env, "0") or 0)
+    if value > 0:
+        limits[key] = value
+if limits:
+    plan["hostLimits"] = limits
 print(json.dumps(plan))
 PY
 	"$celln" --root "$root" starter-configure "$plan" --approve-starter-effects

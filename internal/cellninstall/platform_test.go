@@ -140,7 +140,7 @@ func TestInstallPlatformPublishesCatalogueOncePerScopeAndWrapsNamespaces(t *test
 	}
 	raw, _ = os.ReadFile(filepath.Join(out, "run.json"))
 	var run api.AgentRun
-	if err := json.Unmarshal(raw, &run); err != nil || run.Spec.Model.ConnectionRef != "celln-native" || len(run.Spec.CellnSelection.ClusterToolRefs) != 3 || len(run.Spec.CellnSelection.ToolRefs) != 0 || run.Spec.SystemPrompt != native.SystemPrompt || run.Spec.Enduring.MaxTurns != 8 || run.Spec.ExecutionLifecycle != "enduring" {
+	if err := json.Unmarshal(raw, &run); err != nil || run.Spec.Model.ConnectionRef != "celln-native" || len(run.Spec.CellnSelection.ClusterToolRefs) != 3 || len(run.Spec.CellnSelection.ToolRefs) != 0 || run.Spec.SystemPrompt != native.SystemPrompt || run.Spec.Enduring.MaxTurns != 12 || run.Spec.Enduring.LeaseSeconds != 3600 || run.Spec.Enduring.MaxOutputTokens != 18432 || run.Spec.ExecutionLifecycle != "enduring" {
 		t.Fatalf("sample run is not a platform run: %v %+v", err, run.Spec)
 	}
 	values, err := ConfigureFleet(ctx, store, Options{OutputDir: out, ControllerNamespace: "sympozium-system", OwnerTarget: ManagedRouterURL})
@@ -177,5 +177,16 @@ func TestInstallPlatformPublishesCatalogueOncePerScopeAndWrapsNamespaces(t *test
 	mismatch.Principal = "someone-else"
 	if err := InstallPlatform(ctx, store, mismatch); err == nil {
 		t.Fatal("principal differing from the reviewed configuration accepted")
+	}
+}
+
+func TestSessionDefaultsStayInsideCeilings(t *testing.T) {
+	wide := SessionDefaults(api.EnduringRunSpec{LeaseSeconds: 86400, MaxTurns: 256, MaxModelRequests: 768, MaxOutputTokens: 393216})
+	if wide.LeaseSeconds != 14400 || wide.MaxTurns != 64 || wide.MaxModelRequests != 192 || wide.MaxOutputTokens != 98304 {
+		t.Fatalf("session defaults: %+v", wide)
+	}
+	narrow := SessionDefaults(api.EnduringRunSpec{LeaseSeconds: 600, MaxTurns: 4, MaxModelRequests: 12, MaxOutputTokens: 6144})
+	if narrow.LeaseSeconds != 600 || narrow.MaxTurns != 4 || narrow.MaxModelRequests != 12 || narrow.MaxOutputTokens != 6144 {
+		t.Fatalf("session defaults exceed narrow ceilings: %+v", narrow)
 	}
 }

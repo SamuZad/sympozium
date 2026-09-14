@@ -5,12 +5,8 @@ import { CellnConversation } from "@/components/celln-conversation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
-const DEFAULT_ENDURING = {
-  leaseSeconds: 600,
-  maxTurns: 8,
-  maxModelRequests: 24,
-  maxOutputTokens: 8192,
-};
+import { LEGACY_ENDURING_DEFAULTS } from "@/lib/agent-execution";
+import { useCellnPlatformProfiles } from "@/hooks/use-api";
 
 /**
  * Interactive chat for a native Celln Agent. Each conversation is an enduring
@@ -41,7 +37,11 @@ export function CellnAgentConversation({
   const model = execution?.model || agent.spec.agents?.default?.model || "";
   const modelConnectionRef = execution?.modelConnectionRef;
   const provider = modelConnectionRef ? undefined : execution?.provider;
-  const limits = execution?.enduring || DEFAULT_ENDURING;
+  // An Agent created before session defaults existed carries no budget; take
+  // the platform profile's suggestion when there is one, else the legacy one.
+  const profiles = useCellnPlatformProfiles(!execution?.enduring);
+  const platformDefaults = profiles.data?.find((profile) => profile.wrapper === runtimeRef)?.sessionDefaults;
+  const limits = execution?.enduring || platformDefaults || LEGACY_ENDURING_DEFAULTS;
 
   const current = parents.find((run) => run.metadata.name === selected) || parents[0];
   const showComposer = composing || parents.length === 0;

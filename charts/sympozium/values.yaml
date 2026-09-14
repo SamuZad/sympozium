@@ -581,6 +581,14 @@ celln:
       name: ""
       # -- Approve a plain-HTTP or private endpoint (e.g. a LAN llama-server).
       allowInsecure: false
+    # -- Ceilings for one parent over its whole life; every node configures
+    # them and the scope's policy admits runs within them. Zero keeps Celln's
+    # reviewed defaults (1 h, 12 turns). The installer sets day-long defaults.
+    limits:
+      leaseSeconds: 0
+      maxTurns: 0
+      maxModelRequests: 0
+      maxOutputTokens: 0
     modelCredential:
       # -- Secret in celln-system (key `token`) mounted read-only into every
       # dispatcher at `path`, which the model profile references. Guests and

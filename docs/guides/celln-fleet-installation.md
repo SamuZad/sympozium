@@ -133,6 +133,28 @@ provider name plus `--celln-fleet-model-endpoint` and
   within the turn deadline.
 - The backend is fixed for a scope. To change it, install a new scope.
 
+## Leases and budgets
+
+A parent lives for its run's `leaseSeconds` and may spend up to its run's
+turn, model-request and output-token budget. The scope's ceilings bound
+every run and are configured on every node at install time:
+
+| Flag | Default | Range |
+| --- | --- | --- |
+| `--celln-fleet-max-lease-seconds` | 86400 (24 h) | 60–86400 |
+| `--celln-fleet-max-turns` | 256 | 1–1024 |
+| `--celln-fleet-max-model-requests` | 768 | 3–6144 |
+| `--celln-fleet-max-output-tokens` | 393216 | 1536–3145728 |
+
+A new conversation asks for a working session inside those ceilings by
+default (four hours, 64 turns, 192 requests, 98304 tokens; the API reports
+them per profile as `sessionDefaults`). A run asking for more than a ceiling
+is refused with `AUTH_LIMIT_RANGE`. When a lease ends no new turn is admitted
+and the parent stops; the conversation view shows the deadline and asks for a
+new conversation. Leases are not extended in place. Every live parent holds
+two cells and its declared memory for its whole lease, so long defaults cost
+node capacity while conversations sit idle.
+
 ## Authorising namespaces
 
 The installer publishes the reviewed starter configuration **once per scope**

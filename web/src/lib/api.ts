@@ -152,6 +152,16 @@ export interface CellnPlatformProfile {
   systemPrompt: string;
   /** Name of the AgentRuntime wrapper a run selects (created on first use). */
   wrapper: string;
+  /** The policy's per-parent maxima and the budget a new conversation should ask for. */
+  ceilings: EnduringLimits;
+  sessionDefaults: EnduringLimits;
+}
+
+export interface EnduringLimits {
+  leaseSeconds: number;
+  maxTurns: number;
+  maxModelRequests: number;
+  maxOutputTokens: number;
 }
 
 export interface CellnPlatformWrappers {
@@ -362,6 +372,8 @@ export interface AgentRunStatus {
   cellnParent?: {
     binding: { incarnation: string; runUID: string };
     createAttempted: boolean;
+    /** When the single create was first attempted; the lease runs from here. */
+    admittedAt?: string;
     initialTurn?: ParentTurnExecution;
     acceptedTurns: number;
     activeTurn?: { name: string; uid: string };

@@ -124,6 +124,19 @@ func TestFleetRendersPerNodeOwnersBehindOneGateway(t *testing.T) {
 	if prepareEnv["FLEET_MODEL_ENDPOINT"] != "http://100.81.163.75:8080/v1/chat/completions" || prepareEnv["FLEET_MODEL_ALLOW_INSECURE"] != "true" || prepareEnv["FLEET_MODEL_NAME"] != "qwen.gguf" || prepareEnv["FLEET_MODEL_PROTOCOL"] != "openai-chat" {
 		t.Fatalf("model route not passed to node preparation: %v", prepareEnv)
 	}
+	if prepareEnv["FLEET_LIMIT_LEASE_SECONDS"] != "0" {
+		t.Fatalf("default fleet must keep Celln's reviewed host limits: %v", prepareEnv)
+	}
+	limited, err := renderNativeParent(t, append(fleetValues(), "celln.fleet.limits.leaseSeconds=86400", "celln.fleet.limits.maxTurns=256"))
+	if err != nil {
+		t.Fatalf("limits render: %v: %s", err, limited)
+	}
+	for _, e := range decodeFleet(t, limited).daemonSets["celln-node"].Spec.Template.Spec.InitContainers[0].Env {
+		prepareEnv[e.Name] = e.Value
+	}
+	if prepareEnv["FLEET_LIMIT_LEASE_SECONDS"] != "86400" || prepareEnv["FLEET_LIMIT_MAX_TURNS"] != "256" {
+		t.Fatalf("host limits not passed to node preparation: %v", prepareEnv)
+	}
 	fixed, err := renderNativeParent(t, append(fleetValues(), "celln.fleet.capacity=fixed", "celln.fleet.maxCells=6", "celln.fleet.egressSlots="))
 	if err != nil {
 		t.Fatalf("fixed capacity render: %v: %s", err, fixed)
@@ -211,6 +224,7 @@ func TestFleetRefusesUnsafeConfiguration(t *testing.T) {
 		"celln.fleet.memoryPercent=99", "celln.fleet.cellMemoryBytes=1048576", "celln.router.parentTokenSecret=",
 		"celln.fleet.model.endpoint=https://api.openai.com/v1/chat/completions,celln.fleet.model.provider=openai,celln.fleet.model.protocol=openai-chat",
 		"celln.fleet.model.endpoint=http://10.0.0.5:8080/v1/chat/completions,celln.fleet.model.provider=llama-server,celln.fleet.model.protocol=openai-chat,celln.fleet.model.name=q",
+		"celln.fleet.limits.leaseSeconds=90000", "celln.fleet.limits.leaseSeconds=30",
 		"celln.dispatcher.enabled=true", "celln.installer.enabled=true", "celln.router.external=true",
 		"controller.replicas=2",
 	} {

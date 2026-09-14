@@ -49,6 +49,7 @@ import { useCapabilities, useModels, useCellnTools, useClusterCellnTools, useMod
 import { persistentHarnesses, persistentHarnessName } from "@/lib/persistent-harness";
 import { modelConnectionName, modelConnectionEndpoint } from "@/lib/agent-execution";
 import { api } from "@/lib/api";
+import type { WizardExecution } from "@/lib/agent-execution";
 import type { AgentRuntime, SympoziumPolicy, CellnSelection, ModelConnection } from "@/lib/api";
 import {
   YamlModal,
@@ -237,6 +238,7 @@ export interface WizardResult {
   borrowedTools?: CellnSelection["toolRefs"];
   /** Shared platform catalogue revisions when the runtime is a profile wrapper. */
   clusterTools?: CellnSelection["clusterToolRefs"];
+  enduringDefaults?: WizardExecution["enduringDefaults"];
 }
 
 interface OnboardingWizardProps {
@@ -899,6 +901,7 @@ export function OnboardingWizard({
       }
       result.clusterTools = (result.borrowedTools || []).map((tool) => ({ ...tool }));
       result.borrowedTools = [];
+      if (platformProfile) result.enduringDefaults = { ...platformProfile.sessionDefaults };
     }
     if (persistentHarness || (celln && !wrapperRuntime)) {
       const spec = modelConnectionSpec(result, celln);

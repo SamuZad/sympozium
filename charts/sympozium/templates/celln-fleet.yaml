@@ -31,6 +31,11 @@
 {{- if and $modelRoute.endpoint (hasPrefix "http://" $modelRoute.endpoint) (not $modelRoute.allowInsecure) }}
 {{- fail "celln.fleet.model.endpoint is plain HTTP; set celln.fleet.model.allowInsecure=true to approve it" }}
 {{- end }}
+{{- $limits := $fleet.limits | default dict }}
+{{- $lease := int64 ($limits.leaseSeconds | default 0) }}
+{{- if and (ne $lease 0) (or (lt $lease 60) (gt $lease 86400)) }}
+{{- fail "celln.fleet.limits.leaseSeconds must be 60-86400" }}
+{{- end }}
 {{- $capacity := $fleet.capacity | default "auto" }}
 {{- if not (has $capacity (list "auto" "fixed")) }}
 {{- fail "celln.fleet.capacity must be auto or fixed" }}
@@ -210,6 +215,14 @@ spec:
               value: {{ $modelRoute.name | default "" | quote }}
             - name: FLEET_MODEL_ALLOW_INSECURE
               value: {{ $modelRoute.allowInsecure | default false | quote }}
+            - name: FLEET_LIMIT_LEASE_SECONDS
+              value: {{ $limits.leaseSeconds | default 0 | quote }}
+            - name: FLEET_LIMIT_MAX_TURNS
+              value: {{ $limits.maxTurns | default 0 | quote }}
+            - name: FLEET_LIMIT_MAX_MODEL_REQUESTS
+              value: {{ $limits.maxModelRequests | default 0 | quote }}
+            - name: FLEET_LIMIT_MAX_OUTPUT_TOKENS
+              value: {{ $limits.maxOutputTokens | default 0 | quote }}
             - name: FLEET_PARENT_CLIENTS
               value: /etc/celln-fleet/clients/trusted-parent-clients.json
             - name: FLEET_CONFIGURATION_CONFIGMAP
