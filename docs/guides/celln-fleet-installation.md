@@ -112,42 +112,39 @@ The installer publishes the reviewed starter configuration **once per scope**
 as cluster-scoped objects — `CellnRuntimeProfile` `celln-native-<scope>`
 (carrying the native parent/worker material), three `ClusterCellnTool`s
 `celln-<scope>-<tool>`, and a `CellnExecutionPolicy` `celln-fleet-<scope>`
-that admits every namespace labeled `celln.sympozium.ai/scope=<scope>` with a
-`host-profile` model route and the reviewed ceilings — and labels the `-n`
-namespace with its wrapper objects. Any other namespace needs only:
+with a `host-profile` model route and the reviewed ceilings.
+
+**By default every namespace is authorised** except the system exclusions
+(`kube-system`, `kube-public`, `kube-node-lease`, `cert-manager`, the chart's
+namespace and `celln-system`) and any namespace labeled
+`celln.sympozium.ai/excluded=true`. Fence a namespace off with that label;
+nothing else is needed to admit one. Pass `--celln-fleet-authorise=labeled`
+to invert this for regulated clusters: then only namespaces labeled
+`celln.sympozium.ai/scope=<scope>` are admitted and the installer labels the
+`-n` namespace for you.
+
+A namespace's runs select three ordinary workload objects — an `AgentRuntime`
+wrapper `celln-native` referencing the profile, an `Agent` `celln-agent` and
+a host-profile `ModelConnection` `celln-native`. **They are created on first
+use**: the Agent wizard offers the platform profile on the Celln plane in any
+authorised namespace and creates the wrappers when you finish, and the API
+exposes the same step for automation:
 
 ```sh
-kubectl label namespace team-b celln.sympozium.ai/scope=<scope>   # operator: authorises the namespace
-kubectl -n team-b apply -f - <<EOF                              # tenant: ordinary workload objects
-apiVersion: sympozium.ai/v1alpha1
-kind: AgentRuntime
-metadata: {name: celln-native}
-spec:
-  cellnProfileRef: {name: celln-native-<scope>, revision: v1}
-  image: ""                      # required by the schema; unused for a profile wrapper
----
-apiVersion: sympozium.ai/v1alpha1
-kind: Agent
-metadata: {name: celln-agent}
-spec:
-  runtimeRef: celln-native
-  agents: {default: {model: ""}} # required by the schema; the run's connection sets the model
----
-apiVersion: sympozium.ai/v1alpha1
-kind: ModelConnection
-metadata: {name: celln-native}
-spec: {provider: deepseek, protocol: openai-chat, endpoint: https://api.deepseek.com/chat/completions, credentialProfile: <scope>, models: [deepseek-chat]}
-EOF
+curl -H "Authorization: Bearer $TOKEN" "$API/api/v1/celln-platform/profiles?namespace=team-b"
+curl -H "Authorization: Bearer $TOKEN" -X POST -H 'Content-Type: application/json' \
+  -d '{"profile":"celln-native-<scope>"}' "$API/api/v1/celln-platform/wrappers?namespace=team-b"
 ```
 
-The same three objects can be copied from the install namespace
-(`kubectl -n <install-ns> get modelconnection,agentruntime,agent -o yaml`).
+Existing objects are never modified, so a namespace that prefers to manage
+its own wrappers in Git can apply them instead (copy them from the install
+namespace with `kubectl -n <install-ns> get modelconnection,agentruntime,agent -o yaml`).
 No per-namespace install, grant ConfigMaps or copied tools. Enduring runs in
 that namespace select `runtimeRef: celln-native`, `clusterToolRefs` from the
 shared catalogue, `model.connectionRef: celln-native` and the profile's
 persona; the controller resolves policy, profile, tools and route into one
 immutable decision, issues the parent through the gateway, and re-checks that
-authority before every later turn. A run in an unlabeled namespace is held
+authority before every later turn. A run in an excluded namespace is held
 with `CellnParentReady=AdmissionPending (AUTH_POLICY_WITHDRAWN)`; nothing is
 issued. The UI wizard offers wrapper runtimes on the Celln plane, lists the
 shared catalogue for them and uses the namespace's host-profile

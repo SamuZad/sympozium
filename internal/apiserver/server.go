@@ -41,6 +41,7 @@ import (
 
 	sympoziumv1alpha1 "github.com/sympozium-ai/sympozium/api/v1alpha1"
 	"github.com/sympozium-ai/sympozium/internal/agentedit"
+	"github.com/sympozium-ai/sympozium/internal/cellnplatform"
 	"github.com/sympozium-ai/sympozium/internal/collector"
 	"github.com/sympozium-ai/sympozium/internal/controller"
 	"github.com/sympozium-ai/sympozium/internal/eventbus"
@@ -189,6 +190,8 @@ func (s *Server) buildMux(frontendFS fs.FS, expected *tokenReader) http.Handler 
 	mux.HandleFunc("POST /api/v1/model-connections", s.createModelConnection)
 	mux.HandleFunc("GET /api/v1/celln-tools", s.listCellnTools)
 	mux.HandleFunc("GET /api/v1/cluster-celln-tools", s.listClusterCellnTools)
+	mux.HandleFunc("GET /api/v1/celln-platform/profiles", s.listCellnPlatformProfiles)
+	mux.HandleFunc("POST /api/v1/celln-platform/wrappers", s.ensureCellnPlatformWrappers)
 	mux.HandleFunc("POST /api/v1/celln-selection/preview", s.previewCellnSelection)
 	mux.HandleFunc("POST /api/v1/runtimes/install-defaults", s.installDefaultRuntimes)
 	// Persistent harness sessions. The API server owns the only browser-facing
@@ -504,6 +507,70 @@ func (s *Server) listClusterCellnTools(w http.ResponseWriter, r *http.Request) {
 		list.Items = []sympoziumv1alpha1.ClusterCellnTool{}
 	}
 	writeJSON(w, list.Items)
+}
+
+// CellnPlatformProfile is what a tenant sees of a runtime profile its
+// namespace may run: identity and route, never provisioning material.
+type CellnPlatformProfile struct {
+	Name              string `json:"name"`
+	Revision          string `json:"revision"`
+	Policy            string `json:"policy"`
+	Model             string `json:"model"`
+	Provider          string `json:"provider"`
+	Endpoint          string `json:"endpoint"`
+	CredentialProfile string `json:"credentialProfile"`
+	SystemPrompt      string `json:"systemPrompt"`
+	Wrapper           string `json:"wrapper"`
+}
+
+// listCellnPlatformProfiles lists the native profiles the request namespace's
+// execution policies admit, evaluated the way the resolver evaluates them.
+func (s *Server) listCellnPlatformProfiles(w http.ResponseWriter, r *http.Request) {
+	ns := r.URL.Query().Get("namespace")
+	if ns == "" {
+		ns = "default"
+	}
+	authorised, err := cellnplatform.AuthorisedProfiles(r.Context(), s.client, ns)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	out := make([]CellnPlatformProfile, 0, len(authorised))
+	for _, a := range authorised {
+		objects, err := cellnplatform.TenantWrappers(ns, &a.Profile, &a.Policy)
+		if err != nil {
+			continue // a profile without a usable route is not offered
+		}
+		connection := objects[2].(*sympoziumv1alpha1.ModelConnection)
+		out = append(out, CellnPlatformProfile{Name: a.Profile.Name, Revision: a.Profile.Spec.Revision, Policy: a.Policy.Name, Model: connection.Spec.Models[0], Provider: connection.Spec.Provider, Endpoint: connection.Spec.Endpoint, CredentialProfile: connection.Spec.CredentialProfile, SystemPrompt: a.Profile.Spec.Native.SystemPrompt, Wrapper: cellnplatform.WrapperRuntimeName})
+	}
+	writeJSON(w, out)
+}
+
+// ensureCellnPlatformWrappers creates the namespace's wrapper objects for an
+// authorised profile on first use. Existing objects are never modified.
+func (s *Server) ensureCellnPlatformWrappers(w http.ResponseWriter, r *http.Request) {
+	ns := r.URL.Query().Get("namespace")
+	if ns == "" {
+		ns = "default"
+	}
+	var req struct {
+		Profile string `json:"profile"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil || req.Profile == "" {
+		http.Error(w, "profile is required", http.StatusBadRequest)
+		return
+	}
+	wrappers, err := cellnplatform.EnsureWrappers(r.Context(), s.client, ns, req.Profile)
+	if err != nil {
+		if k8serrors.IsNotFound(err) || strings.Contains(err.Error(), "no execution policy admits") {
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, wrappers)
 }
 
 // InstallDefaultRuntimesResponse records an idempotent installation of the

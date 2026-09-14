@@ -45,7 +45,7 @@ import {
 import { cn } from "@/lib/utils";
 import { providersForPlane } from "@/lib/creation";
 import { PlanePicker } from "@/components/plane-picker";
-import { useCapabilities, useModels, useCellnTools, useClusterCellnTools, useModelConnections } from "@/hooks/use-api";
+import { useCapabilities, useModels, useCellnTools, useClusterCellnTools, useModelConnections, useCellnPlatformProfiles } from "@/hooks/use-api";
 import { persistentHarnesses, persistentHarnessName } from "@/lib/persistent-harness";
 import { modelConnectionName, modelConnectionEndpoint } from "@/lib/agent-execution";
 import { api } from "@/lib/api";
@@ -607,7 +607,17 @@ export function OnboardingWizard({
   const persistentRuntimes = persistentHarnesses(availableRuntimes);
   // A namespaced native runtime or a wrapper of a cluster-scoped platform
   // profile (the fleet's shape) both run the enduring Celln parent.
-  const nativeRuntimes = availableRuntimes.filter((runtime) => runtime.spec.celln?.contractVersion === "celln.json-tools/v1" || !!runtime.spec.cellnProfileRef);
+  // A namespace the platform policy admits may not have its wrapper objects
+  // yet; the API creates them on first use, so the profile is offered as the
+  // wrapper it will become rather than hidden until an operator applies YAML.
+  const platformProfiles = useCellnPlatformProfiles(mode === "agent");
+  const nativeRuntimes = useMemo(() => {
+    const present = availableRuntimes.filter((runtime) => runtime.spec.celln?.contractVersion === "celln.json-tools/v1" || !!runtime.spec.cellnProfileRef);
+    const pending = (platformProfiles.data || [])
+      .filter((profile) => !present.some((runtime) => runtime.metadata.name === profile.wrapper || runtime.spec.cellnProfileRef?.name === profile.name))
+      .map((profile): AgentRuntime => ({ metadata: { name: profile.wrapper, labels: { "sympozium.ai/platform-pending": "true" } }, spec: { image: "", cellnProfileRef: { name: profile.name, revision: profile.revision } } }));
+    return [...present, ...pending];
+  }, [availableRuntimes, platformProfiles.data]);
   const defaultRuntimeRef = availableRuntimes.some(
     (runtime) => runtime.metadata.name === defaults?.runtimeRef,
   ) ? defaults?.runtimeRef || "" : "";
@@ -697,11 +707,17 @@ export function OnboardingWizard({
     const borrowedTools = catalogue.data.filter((tool) => tool.spec.invocationABI === "celln.json-stdio/v1" && tool.spec.lane === "tool").map((tool) => ({ name: tool.metadata.name, revision: tool.spec.revision }));
     setForm((current) => ({ ...current, borrowedTools }));
   }, [celln, catalogue.data]);
+  const platformProfile = wrapperRuntime ? (platformProfiles.data || []).find((profile) => profile.name === selectedRuntime?.spec.cellnProfileRef?.name) : undefined;
   useEffect(() => {
-    if (!wrapperRuntime || form.modelConnectionRef || hostConnections.length === 0) return;
-    const connection = hostConnections[0];
-    setForm((current) => ({ ...current, modelConnectionRef: connection.metadata.name, provider: connection.spec.provider, model: connection.spec.models[0] || current.model, credentialProfile: connection.spec.credentialProfile || "" }));
-  }, [wrapperRuntime, form.modelConnectionRef, hostConnections]);
+    if (!wrapperRuntime || form.modelConnectionRef) return;
+    if (hostConnections.length > 0) {
+      const connection = hostConnections[0];
+      setForm((current) => ({ ...current, modelConnectionRef: connection.metadata.name, provider: connection.spec.provider, model: connection.spec.models[0] || current.model, credentialProfile: connection.spec.credentialProfile || "" }));
+    } else if (platformProfile) {
+      // The connection is created with the wrappers on completion.
+      setForm((current) => ({ ...current, provider: platformProfile.provider, model: platformProfile.model, credentialProfile: platformProfile.credentialProfile }));
+    }
+  }, [wrapperRuntime, form.modelConnectionRef, hostConnections, platformProfile]);
   const compatibleRuntime = celln
     ? selectedRuntime?.spec.celln?.contractVersion === "celln.json-tools/v1" || wrapperRuntime
     : !form.runtimeRef || !!selectedRuntime?.spec.image;
@@ -861,6 +877,22 @@ export function OnboardingWizard({
       !!result.runtimeRef &&
       compatibleRuntime;
     if (wrapperRuntime) {
+      if (!result.modelConnectionRef && platformProfile) {
+        // First use of the platform in this namespace: the API creates the
+        // wrapper objects from the policy; nothing here is invented.
+        setConnectionError("");
+        setSavingConnection(true);
+        try {
+          const wrappers = await api.cellnPlatform.ensureWrappers(platformProfile.name);
+          result.modelConnectionRef = wrappers.connection;
+          result.runtimeRef = wrappers.runtime;
+        } catch (err) {
+          setSavingConnection(false);
+          setConnectionError(err instanceof Error ? err.message : "Could not prepare this namespace for the platform runtime");
+          return;
+        }
+        setSavingConnection(false);
+      }
       if (!result.modelConnectionRef) {
         setConnectionError("This namespace has no ModelConnection with a host credential profile for the platform runtime; ask the operator to add one.");
         return;
@@ -1228,7 +1260,8 @@ export function OnboardingWizard({
           <div className="space-y-2 rounded-md border p-3" data-testid="platform-model-route">
             <Label>Model route</Label>
             {connections.isLoading && <p className="text-xs">Loading model connections…</p>}
-            {!connections.isLoading && hostConnections.length === 0 && <p role="alert" className="text-xs">No ModelConnection with a host credential profile exists in this namespace. The operator's fleet installation creates one; without it this runtime cannot run.</p>}
+            {!connections.isLoading && hostConnections.length === 0 && platformProfile && <p className="text-xs">{platformProfile.provider} / {platformProfile.model} at {platformProfile.endpoint} through the owner-installed credential profile <code>{platformProfile.credentialProfile}</code>. This namespace's wrapper objects are created when you finish.</p>}
+            {!connections.isLoading && hostConnections.length === 0 && !platformProfile && <p role="alert" className="text-xs">No ModelConnection with a host credential profile exists in this namespace and no execution policy offers a platform profile here; without one this runtime cannot run.</p>}
             {hostConnections.length > 0 && (
               <Select value={form.modelConnectionRef || ""} onValueChange={(name) => { const connection = hostConnections.find((c) => c.metadata.name === name); if (connection) setForm({ ...form, modelConnectionRef: name, provider: connection.spec.provider, model: connection.spec.models[0] || form.model, credentialProfile: connection.spec.credentialProfile || "" }); }}>
                 <SelectTrigger><SelectValue placeholder="Choose a model connection" /></SelectTrigger>

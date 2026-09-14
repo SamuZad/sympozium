@@ -8,7 +8,9 @@ import (
 
 	api "github.com/sympozium-ai/sympozium/api/v1alpha1"
 	"github.com/sympozium-ai/sympozium/internal/modelconnection"
+	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -119,5 +121,44 @@ func TestPlatformResolverBindsHostProfileRouteToRuntimeNative(t *testing.T) {
 	}
 	if _, err := f.resolver.Resolve(ctx, f.runKey, request); PlatformReason(err) != ReasonRouteMismatch {
 		t.Fatalf("credential profile foreign to the runtime accepted: %v", err)
+	}
+}
+
+// A default-open policy admits an unlabeled namespace and refuses one that
+// opted out; the resolver evaluates the same selector the platform publishes.
+func TestPlatformResolverHonoursOpenSelectorExclusions(t *testing.T) {
+	f := newPlatformFixture(t, "tenant", true)
+	ctx := context.Background()
+	request := PlatformResolveRequest{ClusterID: "cluster", Now: f.now, AdmissionWindow: 60 * time.Second}
+	var policies api.CellnExecutionPolicyList
+	if err := f.client.List(ctx, &policies); err != nil {
+		t.Fatal(err)
+	}
+	for i := range policies.Items {
+		policies.Items[i].Spec.NamespaceSelector = metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{
+			{Key: "kubernetes.io/metadata.name", Operator: metav1.LabelSelectorOpNotIn, Values: []string{"kube-system"}},
+			{Key: "celln.sympozium.ai/excluded", Operator: metav1.LabelSelectorOpDoesNotExist},
+		}}
+		if err := f.client.Update(ctx, &policies.Items[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var ns corev1.Namespace
+	if err := f.client.Get(ctx, types.NamespacedName{Name: "tenant"}, &ns); err != nil {
+		t.Fatal(err)
+	}
+	ns.Labels = map[string]string{"kubernetes.io/metadata.name": "tenant"}
+	if err := f.client.Update(ctx, &ns); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.resolver.Resolve(ctx, f.runKey, request); err != nil {
+		t.Fatalf("open policy refused an ordinary namespace: %v", err)
+	}
+	ns.Labels["celln.sympozium.ai/excluded"] = "true"
+	if err := f.client.Update(ctx, &ns); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.resolver.Resolve(ctx, f.runKey, request); PlatformReason(err) != ReasonPolicyWithdrawn {
+		t.Fatalf("excluded namespace admitted: %v", err)
 	}
 }

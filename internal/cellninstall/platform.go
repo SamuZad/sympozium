@@ -10,6 +10,7 @@ import (
 
 	api "github.com/sympozium-ai/sympozium/api/v1alpha1"
 	"github.com/sympozium-ai/sympozium/internal/cellnparent"
+	"github.com/sympozium-ai/sympozium/internal/cellnplatform"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -19,9 +20,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// ScopeLabel marks a namespace as authorised for one fleet scope. Only an
-// operator with namespace write access can set it; tenants cannot.
-const ScopeLabel = "celln.sympozium.ai/scope"
+// ScopeLabel opts a namespace into a scope in strict ("labeled") mode; the
+// default mode admits every namespace except the system exclusions.
+const ScopeLabel = cellnplatform.ScopeLabel
 
 const packageAnnotation = "celln.sympozium.ai/package"
 
@@ -32,6 +33,10 @@ type PlatformOptions struct {
 	Scope, ClusterID, PackageHash          string
 	Principal                              string
 	ControllerNamespace                    string
+	// Authorise is "all" (default: every namespace except the system
+	// exclusions and namespaces labeled excluded) or "labeled" (only
+	// namespaces carrying ScopeLabel).
+	Authorise string
 }
 
 // PlatformCatalogueNames are the cluster-scoped objects one scope publishes.
@@ -120,14 +125,19 @@ func InstallPlatform(ctx context.Context, store client.Client, o PlatformOptions
 		clusterRefs = append(clusterRefs, api.ClusterCellnToolRef{Name: toolName(entry.Name), Revision: entry.Spec.Revision})
 	}
 	limits := configured.HostLimits
-	objects = append(objects, &api.CellnExecutionPolicy{ObjectMeta: meta(policyName), Spec: api.CellnExecutionPolicySpec{
-		NamespaceSelector: metav1.LabelSelector{MatchLabels: map[string]string{ScopeLabel: o.Scope}},
+	selector, err := cellnplatform.Selector(o.Authorise, o.Scope, cellnplatform.SystemNamespaces(o.ControllerNamespace, "celln-system"))
+	if err != nil {
+		return err
+	}
+	policy := &api.CellnExecutionPolicy{ObjectMeta: meta(policyName), Spec: api.CellnExecutionPolicySpec{
+		NamespaceSelector: selector,
 		RuntimeProfiles:   []api.CellnExecutionPolicyRuntime{{Ref: api.CellnRuntimeProfileRef{Name: profileName, Revision: cat.Worker.Revision}}},
 		Tools:             policyTools,
 		Lifecycles:        []string{"direct-one-shot", "harness-one-shot", "enduring"},
 		Routes:            []api.CellnExecutionPolicyRoute{{Provider: configured.Model.Provider, Protocol: protocol, Models: []string{configured.Model.Model}, EndpointOrigins: []string{origin}, Auth: "host-profile"}},
 		Ceilings:          api.CellnExecutionPolicyCeilings{MaxTurns: int64(limits.MaxTurns), MaxModelRequests: int64(limits.MaxModelRequests), MaxOutputTokens: limits.MaxOutputTokens, MaxParentLeaseSeconds: int64(limits.LeaseSeconds), MaxTurnSeconds: worker.Capabilities.TimeoutMs / 1000},
-	}})
+	}}
+	objects = append(objects, policy)
 	// Reserve the private output before any cluster change.
 	if err := os.Mkdir(o.OutputDir, 0700); err != nil {
 		return err
@@ -141,7 +151,7 @@ func InstallPlatform(ctx context.Context, store client.Client, o PlatformOptions
 	if err := store.Get(ctx, types.NamespacedName{Name: o.Namespace}, &namespace); err != nil {
 		return err
 	}
-	if namespace.Labels[ScopeLabel] != o.Scope {
+	if o.Authorise == cellnplatform.AuthoriseLabeled && namespace.Labels[ScopeLabel] != o.Scope {
 		patch := client.MergeFrom(namespace.DeepCopy())
 		if namespace.Labels == nil {
 			namespace.Labels = map[string]string{}
@@ -151,14 +161,19 @@ func InstallPlatform(ctx context.Context, store client.Client, o PlatformOptions
 			return err
 		}
 	}
-	tenantMeta := func(name string) metav1.ObjectMeta {
-		return metav1.ObjectMeta{Name: name, Namespace: o.Namespace, Annotations: map[string]string{packageAnnotation: configured.PackageHash}}
+	// The install namespace's wrappers are the same objects the API server
+	// creates on demand for any other authorised namespace.
+	wrappers, err := cellnplatform.TenantWrappers(o.Namespace, profile, policy)
+	if err != nil {
+		return err
 	}
-	for _, object := range []client.Object{
-		&api.AgentRuntime{ObjectMeta: tenantMeta("celln-native"), Spec: api.AgentRuntimeSpec{CellnProfileRef: &api.CellnRuntimeProfileRef{Name: profileName, Revision: cat.Worker.Revision}, SupportOwner: "native-starter-operator"}},
-		&api.Agent{ObjectMeta: tenantMeta("celln-agent"), Spec: api.AgentSpec{RuntimeRef: "celln-native"}},
-		&api.ModelConnection{ObjectMeta: tenantMeta("celln-native"), Spec: api.ModelConnectionSpec{Provider: configured.Model.Provider, Protocol: protocol, Endpoint: harness.URL, CredentialProfile: o.Scope, Models: []string{configured.Model.Model}}},
-	} {
+	for _, object := range wrappers {
+		annotations := object.GetAnnotations()
+		if annotations == nil {
+			annotations = map[string]string{}
+		}
+		annotations[packageAnnotation] = configured.PackageHash
+		object.SetAnnotations(annotations)
 		if err := ensurePlatformObject(ctx, store, object, configured.PackageHash); err != nil {
 			return err
 		}

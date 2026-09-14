@@ -176,21 +176,33 @@ if run_ready "$second"; then
 fi
 pass "$first deleted through the gateway; fleet released"
 
-log "A second namespace needs only wrapper objects; an unlabeled one is refused"
+log "Any ordinary namespace runs on the fleet; wrappers are created on first use; an excluded one is refused"
 tenant="$NAMESPACE-b"
 denied="$NAMESPACE-denied"
 profile="celln-native-$SCOPE"
-for ns in "$tenant" "$denied"; do
-	kc create namespace "$ns" >/dev/null 2>&1 || true
-	# The tenant's three wrapper objects are copies of the installed ones.
-	for kind in modelconnection agentruntime agent; do
-		kc -n "$NAMESPACE" get "$kind" -o json | python3 -c "
+kc create namespace "$tenant" >/dev/null 2>&1 || true
+kc create namespace "$denied" >/dev/null 2>&1 || true
+kc label namespace "$denied" --overwrite celln.sympozium.ai/excluded=true >/dev/null
+# The tenant path is the API: list the profiles the namespace may run, then
+# have the wrappers created. No label, no YAML.
+api_token="$(kc -n sympozium-system get deploy sympozium-apiserver -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="SYMPOZIUM_UI_TOKEN")].value}')"
+api_auth=()
+[ -n "$api_token" ] && api_auth=(-H "Authorization: Bearer $api_token")
+kc -n sympozium-system port-forward svc/sympozium-apiserver 18080:8080 >/dev/null 2>&1 &
+api_pf=$!
+wait_for "apiserver port-forward" 60 curl -sf "${api_auth[@]}" "http://127.0.0.1:18080/api/v1/celln-platform/profiles?namespace=$tenant" -o /dev/null
+curl -sf "${api_auth[@]}" "http://127.0.0.1:18080/api/v1/celln-platform/profiles?namespace=$tenant" | grep -q "\"name\":\"$profile\"" || fail "platform profile $profile not offered to $tenant"
+curl -sf "${api_auth[@]}" -X POST -H 'Content-Type: application/json' -d "{\"profile\":\"$profile\"}" "http://127.0.0.1:18080/api/v1/celln-platform/wrappers?namespace=$tenant" | grep -q '"connection":"celln-native"' || fail "wrappers were not created in $tenant"
+[ "$(curl -s "${api_auth[@]}" "http://127.0.0.1:18080/api/v1/celln-platform/profiles?namespace=$denied")" = "[]" ] || fail "excluded namespace $denied was offered a profile"
+[ "$(curl -s -o /dev/null -w '%{http_code}' "${api_auth[@]}" -X POST -H 'Content-Type: application/json' -d "{\"profile\":\"$profile\"}" "http://127.0.0.1:18080/api/v1/celln-platform/wrappers?namespace=$denied")" = 403 ] || fail "excluded namespace $denied was prepared"
+kill "$api_pf" >/dev/null 2>&1 || true
+# The excluded namespace applies the same objects by hand so its refusal is the policy's, not a missing Agent.
+for kind in modelconnection agentruntime agent; do
+	kc -n "$NAMESPACE" get "$kind" -o json | python3 -c "
 import json, sys
 for item in json.load(sys.stdin)['items']:
-    print(json.dumps({'apiVersion': item['apiVersion'], 'kind': item['kind'], 'metadata': {'name': item['metadata']['name'], 'namespace': sys.argv[1]}, 'spec': item['spec']}))" "$ns" | kc apply -f - >/dev/null
-	done
+    print(json.dumps({'apiVersion': item['apiVersion'], 'kind': item['kind'], 'metadata': {'name': item['metadata']['name'], 'namespace': sys.argv[1]}, 'spec': item['spec']}))" "$denied" | kc apply -f - >/dev/null
 done
-kc label namespace "$tenant" --overwrite "celln.sympozium.ai/scope=$SCOPE" >/dev/null
 tenant_run="$(python3 -c "
 import json, sys
 r = json.load(open(sys.argv[1])); r['metadata']['namespace'] = sys.argv[2]; print(json.dumps(r))" "$WORK/fleet-out/installation/run.json" "$tenant" | kc create -f - -o jsonpath='{.metadata.name}')"
@@ -200,13 +212,13 @@ wait_for "initial turn of $tenant_run" 240 bash -c "kubectl --context kind-$CLUS
 [ "$(kc -n "$tenant" get cellntool -o name | wc -l)" = 0 ] || fail "namespaced tools appeared in $tenant"
 tenant_node="$(node_of "$(kc -n "$tenant" get agentrun "$tenant_run" -o jsonpath='{.status.cellnParent.binding.launchProfile}')")"
 [ -n "$tenant_node" ] || fail "owner of $tenant_run not found"
-pass "$tenant_run ran in $tenant on $tenant_node from wrapper objects only (no install, no grants, no copied tools)"
+pass "$tenant_run ran in $tenant on $tenant_node with wrappers created on first use (no label, no YAML, no grants, no copied tools)"
 denied_run="$(python3 -c "
 import json, sys
 r = json.load(open(sys.argv[1])); r['metadata']['namespace'] = sys.argv[2]; print(json.dumps(r))" "$WORK/fleet-out/installation/run.json" "$denied" | kc create -f - -o jsonpath='{.metadata.name}')"
 wait_for "policy refusal for $denied_run" 90 bash -c "kubectl --context kind-$CLUSTER -n $denied get agentrun $denied_run -o jsonpath='{.status.conditions[?(@.type==\"CellnParentReady\")].message}' | grep -q AUTH_POLICY_WITHDRAWN"
 [ -z "$(kc -n "$denied" get agentrun "$denied_run" -o jsonpath='{.status.cellnParent}')" ] || fail "$denied_run was issued a parent without policy"
-pass "$denied_run in unlabeled $denied refused with AUTH_POLICY_WITHDRAWN and no parent"
+pass "$denied_run in excluded $denied refused with AUTH_POLICY_WITHDRAWN and no parent"
 
 log "Removing a node's label drains its owner and reports context loss"
 kc label node "$tenant_node" celln.dev/kvm- >/dev/null

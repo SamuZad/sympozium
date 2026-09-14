@@ -140,6 +140,27 @@ export interface Agent {
   status?: AgentStatus;
 }
 
+/** A native profile the current namespace's execution policy admits. */
+export interface CellnPlatformProfile {
+  name: string;
+  revision: string;
+  policy: string;
+  model: string;
+  provider: string;
+  endpoint: string;
+  credentialProfile: string;
+  systemPrompt: string;
+  /** Name of the AgentRuntime wrapper a run selects (created on first use). */
+  wrapper: string;
+}
+
+export interface CellnPlatformWrappers {
+  runtime: string;
+  agent: string;
+  connection: string;
+  created: string[];
+}
+
 export interface AgentRuntime {
   metadata: ObjectMeta;
   spec: {
@@ -1478,6 +1499,11 @@ export const api = {
 
   clusterCellnTools: {
     list: () => apiFetch<CellnTool[]>("/api/v1/cluster-celln-tools"),
+  },
+
+  cellnPlatform: {
+    profiles: () => apiFetch<CellnPlatformProfile[]>("/api/v1/celln-platform/profiles"),
+    ensureWrappers: (profile: string) => apiFetch<CellnPlatformWrappers>("/api/v1/celln-platform/wrappers", { method: "POST", body: JSON.stringify({ profile }) }),
   },
 
   cellnTools: {
