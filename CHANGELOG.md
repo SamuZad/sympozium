@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.10.66](https://github.com/sympozium-ai/sympozium/compare/v0.10.65...v0.10.66) (2026-09-14)
+
+
+### Features
+
+* **celln:** add a model backend to a running fleet scope ([0291f2b](https://github.com/sympozium-ai/sympozium/commit/0291f2bf22e6626b151e0ac978abd6621cd11685))
+* **celln:** add a model backend to a running fleet scope ([6adf557](https://github.com/sympozium-ai/sympozium/commit/6adf557fc86f6aded0fb90fb809de1544ee9372d))
+* **celln:** one-shot runs on the fleet as single-turn parents ([89611a1](https://github.com/sympozium-ai/sympozium/commit/89611a13eceace226d38dad775f1c840b4713c02))
+* **celln:** one-shot runs on the fleet as single-turn parents ([9601fec](https://github.com/sympozium-ai/sympozium/commit/9601feca59a045cea439aa9eafffa53ea05b805d)), closes [#490](https://github.com/sympozium-ai/sympozium/issues/490)
+
 ## [0.10.65](https://github.com/sympozium-ai/sympozium/compare/v0.10.64...v0.10.65) (2026-09-14)
 
 
