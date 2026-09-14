@@ -397,8 +397,10 @@ celln:
       parentConfigSecret: celln-parent-config        # approvals + registrations.json
 ```
 
-Still open (needs the Celln repo): gateway routing of `/v1/parents*` with the
-durable parent→backend affinity ledger, so a multi-node topology keeps one URL
-and owner affinity. Until then the controller reaches `/v1/parents` on the
-dispatcher Service directly (one dispatcher = one owner), which is the
-single-node form of the same plane.
+Celln 0.5.10 routes `/v1/parents*` through the gateway with a durable
+parent→backend affinity ledger. celln#109 adds `POST /v1/parents/provision`
+(the dispatcher issues the permit/launch profile itself) and binds affinity at
+provisioning; `internal/cellnparent.RemoteProvisioner` consumes it so the
+controller no longer needs the celln binary or a hostPath authority root. That
+removes the last reason to pin the controller to one node; the per-node fleet
+packaging is tracked in #530.

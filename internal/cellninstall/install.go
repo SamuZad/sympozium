@@ -98,6 +98,17 @@ func Partitioned(args []string, namespace string) bool {
 	return false
 }
 
+// ControllerRolledOut reports whether the general controller's current
+// generation is fully available, the precondition for writing native authority.
+func ControllerRolledOut(ctx context.Context, store client.Client, namespace string) (bool, error) {
+	var d appsv1.Deployment
+	if err := store.Get(ctx, types.NamespacedName{Namespace: namespace, Name: "sympozium-controller-manager"}, &d); err != nil {
+		return false, err
+	}
+	replicas := d.Spec.Replicas
+	return len(d.Spec.Template.Spec.Containers) == 1 && replicas != nil && *replicas >= 1 && d.Status.ObservedGeneration >= d.Generation && d.Status.Replicas == *replicas && d.Status.UpdatedReplicas == *replicas && d.Status.AvailableReplicas == *replicas, nil
+}
+
 func Install(ctx context.Context, store client.Client, o Options) error {
 	origin, originErr := url.Parse(o.OwnerTarget)
 	if store == nil || len(validation.IsDNS1123Label(o.Namespace)) != 0 || o.Namespace == o.ControllerNamespace || o.Scope == "" || originErr != nil || (origin.Scheme != "https" && origin.Scheme != "http") || origin.Hostname() == "" || origin.User != nil || origin.RawQuery != "" || origin.Fragment != "" || (origin.Path != "" && origin.Path != "/") || !strings.HasPrefix(o.PackageHash, "blake3:") || len(o.PackageHash) != 71 {
@@ -111,15 +122,13 @@ func Install(ctx context.Context, store client.Client, o Options) error {
 	if !strings.HasPrefix(o.StatePath, "/var/lib/sympozium-celln/") || len(validation.IsDNS1123Label(strings.TrimPrefix(o.StatePath, "/var/lib/sympozium-celln/"))) != 0 {
 		return fmt.Errorf("dedicated host state path required")
 	}
-	var d appsv1.Deployment
-	if err := store.Get(ctx, types.NamespacedName{Namespace: o.ControllerNamespace, Name: "sympozium-controller-manager"}, &d); err != nil {
-		return err
-	}
 	// The unified plane folds the parent reconcilers into the one controller, so
 	// the legacy namespace partition (a separate parent-only controller watching
 	// a dedicated namespace) is no longer required. We still require the
 	// controller to be fully rolled out before writing native authority.
-	if len(d.Spec.Template.Spec.Containers) != 1 || d.Spec.Replicas == nil || *d.Spec.Replicas < 1 || d.Status.ObservedGeneration < d.Generation || d.Status.Replicas != *d.Spec.Replicas || d.Status.UpdatedReplicas != *d.Spec.Replicas || d.Status.AvailableReplicas != *d.Spec.Replicas {
+	if ready, err := ControllerRolledOut(ctx, store, o.ControllerNamespace); err != nil {
+		return err
+	} else if !ready {
 		return fmt.Errorf("general controller must finish its rollout before native installation")
 	}
 	var cat catalogue

@@ -44,6 +44,14 @@ DaemonSet) is available with `celln.installer.enabled=true` but is loopback-only
 and mutually exclusive with the in-cluster dispatcher. Disable all Celln
 resources with `--set celln.enabled=false`. See [Celln Backend](../concepts/celln-backend.md).
 
+`celln.fleet.*` replaces the single dispatcher with one owner per labeled KVM
+node: a `celln-node` DaemonSet prepares each node from a digest-pinned,
+operator-signed starter package and serves enduring parents from it, the
+router discovers owners through a headless Service, and the controller keeps
+its parent journal on a claim instead of a node. It is driven end to end by
+`sympozium install --celln-fleet`; see
+[Celln Fleet Installation](../guides/celln-fleet-installation.md).
+
 ### AgentHarness examples
 
 The chart installs only the maintained, experimental **persistent** Pi and

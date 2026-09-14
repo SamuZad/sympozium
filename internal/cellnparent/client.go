@@ -22,9 +22,10 @@ import (
 
 // The sentinels and validation patterns are shared with internal/celln.
 var (
-	ErrReconcile = celln.ErrReconcile
-	ErrNotFound  = celln.ErrNotFound
-	hashPattern  = regexp.MustCompile(`^blake3:[0-9a-f]{64}$`)
+	ErrReconcile    = celln.ErrReconcile
+	ErrNotFound     = celln.ErrNotFound
+	ErrOwnerRemoved = celln.ErrOwnerRemoved
+	hashPattern     = regexp.MustCompile(`^blake3:[0-9a-f]{64}$`)
 )
 
 // Type aliases keep the parent protocol types in one place (internal/celln).
@@ -76,6 +77,12 @@ func (c *Client) Close() { c.inner.Close() }
 
 func (c *Client) Create(ctx context.Context, profile, incarnation string) error {
 	return c.inner.CreateParent(ctx, profile, incarnation)
+}
+
+// Provision has the owner bound to incarnation issue the plan's permit and
+// launch profile. Identical plans recover the same launch; nothing is created.
+func (c *Client) Provision(ctx context.Context, plan []byte, incarnation string) (string, error) {
+	return c.inner.ProvisionParent(ctx, plan, incarnation)
 }
 
 func (c *Client) Status(ctx context.Context, id string) (Status, error) {

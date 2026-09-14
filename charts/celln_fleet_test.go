@@ -1,0 +1,212 @@
+package charts
+
+import (
+	"bytes"
+	"strings"
+	"testing"
+
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/yaml"
+)
+
+func fleetValues() []string {
+	return []string{
+		"celln.enabled=true", "celln.allowInsecureHttp=true", "celln.dispatcher.enabled=false",
+		"celln.tokenSecret=client", "celln.capabilityTokenSecret=discovery",
+		"celln.router.clientTokenSecret=client", "celln.router.backendTokenSecret=backend",
+		"celln.router.capabilityTokenSecret=discovery", "celln.router.parentTokenSecret=parent",
+		"celln.router.ownershipClaim=ledger", "celln.router.allowInsecureBackends=true",
+		"celln.router.image.tag=fleet-test",
+		"celln.fleet.enabled=true", "celln.fleet.scope=starter",
+		"celln.fleet.package.image=registry.example/celln/starter@sha256:" + strings.Repeat("a", 64),
+		"celln.fleet.package.hash=blake3:" + strings.Repeat("b", 64),
+		"celln.fleet.publisher=ed25519:operator", "celln.fleet.principal=sympozium:celln",
+		"celln.fleet.parentClientsConfigMap=parent-clients",
+		"celln.fleet.modelCredential.secret=model-credential",
+		"celln.fleet.parentConfigSecret=registrations",
+	}
+}
+
+type fleetRender struct {
+	daemonSets  map[string]appsv1.DaemonSet
+	deployments map[string]appsv1.Deployment
+	services    map[string]corev1.Service
+	claims      map[string]corev1.PersistentVolumeClaim
+}
+
+func decodeFleet(t *testing.T, raw []byte) fleetRender {
+	t.Helper()
+	out := fleetRender{map[string]appsv1.DaemonSet{}, map[string]appsv1.Deployment{}, map[string]corev1.Service{}, map[string]corev1.PersistentVolumeClaim{}}
+	for _, document := range bytes.Split(raw, []byte("\n---")) {
+		var meta struct {
+			Kind string `json:"kind"`
+		}
+		if err := yaml.Unmarshal(document, &meta); err != nil {
+			t.Fatal(err)
+		}
+		switch meta.Kind {
+		case "DaemonSet":
+			var d appsv1.DaemonSet
+			if err := yaml.Unmarshal(document, &d); err != nil {
+				t.Fatal(err)
+			}
+			out.daemonSets[d.Name] = d
+		case "Deployment":
+			var d appsv1.Deployment
+			if err := yaml.Unmarshal(document, &d); err != nil {
+				t.Fatal(err)
+			}
+			out.deployments[d.Name] = d
+		case "Service":
+			var s corev1.Service
+			if err := yaml.Unmarshal(document, &s); err != nil {
+				t.Fatal(err)
+			}
+			out.services[s.Name] = s
+		case "PersistentVolumeClaim":
+			var c corev1.PersistentVolumeClaim
+			if err := yaml.Unmarshal(document, &c); err != nil {
+				t.Fatal(err)
+			}
+			out.claims[c.Name] = c
+		}
+	}
+	return out
+}
+
+func TestFleetRendersPerNodeOwnersBehindOneGateway(t *testing.T) {
+	raw, err := renderNativeParent(t, fleetValues())
+	if err != nil {
+		t.Fatalf("render: %v: %s", err, raw)
+	}
+	r := decodeFleet(t, raw)
+	if _, ok := r.deployments["celln-dispatcher"]; ok {
+		t.Fatal("single pinned dispatcher rendered alongside the fleet")
+	}
+	node, ok := r.daemonSets["celln-node"]
+	if !ok {
+		t.Fatal("celln-node DaemonSet missing")
+	}
+	spec := node.Spec.Template.Spec
+	if spec.NodeSelector["celln.dev/kvm"] != "true" || spec.AutomountServiceAccountToken == nil || *spec.AutomountServiceAccountToken {
+		t.Fatal("fleet nodes must be label-selected and never automount an API token")
+	}
+	if len(spec.InitContainers) != 1 || spec.InitContainers[0].Name != "prepare" || len(spec.Containers) != 1 || spec.Containers[0].Name != "dispatcher" {
+		t.Fatalf("unexpected fleet pod shape: %+v", spec)
+	}
+	const state = "/var/lib/sympozium-celln/starter"
+	args := strings.Join(spec.Containers[0].Args, " ")
+	for _, want := range []string{"--root " + state + "/authority", "--node-name $(NODE_NAME)", "--max-cells 4"} {
+		if !strings.Contains(args, want) {
+			t.Fatalf("dispatcher args lack %q: %s", want, args)
+		}
+	}
+	mounts := map[string]corev1.VolumeMount{}
+	for _, m := range spec.Containers[0].VolumeMounts {
+		mounts[m.Name] = m
+	}
+	if m := mounts["model-credential"]; m.MountPath != "/etc/celln-native" || !m.ReadOnly {
+		t.Fatalf("model credential must mount read-only at the profile's directory: %+v", m)
+	}
+	if _, ok := mounts["publisher-credentials"]; ok {
+		t.Fatal("dispatcher must not receive the configuration publishing credential")
+	}
+	init := map[string]corev1.VolumeMount{}
+	for _, m := range spec.InitContainers[0].VolumeMounts {
+		init[m.Name] = m
+	}
+	if _, ok := init["publisher-credentials"]; !ok || init["state"].MountPath != state {
+		t.Fatal("prepare step lacks publishing credential or node state")
+	}
+	env := map[string]string{}
+	for _, e := range spec.InitContainers[0].Env {
+		env[e.Name] = e.Value
+	}
+	if env["FLEET_MODEL_CREDENTIAL_FILE"] != "/etc/celln-native/model-token" || env["FLEET_PACKAGE_HASH"] != "blake3:"+strings.Repeat("b", 64) || env["FLEET_PUBLISHER"] != "ed25519:operator" {
+		t.Fatalf("prepare step configuration drifted: %v", env)
+	}
+	for _, v := range spec.Volumes {
+		if v.Name == "state" && (v.HostPath == nil || v.HostPath.Path != state || *v.HostPath.Type != corev1.HostPathDirectoryOrCreate) {
+			t.Fatal("node state must be created on first use without host ceremony")
+		}
+	}
+	if svc := r.services["celln-node"]; svc.Spec.ClusterIP != "None" {
+		t.Fatal("owners must be discoverable individually through a headless Service")
+	}
+	router := strings.Join(r.deployments["celln-router"].Spec.Template.Spec.Containers[0].Args, " ")
+	if !strings.Contains(router, "--backends-srv celln-node.celln-system.svc.cluster.local:8787") || strings.Contains(router, "--backends ") || !strings.Contains(router, "--parent-token-file") {
+		t.Fatalf("gateway must discover the fleet and route parents: %s", router)
+	}
+	controller := r.deployments["sympozium-controller-manager"].Spec.Template.Spec
+	if _, pinned := controller.NodeSelector["kubernetes.io/hostname"]; pinned {
+		t.Fatal("fleet controller must not be pinned to an owner node")
+	}
+	for _, v := range controller.Volumes {
+		if v.HostPath != nil {
+			t.Fatal("fleet controller must not mount host state")
+		}
+	}
+	if len(controller.InitContainers) != 1 || controller.Volumes == nil {
+		t.Fatal("fleet controller lacks the journal preparation step")
+	}
+	claimed := false
+	for _, v := range controller.Volumes {
+		if v.PersistentVolumeClaim != nil && v.PersistentVolumeClaim.ClaimName == "celln-parent-journal" {
+			claimed = true
+		}
+	}
+	if !claimed {
+		t.Fatal("fleet controller journal must live on a claim")
+	}
+	if _, ok := r.claims["celln-parent-journal"]; !ok {
+		t.Fatal("journal claim not rendered")
+	}
+	for _, e := range controller.Containers[0].Env {
+		if e.Name == "CELLN_PARENT_CONFIG" && e.Value != "/var/lib/sympozium/celln-parent/approvals" {
+			t.Fatalf("approvals must point at the claim: %s", e.Value)
+		}
+	}
+}
+
+func TestFleetRefusesUnsafeConfiguration(t *testing.T) {
+	for _, override := range []string{
+		"celln.fleet.scope=", "celln.fleet.scope=Starter/../x",
+		"celln.fleet.package.image=registry.example/celln/starter:latest",
+		"celln.fleet.package.hash=sha256:" + strings.Repeat("b", 64),
+		"celln.fleet.publisher=", "celln.fleet.principal=", "celln.fleet.parentClientsConfigMap=",
+		"celln.fleet.modelCredential.secret=", "celln.fleet.modelCredential.path=relative/token",
+		"celln.fleet.modelCredential.path=/token", "celln.fleet.modelCredential.path=/etc/../token",
+		"celln.fleet.maxCells=1", "celln.router.parentTokenSecret=",
+		"celln.dispatcher.enabled=true", "celln.installer.enabled=true", "celln.router.external=true",
+		"controller.replicas=2",
+	} {
+		t.Run(override, func(t *testing.T) {
+			if raw, err := renderNativeParent(t, append(fleetValues(), override)); err == nil {
+				t.Fatalf("unsafe fleet rendered: %s", raw)
+			}
+		})
+	}
+}
+
+func TestFleetWithoutParentConfigPreparesNodesOnly(t *testing.T) {
+	values := fleetValues()
+	values = append(values[:len(values)-1], "celln.fleet.parentConfigSecret=")
+	raw, err := renderNativeParent(t, values)
+	if err != nil {
+		t.Fatalf("render: %v: %s", err, raw)
+	}
+	r := decodeFleet(t, raw)
+	if _, ok := r.daemonSets["celln-node"]; !ok {
+		t.Fatal("nodes must prepare before the controller is wired")
+	}
+	controller := r.deployments["sympozium-controller-manager"].Spec.Template.Spec
+	if len(controller.InitContainers) != 0 {
+		t.Fatal("controller wired before registrations exist")
+	}
+	for _, e := range controller.Containers[0].Env {
+		if e.Name == "CELLN_PARENT_REGISTRATIONS" {
+			t.Fatal("controller wired before registrations exist")
+		}
+	}
+}

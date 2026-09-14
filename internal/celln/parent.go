@@ -19,9 +19,15 @@ import (
 var (
 	ErrReconcile = errors.New("parent outcome requires reconciliation; preserve incarnation and turn ID")
 	ErrNotFound  = errors.New("parent or turn not found; not permission to replay")
-	hashPattern  = regexp.MustCompile(`^blake3:[0-9a-f]{64}$`)
-	turnPattern  = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+	// ErrOwnerRemoved is the gateway's definitive statement that the owner
+	// bound to this incarnation is no longer part of the execution plane. Its
+	// in-process parent context is gone and the identity is never re-placed.
+	ErrOwnerRemoved = errors.New("parent owner left the execution plane; live context lost and never re-placed")
+	hashPattern     = regexp.MustCompile(`^blake3:[0-9a-f]{64}$`)
+	turnPattern     = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 )
+
+const ownerRemovedError = "original parent backend removed"
 
 // ParentStatus is a live owner observation of a parent incarnation.
 type ParentStatus struct {
@@ -95,6 +101,14 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body any, outp
 	if res.StatusCode == http.StatusNotFound {
 		return res.StatusCode, ErrNotFound
 	}
+	if res.StatusCode == http.StatusServiceUnavailable {
+		var refusal struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(data, &refusal) == nil && refusal.Error == ownerRemovedError {
+			return res.StatusCode, ErrOwnerRemoved
+		}
+	}
 	if res.StatusCode != http.StatusOK && res.StatusCode != http.StatusAccepted {
 		return res.StatusCode, ErrReconcile
 	}
@@ -135,6 +149,29 @@ func (c *Client) CreateParent(ctx context.Context, profile, incarnation string) 
 		return ErrReconcile
 	}
 	return nil
+}
+
+// ProvisionParent asks the owner the gateway binds to incarnation to issue the
+// permit and launch profile for an operator plan. Identical plans recover the
+// same launch; the owner neither creates nor claims a parent here.
+func (c *Client) ProvisionParent(ctx context.Context, plan json.RawMessage, incarnation string) (string, error) {
+	if !hashPattern.MatchString(incarnation) || len(plan) > 65536 || !json.Valid(plan) {
+		return "", errors.New("invalid frozen parent provision plan")
+	}
+	var result struct {
+		APIVersion    string `json:"apiVersion"`
+		LaunchProfile string `json:"launchProfile"`
+		Incarnation   string `json:"incarnation"`
+	}
+	status, err := c.doJSON(ctx, http.MethodPost, "/v1/parents/provision", plan, &result, false,
+		http.Header{"X-Celln-Parent-Incarnation": []string{incarnation}})
+	if err != nil {
+		return "", err
+	}
+	if status != http.StatusOK || result.APIVersion != "celln.parent-provisioned/v1" || result.Incarnation != incarnation || !hashPattern.MatchString(result.LaunchProfile) {
+		return "", ErrReconcile
+	}
+	return result.LaunchProfile, nil
 }
 
 // ParentStatus returns the live owner observation for an incarnation.

@@ -61,6 +61,7 @@ func (r *AgentRunTurnReconciler) Reconcile(ctx context.Context, request ctrl.Req
 			return ctrl.Result{}, statusErr
 		}
 		if err != nil {
+			ctrl.LoggerFrom(ctx).Info("Native turn outcome requires reconciliation", "turn", request.NamespacedName, "cause", err.Error())
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
 		if done {

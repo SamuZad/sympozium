@@ -1259,6 +1259,7 @@ func newInstallCmd() *cobra.Command {
 	var cellnNativeApprove bool
 	var nativeOpts cellninstall.Options
 	var nativePlane cellninstall.PlaneOptions
+	var fleet cellnFleetFlags
 	cmd := &cobra.Command{
 		Use:   "install",
 		Short: "Install Sympozium into the current Kubernetes cluster",
@@ -1285,6 +1286,16 @@ Use --celln-native to also install the native Celln starter catalogue and grant
 layers (enduring native parents); it requires the operator-reviewed
 --celln-native-* inputs and --celln-native-approve-starter-tools.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if fleet.enabled {
+				if noCelln || cellnHostInstaller || cellnNative || len(cellnBackends) != 0 {
+					return fmt.Errorf("--celln-fleet replaces the single dispatcher and cannot combine with --no-celln, --celln-host-installer, --celln-native or --celln-backend")
+				}
+				cellnValues, err := cellnInstallSetValues(cmd.Context(), cellnRouterImage, cellnInstallerImage, nil, cellnRouterReplicas, false)
+				if err != nil {
+					return err
+				}
+				return installCellnFleet(cmd.Context(), fleet, imageTag, append(setValues, cellnValues...), cellnNativeApprove)
+			}
 			if cellnNative {
 				if noCelln || cellnHostInstaller || len(cellnBackends) != 0 {
 					return fmt.Errorf("--celln-native requires the managed in-cluster dispatcher")
@@ -1342,7 +1353,7 @@ layers (enduring native parents); it requires the operator-reviewed
 	cmd.Flags().BoolVar(&noCelln, "no-celln", false, "Do not deploy the Celln backend (dispatcher, router, credentials, ownership PVC)")
 	cmd.Flags().BoolVar(&cellnHostInstaller, "celln-host-installer", false, "Deploy the privileged host-installer DaemonSet (bare-metal systemd dispatcher) instead of the in-cluster pod dispatcher; requires --celln-backend")
 	cmd.Flags().StringArrayVar(&cellnBackends, "celln-backend", nil, "Celln router dispatcher origin(s) http://host:port (repeatable); defaults to the in-cluster celln-dispatcher Service")
-	cmd.Flags().StringVar(&cellnRouterImage, "celln-router-image", "", "Celln router image repo:tag or repo@sha256:... (default ghcr.io/sympozium-ai/celln:v0.5.10)")
+	cmd.Flags().StringVar(&cellnRouterImage, "celln-router-image", "", "Celln router image repo:tag or repo@sha256:... (default ghcr.io/sympozium-ai/celln:v0.5.11)")
 	cmd.Flags().StringVar(&cellnInstallerImage, "celln-installer-image", "", "Celln host-installer image repo:tag (default ghcr.io/sympozium-ai/sympozium/celln-installer, tagged with this release)")
 	cmd.Flags().IntVar(&cellnRouterReplicas, "celln-router-replicas", 1, "Celln router replicas for the generated ReadWriteOnce ownership PVC")
 	cmd.Flags().BoolVar(&cellnNative, "celln-native", false, "Also install the native Celln starter catalogue and grant layers (requires the operator --celln-native-* inputs)")
@@ -1355,6 +1366,7 @@ layers (enduring native parents); it requires the operator-reviewed
 	cmd.Flags().StringVar(&nativeOpts.OwnerTarget, "celln-native-owner-target", "", "Stable owner origin. HTTPS is required for external owners; a cluster-local owner may use http:// when the plane's insecure acknowledgement is set")
 	cmd.Flags().StringVar(&nativeOpts.Scope, "celln-native-scope", "", "Stable installation identity; never change to renew consumed authority")
 	cmd.Flags().StringVar(&nativeOpts.PackageHash, "celln-native-package-hash", "", "Exact operator-approved package BLAKE3 identity")
+	fleet.register(cmd)
 	return cmd
 }
 
@@ -1364,7 +1376,7 @@ func cellnInstallSetValues(ctx context.Context, routerImage, installerImage stri
 	if replicas <= 0 {
 		replicas = 1
 	}
-	routerRepo, routerRef, routerIsDigest := splitImageRef(routerImage, "ghcr.io/sympozium-ai/celln", "v0.5.10")
+	routerRepo, routerRef, routerIsDigest := splitImageRef(routerImage, "ghcr.io/sympozium-ai/celln", "v0.5.11")
 	installerTag := version
 	if installerTag == "" || installerTag == "dev" {
 		installerTag = "latest"

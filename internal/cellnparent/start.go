@@ -2,6 +2,7 @@ package cellnparent
 
 import (
 	"context"
+	"errors"
 
 	api "github.com/sympozium-ai/sympozium/api/v1alpha1"
 	"k8s.io/apimachinery/pkg/types"
@@ -46,6 +47,13 @@ func ReconcileStart(ctx context.Context, writer client.Client, reader client.Rea
 		return StartObservation{Prepared: true, CreationAccepted: true}, nil
 	}
 	owner, err := transport.Status(ctx, approval.Incarnation)
+	if errors.Is(err, ErrOwnerRemoved) {
+		// The gateway no longer serves the owner that held this parent (its
+		// node left the fleet or its process was replaced). That is established
+		// context loss, not uncertainty: report it instead of waiting forever.
+		retry := false
+		return StartObservation{Prepared: true, Owner: &Status{Incarnation: approval.Incarnation, Status: "ContextLost", Retry: &retry}}, nil
+	}
 	if err != nil {
 		return StartObservation{}, err
 	}

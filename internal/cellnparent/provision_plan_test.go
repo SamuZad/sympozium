@@ -49,6 +49,7 @@ func testHostProvisionPlan(t *testing.T, ctx context.Context, loader cellnauthor
 		t.Fatal("host plan retry drifted")
 	}
 	testLocalProvisioner(t, ctx, loader, intent, template)
+	testRemoteProvisioner(t, ctx, loader, intent, template)
 	for name, change := range map[string]func(*HostProvisionTemplate){
 		"version":   func(p *HostProvisionTemplate) { p.APIVersion = "unknown" },
 		"scope":     func(p *HostProvisionTemplate) { p.Scope = "" },

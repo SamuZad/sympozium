@@ -2144,6 +2144,24 @@ After another live-intent check, the existing durable registration assignment
 and per-run approval publication completes. No VM is started by this helper;
 normal parent reconciliation consumes the resulting approval.
 
+### Remote (fleet) provisioning
+
+`remoteProvisioner` is the exclusive alternative to `localProvisioner` for a
+multi-node plane. It carries only `journal`, `approvals`, the gateway `target`,
+`tokenFile` and optional `caFile`: no `binary` or `root`, because the controller
+mounts no authority root. The same durable choice record (versioned
+`celln-parent-remote-choice-v1`, same file name) pins gateway and plan before
+the first request, so a run can never be re-issued through a different mode,
+owner or plan on retry.
+
+Issuance is `POST /v1/parents/provision` through the Celln gateway with the
+computed incarnation in `X-Celln-Parent-Incarnation` (Celln ≥ the release
+carrying celln#109). The gateway binds that incarnation to the dispatcher it
+picks *before* forwarding, and the later create follows the same binding, so
+permit, launch profile and live parent are all on one owner. The controller
+verifies the returned incarnation independently; any transport error or
+non-200 answer preserves issuance state and is never retried automatically.
+
 Synthetic process-boundary tests cover identical retry recovery, host/root/plan
 switch refusal, no inherited test secret, private staging cleanup, malformed or
 oversized output, and dispatcher template ambiguity/withdrawal. Race-enabled

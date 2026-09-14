@@ -536,6 +536,63 @@ celln:
       # Host credential files referenced by admitted model profiles. Mounted
       # read-only into the dispatcher only, at their original absolute paths.
       modelCredentialFiles: []
+  # -- Per-node native fleet. Label KVM nodes `celln.dev/kvm=true`: each node
+  # prepares its own authority root from the operator-signed starter package
+  # and runs a dispatcher; the router discovers them by DNS and binds every
+  # parent to the owner that issued it. Replaces the single in-cluster
+  # dispatcher and needs no per-node or per-namespace ceremony. See
+  # docs/guides/celln-fleet-installation.md.
+  fleet:
+    enabled: false
+    # -- Stable installation identity; node state lives at
+    # /var/lib/sympozium-celln/<scope>. Never change it to renew consumed authority.
+    scope: ""
+    package:
+      # -- OCI image (repository@sha256:digest) carrying the reviewed
+      # `celln starter-package` output at /package.
+      image: ""
+      # -- blake3 hash of the package's package.json from `celln starter-inspect`.
+      hash: ""
+      # -- Optional Secret in celln-system with `.dockerconfigjson` for a private registry.
+      pullSecret: ""
+      # -- Skip registry TLS verification (development registries only). The
+      # package is still verified against `hash` after download.
+      insecureRegistry: false
+    # -- Explicitly approved publisher key of the package (from `celln starter-inspect`).
+    publisher: ""
+    # -- Parent principal every owner authenticates; must match the
+    # trusted-parent-clients policy and the model profile.
+    principal: ""
+    # -- ConfigMap in celln-system holding trusted-parent-clients.json (the
+    # blake3 hash of router.parentTokenSecret's token, never the token).
+    parentClientsConfigMap: ""
+    # -- ConfigMap in celln-system the nodes publish the starter configuration to.
+    configurationConfigMap: celln-fleet-configuration
+    modelCredential:
+      # -- Secret in celln-system (key `token`) mounted read-only into every
+      # dispatcher at `path`, which the model profile references. Guests and
+      # the controller never see it; the model gateway is the long-term home.
+      secret: ""
+      path: /etc/celln-native/model-token
+    # -- Per-node budget. A parent keeps a warm child (two cells, 1.25 GiB
+    # declared). Celln v0.5.11 stops advertising egress while any parent is
+    # live, so a node holds ONE parent regardless of these values (see
+    # docs/guides/celln-fleet-installation.md); a create the owner refuses for
+    # capacity is terminal for that run.
+    maxCells: 4
+    memoryBytes: 4294967296
+    allowEgressHosts:
+      - api.deepseek.com
+    egressSlots: 1
+    # -- Controller-namespace Secret with registrations.json (remoteProvisioner);
+    # produced by `sympozium install --celln-fleet` after the nodes publish.
+    parentConfigSecret: ""
+    journal:
+      # -- ReadWriteOnce claim holding the controller's parent journal/approvals.
+      claim: celln-parent-journal
+      create: true
+      storageClass: ""
+      storage: 1Gi
   # -- One-command bootstrap for a fresh Celln install. Generates the
   # controller/router/backend/capability bearer Secrets and a router ownership
   # PVC, then the CLI points celln.tokenSecret, celln.capabilityTokenSecret and

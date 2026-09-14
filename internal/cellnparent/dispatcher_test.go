@@ -12,10 +12,22 @@ import (
 )
 
 func TestParentRegistrationConfigFailsClosed(t *testing.T) {
-	for _, mode := range []string{"valid-empty", "unknown", "trailing", "version", "same-source", "missing-source", "missing-directory", "relative-directory", "approval-mismatch", "nil-reader", "oversized"} {
+	for _, mode := range []string{"valid-empty", "valid-remote", "unknown", "trailing", "version", "same-source", "missing-source", "missing-directory", "relative-directory", "approval-mismatch", "nil-reader", "oversized", "both-provisioners", "remote-journal", "remote-registrations"} {
 		t.Run(mode, func(t *testing.T) {
 			config := RegistrationConfig{APIVersion: "sympozium.ai/celln-parent-registrations-v1", Journal: t.TempDir(), Approvals: t.TempDir(), OperatorSource: types.NamespacedName{Namespace: "operator", Name: "operator"}, RuntimeSource: types.NamespacedName{Namespace: "operator", Name: "runtime"}, AgentSource: types.NamespacedName{Namespace: "operator", Name: "agent"}}
+			remote := &RemoteProvisioner{Journal: config.Journal, Approvals: config.Approvals, Target: "http://celln-router.celln-system.svc.cluster.local:8787", TokenFile: "/etc/sympozium/celln/token"}
 			switch mode {
+			case "valid-remote":
+				config.RemoteProvisioner = remote
+			case "both-provisioners":
+				config.RemoteProvisioner = remote
+				config.LocalProvisioner = &LocalProvisioner{Binary: "/usr/local/bin/celln", Root: config.Journal, Journal: config.Journal, Approvals: config.Approvals, Target: remote.Target, TokenFile: remote.TokenFile}
+			case "remote-journal":
+				config.RemoteProvisioner = remote
+				config.RemoteProvisioner.Journal = t.TempDir()
+			case "remote-registrations":
+				config.RemoteProvisioner = remote
+				config.Registrations = []ParentLaunchRegistration{{APIVersion: "sympozium.ai/celln-parent-registration-v1"}}
 			case "version":
 				config.APIVersion = "unversioned"
 			case "same-source":
@@ -52,7 +64,7 @@ func TestParentRegistrationConfigFailsClosed(t *testing.T) {
 				reader = nil
 			}
 			_, err = LoadRegistrationDispatcher(path, approvals, reader)
-			if (err == nil) != (mode == "valid-empty") {
+			if (err == nil) != (mode == "valid-empty" || mode == "valid-remote") {
 				t.Fatalf("unexpected configuration result: %v", err)
 			}
 		})
