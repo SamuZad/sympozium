@@ -124,11 +124,14 @@ kind: AgentRuntime
 metadata: {name: celln-native}
 spec:
   cellnProfileRef: {name: celln-native-<scope>, revision: v1}
+  image: ""                      # required by the schema; unused for a profile wrapper
 ---
 apiVersion: sympozium.ai/v1alpha1
 kind: Agent
 metadata: {name: celln-agent}
-spec: {runtimeRef: celln-native}
+spec:
+  runtimeRef: celln-native
+  agents: {default: {model: ""}} # required by the schema; the run's connection sets the model
 ---
 apiVersion: sympozium.ai/v1alpha1
 kind: ModelConnection
@@ -137,6 +140,8 @@ spec: {provider: deepseek, protocol: openai-chat, endpoint: https://api.deepseek
 EOF
 ```
 
+The same three objects can be copied from the install namespace
+(`kubectl -n <install-ns> get modelconnection,agentruntime,agent -o yaml`).
 No per-namespace install, grant ConfigMaps or copied tools. Enduring runs in
 that namespace select `runtimeRef: celln-native`, `clusterToolRefs` from the
 shared catalogue, `model.connectionRef: celln-native` and the profile's

@@ -154,27 +154,13 @@ denied="$NAMESPACE-denied"
 profile="celln-native-$SCOPE"
 for ns in "$tenant" "$denied"; do
 	kc create namespace "$ns" >/dev/null 2>&1 || true
-	kc -n "$NAMESPACE" get modelconnection celln-native -o json | python3 -c "
+	# The tenant's three wrapper objects are copies of the installed ones.
+	for kind in modelconnection agentruntime agent; do
+		kc -n "$NAMESPACE" get "$kind" -o json | python3 -c "
 import json, sys
-c = json.load(sys.stdin)
-print(json.dumps({'apiVersion': c['apiVersion'], 'kind': 'ModelConnection', 'metadata': {'name': 'celln-native', 'namespace': '$ns'}, 'spec': c['spec']}))" | kc apply -f - >/dev/null
-	kc apply -f - >/dev/null <<EOF
-apiVersion: sympozium.ai/v1alpha1
-kind: AgentRuntime
-metadata:
-  name: celln-native
-  namespace: $ns
-spec:
-  cellnProfileRef: {name: $profile, revision: v1}
----
-apiVersion: sympozium.ai/v1alpha1
-kind: Agent
-metadata:
-  name: celln-agent
-  namespace: $ns
-spec:
-  runtimeRef: celln-native
-EOF
+for item in json.load(sys.stdin)['items']:
+    print(json.dumps({'apiVersion': item['apiVersion'], 'kind': item['kind'], 'metadata': {'name': item['metadata']['name'], 'namespace': sys.argv[1]}, 'spec': item['spec']}))" "$ns" | kc apply -f - >/dev/null
+	done
 done
 kc label namespace "$tenant" --overwrite "celln.sympozium.ai/scope=$SCOPE" >/dev/null
 tenant_run="$(python3 -c "
