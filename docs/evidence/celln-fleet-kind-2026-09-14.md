@@ -111,8 +111,28 @@ install namespace labeled `celln.sympozium.ai/scope=trial`.
 - The guide's tenant wrapper YAML omitted `spec.image` and `spec.agents`,
   which the CRDs require even for profile wrappers.
 
-Deleting a capacity-refused run still loops on "parent or turn not found"
-(#534, P2); the journey does not delete refused runs.
+Deleting a capacity-refused run looped on "parent or turn not found"; fixed
+in PR #538 (#534).
+
+## Zero-ceremony namespaces and node-sized capacity (P1a/P1b, PR #538)
+
+A fourth trial on a fresh `fleet-ci` cluster used a Celln build of
+sympozium-ai/celln#113 (per-parent broker charging, `d52d55a`) in the
+installer image, the default-open policy and `celln.fleet.capacity: auto`.
+
+| Step | Result |
+| --- | --- |
+| Capacity | Each dispatcher logged `celln capacity: node=66863595520 memory=50147696625 cells=74 egressSlots=74` (the Kind workers see the 64 GiB host). |
+| Two parents, one node | `celln-starter-cq7kj` went Ready on `fleet-ci-worker` and answered its DeepSeek turn; the next run, `celln-starter-xtl7p`, hashed to the same owner, went Ready beside it and answered its own turn while the first stayed Ready. With Celln v0.5.11 the second was refused. |
+| Follow-up turn | Distinct child read back *Content: violet / Revision: 1*. |
+| Delete | Both co-located parents deleted through the gateway. |
+| Unlabeled tenant namespace `celln-agents-b` | No label and no YAML: `GET /api/v1/celln-platform/profiles` offered `celln-native-trial`, `POST /api/v1/celln-platform/wrappers` created the three wrappers, and `celln-starter-q8mmp` ran on `fleet-ci-worker`. |
+| Excluded namespace `celln-agents-denied` | Labeled `celln.sympozium.ai/excluded=true`: offered no profiles, wrapper creation answered 403, and a run (with hand-applied wrappers) was refused `AUTH_POLICY_WITHDRAWN` with no parent. |
+| Node leave | Unlabeling `fleet-ci-worker` reported ContextLost on `celln-starter-q8mmp`, which deleted cleanly. |
+
+A run 14 on Celln v0.5.11 passed the same namespace steps. Terminal
+`CreateRefused` outcomes are covered by unit tests; with node-sized capacity
+the journey no longer hits a capacity refusal.
 
 ## Environment caveats
 
