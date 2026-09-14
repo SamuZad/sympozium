@@ -21,6 +21,7 @@ MODEL_PROVIDER="${FLEET_MODEL_PROVIDER:-deepseek}"
 MODEL_ARGS=(--celln-fleet-model-provider "$MODEL_PROVIDER")
 [ -n "${FLEET_MODEL:-}" ] && MODEL_ARGS+=(--celln-fleet-model "$FLEET_MODEL")
 [ -n "${FLEET_MODEL_ENDPOINT:-}" ] && MODEL_ARGS+=(--celln-fleet-model-endpoint "$FLEET_MODEL_ENDPOINT")
+[ -n "${FLEET_MODEL_PROTOCOL:-}" ] && MODEL_ARGS+=(--celln-fleet-model-protocol "$FLEET_MODEL_PROTOCOL")
 [ "${FLEET_MODEL_ALLOW_INSECURE:-}" = 1 ] && MODEL_ARGS+=(--celln-fleet-model-allow-insecure)
 case "$MODEL_PROVIDER" in
 deepseek) MODEL_KEY="${DEEPSEEK_API_KEY:?DEEPSEEK_API_KEY for the deepseek backend}" ;;
