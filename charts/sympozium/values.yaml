@@ -580,8 +580,8 @@ celln:
     # egressSlots = maxCells. A native parent charges two cells, two broker
     # slots and its declared memory (1.25 GiB for the starter), so a 64 GiB
     # node holds about 38 parents. `fixed` uses maxCells/memoryBytes/egressSlots
-    # exactly. Celln releases before per-parent broker charging hold one parent
-    # per node whatever these say. A create the owner refuses for capacity ends
+    # exactly. Celln releases before v0.5.12 hold one parent per node whatever
+    # these say. A create the owner refuses for capacity ends
     # that run and it deletes cleanly.
     capacity: auto
     memoryPercent: 75

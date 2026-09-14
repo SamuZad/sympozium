@@ -212,8 +212,8 @@ slightly less, so real numbers come out a little lower):
 Set `capacity: fixed` with `maxCells`, `memoryBytes` and `egressSlots` to pin
 exact numbers, or lower `memoryPercent` on nodes that run other workloads.
 
-Per-parent broker charging needs a Celln release that includes it (celln#112);
-**Celln v0.5.11 still holds one parent per node** whatever the budget says.
+Per-parent broker charging arrived in Celln v0.5.12 (celln#112), which this
+chart pins; releases before it hold one parent per node whatever the budget says.
 
 The gateway places each parent by incarnation hash, not by load. An owner that
 refuses a create for capacity ends that run with `CellnParentReady` reason
