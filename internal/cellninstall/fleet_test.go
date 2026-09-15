@@ -51,12 +51,31 @@ func TestFleetValuesRefuseAmbiguousOrUnpinnedInputs(t *testing.T) {
 		"backend without model": func(o *FleetOptions) {
 			o.Backends = []FleetBackend{{Name: "openai", Model: FleetModel{Provider: "openai"}}}
 		},
+		"uppercase https host": func(o *FleetOptions) { o.HTTPSHosts = []string{"Hooks.Example"} },
+		"bare https host":      func(o *FleetOptions) { o.HTTPSHosts = []string{"localhost"} },
+		"https host with port": func(o *FleetOptions) { o.HTTPSHosts = []string{"hooks.example:8080"} },
 	} {
 		o := validFleet()
 		change(&o)
 		if _, err := FleetValues(o); err == nil {
 			t.Fatalf("%s accepted", name)
 		}
+	}
+}
+
+func TestFleetValuesCarryTheHTTPSHostsInOrder(t *testing.T) {
+	o := validFleet()
+	o.HTTPSHosts = []string{"hooks.example", "echo.tenant.svc.cluster.local"}
+	values, err := FleetValues(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(values, "\n")
+	if !strings.Contains(joined, "celln.fleet.httpsHosts[0]=hooks.example") || !strings.Contains(joined, "celln.fleet.httpsHosts[1]=echo.tenant.svc.cluster.local") {
+		t.Fatalf("hosts not rendered: %v", values)
+	}
+	if values, err := FleetValues(validFleet()); err != nil || strings.Contains(strings.Join(values, "\n"), "httpsHosts") {
+		t.Fatalf("empty hosts must leave the reviewed default: %v %v", err, values)
 	}
 }
 

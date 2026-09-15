@@ -244,7 +244,7 @@ func (r PlatformResolver) load(ctx context.Context, runKey types.NamespacedName,
 	}
 
 	selection := snapshot.Run.Spec.CellnSelection
-	if len(selection.ToolRefs) != 0 || len(selection.ClusterToolRefs) > 16 {
+	if len(selection.ToolRefs) != 0 || len(selection.ClusterToolRefs) > 24 {
 		return snapshot, deny(ReasonPolicyContracted, "shared catalogue resolution cannot mix legacy namespaced tools")
 	}
 	seen := map[string]bool{}
@@ -768,7 +768,7 @@ func validToolLimits(limits api.CellnToolLimits) bool {
 	if limits.TimeoutMillis < 1 || limits.MemoryBytes < 1 || limits.ArgumentBytes < 1 || limits.OutputBytes < 1 || limits.Workspace != "none" || (limits.Effects != "none" && limits.Effects != "external-side-effects") || len(limits.Egress) != 0 || len(limits.Inputs) != 0 {
 		return false
 	}
-	if limits.Artifacts != nil && (limits.Artifacts.Operation != "read" && limits.Artifacts.Operation != "write" || limits.Artifacts.MaxOperations < 1 || limits.Artifacts.MaxFiles < 1 || limits.Artifacts.MaxFileBytes < 1 || limits.Artifacts.MaxTotalBytes < 1) {
+	if limits.Artifacts != nil && (!ArtifactOperations[limits.Artifacts.Operation] || limits.Artifacts.MaxOperations < 1 || limits.Artifacts.MaxFiles < 1 || limits.Artifacts.MaxFileBytes < 1 || limits.Artifacts.MaxTotalBytes < 1) {
 		return false
 	}
 	if limits.HTTPS != nil && (len(limits.HTTPS.AllowHosts) == 0 || limits.HTTPS.MaxRequests < 1 || limits.HTTPS.MaxResponseBytes < 1 || limits.HTTPS.TimeoutMillis < 1) {

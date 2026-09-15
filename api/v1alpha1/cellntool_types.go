@@ -76,7 +76,9 @@ type CellnToolLimits struct {
 }
 
 type CellnArtifactLimits struct {
-	// +kubebuilder:validation:Enum=read;write
+	// Operation is what the broker performs: read, list and search follow the
+	// profile's read grant; write, append and delete follow its write grant.
+	// +kubebuilder:validation:Enum=read;write;list;append;search;delete
 	Operation string `json:"operation"`
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=64

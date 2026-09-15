@@ -1244,10 +1244,10 @@ export function OnboardingWizard({
           {(catalogue.data || []).map((tool) => {
             const selected = (form.borrowedTools || []).some((ref) => ref.name === tool.metadata.name && ref.revision === tool.spec.revision);
             const supported = tool.spec.invocationABI === "celln.json-stdio/v1" && tool.spec.lane === "tool";
-            const suggested = ["workspace-read", "workspace-write", "https-fetch"].some((name) => tool.metadata.name === name || tool.metadata.name.endsWith("-" + name));
+            const suggested = ["workspace-read", "workspace-write", "https-fetch", "workspace-list", "workspace-append", "workspace-search", "workspace-delete", "https-post-json"].some((name) => tool.metadata.name === name || tool.metadata.name.endsWith("-" + name));
             return <label key={tool.metadata.name} className="block rounded border p-3 text-sm">
               <span className="flex items-center gap-2">
-                <input type="checkbox" disabled={!supported || (!selected && (form.borrowedTools || []).length >= 16)} checked={selected}
+                <input type="checkbox" disabled={!supported || (!selected && (form.borrowedTools || []).length >= 24)} checked={selected}
                   onChange={() => setForm({ ...form, borrowedTools: selected ? (form.borrowedTools || []).filter((ref) => ref.name !== tool.metadata.name) : [...(form.borrowedTools || []), { name: tool.metadata.name, revision: tool.spec.revision }] })} />
                 {tool.metadata.name}@{tool.spec.revision}{suggested ? " — starter suggestion" : ""}{!supported ? " — unsupported ABI/lane" : ""}
               </span>

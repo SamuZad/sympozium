@@ -351,6 +351,33 @@ ConfigMap as one command-line argument, which three backends with 16-tool
 templates pushed past the kernel's limit, so bodies now travel through
 files.
 
+## Eight brokered tools: run files listed, appended, searched, deleted; JSON posted (Celln v0.5.19)
+
+The brokered toolbox grew from three tools to eight without a new channel:
+the warden's workspace broker gained list, append, search and delete on
+`celln.workspace/v1`, and the egress broker gained a credential-free JSON
+POST grant beside the model grant. Each is a six-line guest binary that
+sends its request through `/pilot-fetch`. On `fleet-ci` (scope `ci`, two
+llama-server backends, package built with busybox and jq: 22 tools):
+
+| Check | Result |
+| --- | --- |
+| Catalogue | 22 cluster tools: 8 brokered (`celln.json-stdio/v1`, artifact operation `read|write|list|append|search|delete` or an `https` block naming `example.com` and the receiver) and 14 argv commands from busybox and jq. |
+| Conversation | On the enduring run that wrote `notes.txt` = `violet`: append `' orange'` at revision 1 → revision 2; search `orange` → `notes.txt, line 1`; list → `notes.txt: 12 bytes`; delete at revision 2 → revision 3; list → 0 files. Five turns, one tool call each, the revision carried by the model between turns. |
+| JSON POST | One-shot: `https-post-json` to `http://hook-echo.celln-agents-b.svc.cluster.local:8080/hook` (a Python receiver the journey deploys; plain HTTP on a private Service, permitted by the native backend's `allow-insecure`) with body `{"event":"done"}`. The receiver logged `HOOK /hook {"event":"done"}`; the model answered `200`. |
+| Everything else | The 27 earlier checks (two backends, enduring and one-shot runs, jq and grep, adding a backend, exclusion, drain) passed unchanged. |
+
+Two limits the larger toolbox found, fixed in Celln v0.5.19: a model
+request now carries every selected tool's schema plus the conversation, and
+22 tools did not fit the 8 KiB broker wire (`starter-configure` refused the
+template outright), so the guest client, the host's request buffer and the
+broker accept 32 KiB for the model request while the workspace and plain
+POST paths keep their tighter bounds; and a first attempt raised only the
+guest and broker bounds, leaving the VMM's 8 KiB buffer to truncate the
+request, which surfaced as `lent executable failed` on the first turn.
+The cluster tool names carry the scope prefix (`celln-ci-workspace-list`),
+which the journey's gates now use.
+
 ## Environment caveats
 
 - Kind nodes have no kernel in `/boot`; the dispatcher's readiness gate

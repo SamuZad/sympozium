@@ -100,8 +100,9 @@ Prepare these explicitly before enabling the chart:
    namespace and verify the general controller rollout before creating runs.
    Do not reassign already-bound runs by changing namespace configuration.
 2. A qualified Linux/KVM host owner with signed parent/worker motes, admitted
-   native runtime and the exact `workspace-read`, `workspace-write`, `https-fetch`
-   catalogue revisions. Installation alone grants no tool authority. Guest
+   native runtime and the exact catalogue revisions of the eight starter tools
+   (`workspace-read`, `workspace-write`, `workspace-list`, `workspace-append`,
+   `workspace-search`, `workspace-delete`, `https-fetch`, `https-post-json`). Installation alone grants no tool authority. Guest
    startup remains warm-mote CoW; the controller image does not boot guests.
 3. A directory such as `/var/lib/sympozium-celln/starter` containing `authority/`,
    `journal/` and `approvals/`. Its UID/GID must match the chart settings. The
@@ -192,7 +193,7 @@ rights. Apply the new CRDs before upgrading consumers.
 
 Sympozium v0.10.57 publishes `sympozium-celln-native-linux-amd64.tar.gz`, its
 SHA-256 sidecar and `celln-parent-controller.digest` as release assets. The host
-archive combines the checksum-pinned Celln v0.5.18 bundle, both TLS proxies,
+archive combines the checksum-pinned Celln v0.5.19 bundle, both TLS proxies,
 certificate renewal helper and example service units. `SHA256SUMS` checks the
 unpacked files and `share/sympozium/SOURCES.json` records the source pair.
 Verify checksums and extract into a **new staging directory**, then review the

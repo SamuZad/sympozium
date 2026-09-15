@@ -615,6 +615,10 @@ celln:
       maxTurns: 0
       maxModelRequests: 0
       maxOutputTokens: 0
+    # -- Exact hosts the https-fetch and https-post-json starter tools may
+    # reach (lowercase DNS names, at most 16). Empty keeps Celln's reviewed
+    # default, example.com. The installer's --celln-fleet-https-host sets it.
+    httpsHosts: []
     # -- Per-node budget. `auto` sizes each node when its dispatcher starts:
     # memoryBytes = memoryPercent of the node's memory (its cgroup limit when
     # set), maxCells = memoryBytes / cellMemoryBytes capped at maxCellsCeiling,

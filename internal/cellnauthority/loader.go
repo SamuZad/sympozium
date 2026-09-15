@@ -86,7 +86,7 @@ func (l Loader) Resolve(ctx context.Context, agentKey types.NamespacedName, sele
 }
 
 func (l Loader) resolveRuntime(ctx context.Context, agentKey types.NamespacedName, selection []Selection, runtimeOverride string) (*SelectionSnapshot, error) {
-	if l.Reader == nil || agentKey.Namespace == "" || agentKey.Name == "" || len(selection) > 16 {
+	if l.Reader == nil || agentKey.Namespace == "" || agentKey.Name == "" || len(selection) > 24 {
 		return nil, fmt.Errorf("reader, Agent identity and bounded selection required")
 	}
 	var agent api.Agent
@@ -131,7 +131,7 @@ func (l Loader) resolveRuntime(ctx context.Context, agentKey types.NamespacedNam
 		if err != nil {
 			return nil, err
 		}
-		if doc.APIVersion != "sympozium.ai/celln-grants-v1" || doc.Layer != layers[i] || doc.Agent != agentID || doc.Runtime != runtimeID || doc.Grants == nil || len(doc.Grants) > 16 {
+		if doc.APIVersion != "sympozium.ai/celln-grants-v1" || doc.Layer != layers[i] || doc.Agent != agentID || doc.Runtime != runtimeID || doc.Grants == nil || len(doc.Grants) > 24 {
 			return nil, fmt.Errorf("%s grant source absent, stale or wrong subject", layers[i])
 		}
 		result.Sources = append(result.Sources, rev)

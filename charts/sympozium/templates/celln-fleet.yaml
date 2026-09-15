@@ -247,6 +247,8 @@ spec:
               value: {{ $limits.maxModelRequests | default 0 | quote }}
             - name: FLEET_LIMIT_MAX_OUTPUT_TOKENS
               value: {{ $limits.maxOutputTokens | default 0 | quote }}
+            - name: FLEET_HTTPS_HOSTS
+              value: {{ toJson ($fleet.httpsHosts | default list) | quote }}
             - name: FLEET_PARENT_CLIENTS
               value: /etc/celln-fleet/clients/trusted-parent-clients.json
             - name: FLEET_CONFIGURATION_CONFIGMAP

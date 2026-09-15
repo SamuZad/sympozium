@@ -29,10 +29,14 @@ may itself assume pod credentials or a sidecar; copying its text is not parity.
 
 The native starter offers explicitly selected, reviewed revisions of:
 
-- `workspace-read`: bounded logical files belonging to the live run.
-- `workspace-write`: bounded, revision-checked updates to those files.
-- `https-fetch`: bounded host-brokered HTTPS to approved destinations (the first
-  starter profile permits `example.com`).
+- `workspace-read`, `workspace-list`, `workspace-search`: bounded logical
+  files belonging to the live run, read, listed and searched (exact substring).
+- `workspace-write`, `workspace-append`, `workspace-delete`: bounded,
+  revision-checked changes to those files.
+- `https-fetch`: bounded host-brokered HTTPS GET to approved destinations.
+- `https-post-json`: a JSON object posted, with no credential, to approved
+  destinations. The fleet installer's `--celln-fleet-https-host` list names
+  them (the reviewed default permits `example.com`).
 
 These are not arbitrary host filesystem access or unrestricted shell commands.
 The operator, runtime and agent grants must all permit access. A permission

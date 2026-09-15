@@ -104,6 +104,9 @@ for key, env in (("leaseSeconds", "FLEET_LIMIT_LEASE_SECONDS"), ("maxTurns", "FL
         limits[key] = value
 if limits:
     plan["hostLimits"] = limits
+hosts = json.loads(os.environ.get("FLEET_HTTPS_HOSTS") or "[]")
+if hosts:
+    plan["httpsHosts"] = hosts
 print(json.dumps(plan))
 PY
 	"$celln" --root "$root" starter-configure "$plan" --approve-starter-effects

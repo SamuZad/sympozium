@@ -44,6 +44,7 @@ func (f *cellnFleetFlags) register(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&f.authorise, "celln-fleet-authorise", "all", "Which namespaces may run on the fleet: 'all' (every namespace except kube-*, cert-manager, the control-plane namespaces and namespaces labeled celln.sympozium.ai/excluded) or 'labeled' (only namespaces labeled celln.sympozium.ai/scope=<scope>)")
 	cmd.Flags().StringVar(&f.options.ModelCredentialFile, "celln-fleet-model-credential-file", "", "Local file holding the default backend's provider credential to publish once as a Secret in celln-system (omit to keep an existing Secret; not needed for llama-server)")
 	cmd.Flags().StringArrayVar(&f.backendSpecs, "celln-fleet-backend", nil, "A model backend of this fleet, repeatable: name=NAME,provider=PROVIDER,model=MODEL[,endpoint=URL][,protocol=openai-chat|anthropic-messages][,credential-file=/path][,allow-insecure=true]. Every node configures every backend and a namespace may run parents on any of them side by side. Without this flag the --celln-fleet-model-* flags define the single backend named native")
+	cmd.Flags().StringArrayVar(&f.options.HTTPSHosts, "celln-fleet-https-host", nil, "An exact host the https-fetch and https-post-json starter tools may reach, repeatable (lowercase DNS name; default example.com). Every backend's nodes configure the same list")
 	cmd.Flags().BoolVar(&f.skipPreflight, "celln-fleet-skip-preflight", false, "Skip the one-token chat probe of every backend with its key (use when only the nodes can reach the endpoint)")
 	cmd.Flags().StringVar(&f.outputDir, "celln-fleet-output-dir", "", "Absolute private directory for the materialized configuration and installation records")
 	cmd.Flags().DurationVar(&f.wait, "celln-fleet-wait", 15*time.Minute, "How long to wait for the first labeled node to publish the starter configuration")
@@ -55,7 +56,7 @@ func (f *cellnFleetFlags) register(cmd *cobra.Command) {
 // left by an earlier attempt, so a rerun after labeling more nodes is safe.
 func installCellnFleet(ctx context.Context, f cellnFleetFlags, imageTag string, setValues []string, approve bool) error {
 	if !approve {
-		return fmt.Errorf("--celln-fleet requires --celln-native-approve-starter-tools: grants include run-owned read/write and bounded example.com HTTPS")
+		return fmt.Errorf("--celln-fleet requires --celln-native-approve-starter-tools: grants include run-owned read/write/list/append/search/delete and bounded HTTPS GET and JSON POST to the --celln-fleet-https-host list (default example.com)")
 	}
 	backends, err := parseFleetBackends(f.backendSpecs)
 	if err != nil {

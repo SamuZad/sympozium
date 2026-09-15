@@ -29,6 +29,12 @@ MODEL_ARGS=(--celln-fleet-model-provider "$MODEL_PROVIDER")
 [ -n "${FLEET_MODEL_ENDPOINT:-}" ] && MODEL_ARGS+=(--celln-fleet-model-endpoint "$FLEET_MODEL_ENDPOINT")
 [ -n "${FLEET_MODEL_PROTOCOL:-}" ] && MODEL_ARGS+=(--celln-fleet-model-protocol "$FLEET_MODEL_PROTOCOL")
 [ "${FLEET_MODEL_ALLOW_INSECURE:-}" = 1 ] && MODEL_ARGS+=(--celln-fleet-model-allow-insecure)
+# The HTTPS tools reach exactly these hosts. The journey posts JSON to a
+# receiver it runs inside the cluster (plain HTTP on a private address, so it
+# is only exercised when the native backend was approved with allow-insecure).
+HOOK_HOST="hook-echo.${FLEET_NAMESPACE:-celln-agents}-b.svc.cluster.local"
+HOST_ARGS=(--celln-fleet-https-host example.com --celln-fleet-https-host "$HOOK_HOST")
+for host in ${FLEET_HTTPS_HOSTS:-}; do HOST_ARGS+=(--celln-fleet-https-host "$host"); done
 case "$MODEL_PROVIDER" in
 deepseek) MODEL_KEY="${DEEPSEEK_API_KEY:?DEEPSEEK_API_KEY for the deepseek backend}" ;;
 openai) MODEL_KEY="${OPENAI_API_KEY:?OPENAI_API_KEY for the openai backend}" ;;
@@ -181,7 +187,7 @@ fleet_install() { # extra args... ; the same command is rerun to add nodes or ba
 		--celln-fleet-package-hash "$package_hash" \
 		--celln-fleet-publisher "$publisher" \
 		"${CREDENTIAL_ARGS[@]}" \
-		"${MODEL_ARGS[@]}" "$@" \
+		"${MODEL_ARGS[@]}" "${HOST_ARGS[@]}" "$@" \
 		--celln-fleet-output-dir "$WORK/fleet-out" \
 		--celln-fleet-wait 20m \
 		--celln-native-approve-starter-tools \
@@ -267,6 +273,41 @@ answer="$(kc -n "$NAMESPACE" get agentrunturn "$first-turn-2" -o jsonpath='{.sta
 echo "$answer" | grep -qi violet || fail "follow-up turn lost context: $answer"
 [ "$(kc -n "$NAMESPACE" get agentrunturn "$first-turn-2" -o jsonpath='{.status.execution.child}')" != "$(kc -n "$NAMESPACE" get agentrun "$first" -o jsonpath='{.status.cellnParent.initialTurn.child}')" ] || fail "turn reused the initial child"
 pass "distinct child read back: $(echo "$answer" | tr '\n' ' ')"
+
+turn_answer() { # run turn-name message [namespace] -> the turn's answer
+	local run=$1 name=$2 message=$3 ns=${4:-$NAMESPACE} uid
+	uid="$(kc -n "$ns" get agentrun "$run" -o jsonpath='{.metadata.uid}')"
+	kc -n "$ns" create -f - >/dev/null <<EOF
+apiVersion: sympozium.ai/v1alpha1
+kind: AgentRunTurn
+metadata:
+  name: $name
+  ownerReferences:
+    - {apiVersion: sympozium.ai/v1alpha1, kind: AgentRun, name: $run, uid: "$uid", controller: true, blockOwnerDeletion: true}
+spec:
+  runName: $run
+  runUID: "$uid"
+  message: "$message"
+EOF
+	wait_for "turn $name" 240 bash -c "kubectl --context kind-$CLUSTER -n $ns get agentrunturn $name -o jsonpath='{.status.conditions[?(@.type==\"CellnTurnComplete\")].status}' | grep -q True"
+	kc -n "$ns" get agentrunturn "$name" -o jsonpath='{.status.execution.result.answer}'
+}
+if kc get clustercellntool "celln-$SCOPE-workspace-list" >/dev/null 2>&1; then
+	log "Run files over the conversation: append, search, list and delete through the workspace broker"
+	# The workspace revision moves with every change; the model carries it
+	# between turns like any other fact it read.
+	answer="$(turn_answer "$first" "$first-turn-3" "Append the text ' orange' to notes.txt with workspace-append using revision 1. Reply with only the new revision number.")"
+	echo "$answer" | grep -q '2' || fail "append did not report revision 2: $answer"
+	answer="$(turn_answer "$first" "$first-turn-4" "Call workspace-search exactly once with pattern orange. Reply with the file name and line number it reports.")"
+	echo "$answer" | grep -q 'notes.txt' || fail "search did not find the appended text: $answer"
+	answer="$(turn_answer "$first" "$first-turn-5" "Call workspace-list exactly once. Reply with each file name and its size in bytes.")"
+	echo "$answer" | grep -q 'notes.txt' || fail "list did not name the file: $answer"
+	answer="$(turn_answer "$first" "$first-turn-6" "Delete notes.txt with workspace-delete using revision 2. Reply with only the new revision number.")"
+	echo "$answer" | grep -q '3' || fail "delete did not report revision 3: $answer"
+	answer="$(turn_answer "$first" "$first-turn-7" "Call workspace-list exactly once. Reply with exactly how many files it reports, as a number.")"
+	echo "$answer" | grep -qE '(^|[^0-9])0([^0-9]|$)|zero|no files|empty' || fail "list still reports files after the delete: $answer"
+	pass "notes.txt was appended to (revision 2), found by search, listed, deleted (revision 3) and gone from the listing"
+fi
 
 # Every run deletes cleanly through the gateway, live or refused.
 for run in "$first" "${extra[@]}"; do
@@ -397,6 +438,52 @@ print(json.dumps({"agentRef": agent, "task": sys.argv[2], "systemPrompt": r["sys
 one_shot_runs=()
 one_shot_native="$(api_one_shot "Where is Botswana? Reply with one short sentence; do not use tools.")" || fail "API refused a one-shot run on the native backend in $tenant"
 one_shot_runs+=("$one_shot_native")
+one_shot_post=""
+if [ "${FLEET_MODEL_ALLOW_INSECURE:-}" = 1 ] && kc get clustercellntool "celln-$SCOPE-https-post-json" >/dev/null 2>&1; then
+	# A JSON receiver inside the cluster: the broker resolves its Service name,
+	# posts the object with no credential, and the receiver's log is the proof.
+	cat >"$WORK/hook-echo.py" <<'PYEOF'
+from http.server import BaseHTTPRequestHandler, HTTPServer
+class Hook(BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get("content-length", "0")))
+        print("HOOK", self.path, body.decode(errors="replace"), flush=True)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"received":true}')
+HTTPServer(("", 8080), Hook).serve_forever()
+PYEOF
+	kc -n "$tenant" create configmap hook-echo --from-file=server.py="$WORK/hook-echo.py" >/dev/null 2>&1 || true
+	kc -n "$tenant" apply -f - >/dev/null <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: hook-echo}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: hook-echo}}
+  template:
+    metadata: {labels: {app: hook-echo}}
+    spec:
+      containers:
+        - name: hook
+          image: python:3.12-alpine
+          command: [python3, -u, /app/server.py]
+          ports: [{containerPort: 8080}]
+          volumeMounts: [{name: app, mountPath: /app}]
+      volumes: [{name: app, configMap: {name: hook-echo}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: hook-echo}
+spec:
+  selector: {app: hook-echo}
+  ports: [{port: 8080, targetPort: 8080}]
+EOF
+	wait_for "hook receiver ready" 180 bash -c "kubectl --context kind-$CLUSTER -n $tenant get deploy hook-echo -o jsonpath='{.status.readyReplicas}' | grep -qx 1"
+	one_shot_post="$(api_one_shot "Call https-post-json exactly once with url http://$HOOK_HOST:8080/hook and body {\"event\":\"done\"}. Reply with only the HTTP status number it returns.")" || fail "API refused an https-post-json one-shot"
+	one_shot_runs+=("$one_shot_post")
+fi
 if [ -n "${FLEET_TOOL_IMAGES:-}" ]; then
 	# Real commands borrowed from images: jq over a JSON document and grep over text.
 	one_shot_jq="$(api_one_shot "Call the jq tool exactly once with filter .capital, raw output, and this input: {\"capital\":\"Gaborone\",\"country\":\"Botswana\"}. Reply with only the tool's output.")" || fail "API refused a jq one-shot"
@@ -422,6 +509,12 @@ if [ -n "${FLEET_TOOL_IMAGES:-}" ]; then
 	echo "$jq_answer" | grep -q 'Gaborone' || fail "jq one-shot did not return the extracted value: $jq_answer"
 	echo "$grep_answer" | grep -q 'violet' || fail "grep one-shot did not return the matching line: $grep_answer"
 	pass "borrowed jq and grep answered through the argv binding: '$jq_answer' / '$grep_answer'"
+fi
+if [ -n "$one_shot_post" ]; then
+	post_answer="$(kc -n "$tenant" get agentrun "$one_shot_post" -o jsonpath='{.status.result}')"
+	echo "$post_answer" | grep -q '200' || fail "https-post-json did not report a 200 status: $post_answer"
+	kc -n "$tenant" logs deploy/hook-echo | grep -F '"event":"done"' >/dev/null || fail "the receiver did not log the posted object: $(kc -n "$tenant" logs deploy/hook-echo | tail -3)"
+	pass "https-post-json delivered {\"event\":\"done\"} to $HOOK_HOST with no credential; the receiver logged it and the model reported 200"
 fi
 wait_for "one-shot parents released (live cells back to $cells_before)" 120 bash -c "[ \"\$(
 	total=0; for pod in \$(kubectl --context kind-$CLUSTER -n celln-system get pods -l app.kubernetes.io/name=celln-node --field-selector status.phase=Running -o name); do
