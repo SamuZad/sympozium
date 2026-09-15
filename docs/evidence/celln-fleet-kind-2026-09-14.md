@@ -338,6 +338,7 @@ On `fleet-ci` (scope `ci`, two llama-server backends):
 | jq | One-shot `celln-agent-hnpsd`: "call the jq tool with filter .capital, raw output, on {"capital":"Gaborone",…}" → answered `Gaborone`. |
 | grep | One-shot `celln-agent-8j4lk`: "call the grep tool with pattern ^vio on red, violet, blue" → answered `violet`. |
 | Cells | The one-shots released their cells: live cells back to the 6 held by the three enduring parents. |
+| Add backend | With the file-based bodies, a third backend (`spare`) joined the running scope: configure pods published it with zero restarts, owners untouched, the enduring run kept going, and a one-shot on `spare` answered. Full journey: 26 checks passed, exit 0. |
 
 Three things the runs found and that are fixed in the same change set: the
 tool schema validator accepts a strict subset (no per-field descriptions,
