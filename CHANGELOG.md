@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.10.69](https://github.com/sympozium-ai/sympozium/compare/v0.10.68...v0.10.69) (2026-09-15)
+
+
+### Features
+
+* **celln:** borrowed commands from pinned images as fleet tools ([6e2642f](https://github.com/sympozium-ai/sympozium/commit/6e2642f612f5853b0dcf940c7ec1c1b28ba99b39))
+* **celln:** borrowed commands from pinned images as fleet tools ([134bdc4](https://github.com/sympozium-ai/sympozium/commit/134bdc4482e7fb4280346fd79f4bc410554f6e05))
+
 ## [0.10.68](https://github.com/sympozium-ai/sympozium/compare/v0.10.67...v0.10.68) (2026-09-15)
 
 
