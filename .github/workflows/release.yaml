@@ -42,6 +42,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends skopeo e2fsprogs cpio gcc jq
+          # celln runs mke2fs and debugfs with PATH=/usr/bin:/bin; Debian keeps
+          # them under /usr/sbin (Fedora's merged sbin hid this locally).
+          for tool in mke2fs debugfs; do
+            [ -x "/usr/bin/$tool" ] || sudo ln -s "$(command -v "$tool")" "/usr/bin/$tool"
+          done
 
       - name: Read pinned Celln release
         id: celln
