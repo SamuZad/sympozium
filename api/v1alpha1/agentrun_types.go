@@ -10,6 +10,7 @@ import (
 // +kubebuilder:validation:XValidation:rule="!has(self.cellnSelection) || (has(self.backend) && self.backend == 'celln' && !has(self.celln))",message="catalogue selection requires backend celln and cannot mix explicit artifacts"
 // +kubebuilder:validation:XValidation:rule="!has(self.executionLifecycle) || self.executionLifecycle != 'enduring' || (has(self.enduring) && has(self.backend) && self.backend == 'celln' && has(self.cellnSelection) && (!has(self.mode) || self.mode == 'task'))",message="enduring lifecycle requires Celln catalogue selection, limits, and task mode"
 // +kubebuilder:validation:XValidation:rule="!has(self.enduring) || (has(self.executionLifecycle) && self.executionLifecycle == 'enduring')",message="enduring limits require enduring lifecycle"
+// +kubebuilder:validation:XValidation:rule="!has(self.conversation) || (has(self.executionLifecycle) && self.executionLifecycle == 'enduring')",message="conversation continuation requires enduring lifecycle"
 // +kubebuilder:validation:XValidation:rule="!has(self.executionLifecycle) || self.executionLifecycle != 'one-shot' || !has(self.mode) || self.mode != 'server'",message="one-shot lifecycle cannot use server mode"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.executionLifecycle) || oldSelf.executionLifecycle != 'enduring' || (has(self.executionLifecycle) && self.executionLifecycle == 'enduring' && has(self.backend) && self.backend == 'celln' && has(self.cellnSelection) && has(self.enduring))",message="an enduring run cannot lose its lifecycle, Celln backend, selection or limits; delete the original run instead"
 type AgentRunSpec struct {
@@ -112,6 +113,13 @@ type AgentRunSpec struct {
 	// allowance. Effective grants may only narrow these requested ceilings.
 	// +optional
 	Enduring *EnduringRunSpec `json:"enduring,omitempty"`
+
+	// Conversation relates an enduring run to the conversation it belongs
+	// to: re-creation after context loss and, for a continued run, the
+	// exchanges it starts with. Immutable once set.
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="conversation is immutable"
+	// +optional
+	Conversation *ConversationSpec `json:"conversation,omitempty"`
 
 	// DryRun skips the LLM call and produces a synthetic result, allowing
 	// pipeline execution paths to be traced without burning tokens.

@@ -440,6 +440,64 @@ spec:
                 - delete
                 - keep
                 type: string
+              conversation:
+                description: |-
+                  Conversation relates an enduring run to the conversation it belongs
+                  to: re-creation after context loss and, for a continued run, the
+                  exchanges it starts with. Immutable once set.
+                properties:
+                  continuation:
+                    description: |-
+                      Continuation decides what happens when this parent's live context is
+                      lost (its node left the fleet, its owner process was replaced):
+                      automatic creates a new run that continues the conversation on any
+                      node with capacity, seeded with the recorded exchanges; none ends it.
+                    enum:
+                    - automatic
+                    - none
+                    type: string
+                  continuesFrom:
+                    description: |-
+                      ContinuesFrom names the run whose conversation this run continues. Set
+                      by the controller (automatic continuation) or the API (a restart); the
+                      transcript travels in Seed so the previous run may already be gone.
+                    maxLength: 253
+                    type: string
+                  depth:
+                    description: |-
+                      Depth counts continuations along the chain so a fleet that keeps
+                      losing nodes cannot re-create a parent forever.
+                    format: int32
+                    maximum: 16
+                    minimum: 0
+                    type: integer
+                  seed:
+                    description: |-
+                      Seed is the memory a continued parent starts with: the committed
+                      exchanges of the conversation so far, oldest first, bounded so a first
+                      message still fits the turn. Text only; never instructions or tools.
+                    items:
+                      description: ConversationExchange is one committed user message
+                        and the answer it got.
+                      properties:
+                        assistant:
+                          maxLength: 2048
+                          type: string
+                        user:
+                          maxLength: 2048
+                          minLength: 1
+                          type: string
+                      required:
+                      - assistant
+                      - user
+                      type: object
+                    maxItems: 16
+                    type: array
+                    x-kubernetes-list-type: atomic
+                type: object
+                x-kubernetes-validations:
+                - message: conversation is immutable
+                  rule: self == oldSelf
               dryRun:
                 description: |-
                   DryRun skips the LLM call and produces a synthetic result, allowing
@@ -3058,6 +3116,9 @@ spec:
             - message: enduring limits require enduring lifecycle
               rule: '!has(self.enduring) || (has(self.executionLifecycle) && self.executionLifecycle
                 == ''enduring'')'
+            - message: conversation continuation requires enduring lifecycle
+              rule: '!has(self.conversation) || (has(self.executionLifecycle) && self.executionLifecycle
+                == ''enduring'')'
             - message: one-shot lifecycle cannot use server mode
               rule: '!has(self.executionLifecycle) || self.executionLifecycle != ''one-shot''
                 || !has(self.mode) || self.mode != ''server'''
@@ -3222,6 +3283,12 @@ spec:
                     x-kubernetes-validations:
                     - message: parent binding is immutable
                       rule: self == oldSelf
+                  continuedBy:
+                    description: |-
+                      ContinuedBy names the run that continues this conversation after its
+                      context was lost; set once by the controller or the API.
+                    maxLength: 253
+                    type: string
                   createAttempted:
                     description: |-
                       CreateAttempted must be persisted before POST. A lost response cannot clear

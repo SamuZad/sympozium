@@ -402,6 +402,30 @@ The first run's only failure was the journey's own port-forward opening into
 the API server pod as the final wiring upgrade replaced it; the journey now
 waits for that rollout.
 
+## A conversation outlives its node (Celln v0.5.20, durable conversations)
+
+A parent's live context lives in its cell on one node. Now a lost or
+stopped parent ends the run, not the conversation: the controller creates a
+continuation run seeded with the recorded exchanges (Celln v0.5.20 delivers
+the seed to the new guest before its first turn) and the gateway places its
+parent on any node with capacity; an operator can force the same move. On
+`fleet-ci` (two backends, 22 tools; journey run 11, 31 checks, exit 0):
+
+| Check | Result |
+| --- | --- |
+| Restart by hand | `POST /api/v1/runs/<run>/continue?uid=…` on the run that wrote `violet` to `notes.txt`: a new run with `spec.conversation.continuesFrom` and the transcript as `seed`, the old run deleted, the new parent Ready, and its resume turn answered "We were discussing writing the word "violet" to notes.txt using a workspace-write tool call." |
+| Node leaves | The node under the run told to remember "saffron" was set `celln.dev/kvm=false`; its owner drained (the parent reported Stopped/ContextLost), the run failed with `status.cellnParent.continuedBy`, and the continuation came up Ready on the **other** worker. |
+| Memory | Asked "Which word did I ask you to remember?", the continued parent answered `saffron`. |
+| Everything else | The 28 earlier checks passed unchanged. |
+
+Three things the first run found, fixed in the same change set: the fleet's
+platform path builds its provision plan in its own function, which did not
+carry the seed (every launch profile on the nodes lacked `history`); a drained
+owner reports `Stopped` rather than `ContextLost`, so continuation now covers
+both (an uncertain teardown still does not continue, the old parent may be
+live); and the node probe re-adds a removed `celln.dev/kvm` label, so a drain
+is `celln.dev/kvm=false`, an explicit value the probe leaves alone.
+
 ## Environment caveats
 
 - Kind nodes have no kernel in `/boot`; the dispatcher's readiness gate

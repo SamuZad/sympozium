@@ -39,7 +39,8 @@ set. The default picks scope `starter`, keeps its records under
 `~/.sympozium/celln-fleet/starter`, approves the starter tools (say so in the
 output), and the node probe labels every node that has `/dev/kvm` and a
 kernel under `/boot` with `celln.dev/kvm=true`; a label an operator set is
-never changed. Every flag below still works and overrides the corresponding
+never changed. To keep such a node out of the fleet, or to drain it, set
+`celln.dev/kvm=false` explicitly: a removed label is added back. Every flag below still works and overrides the corresponding
 default; `--celln-fleet` with your own package keeps the reviewed path.
 
 ## Trust and credentials
@@ -306,6 +307,28 @@ No recompilation. On the packaging machine:
 3. Rebuild the starter package with `--tool-image NAME` and install it as a
    new scope; the fleet's catalogue, policy and every namespace's wrappers
    follow from the package.
+
+## Conversations survive their node
+
+A parent's live context lives in its cell, on one node. When that node leaves
+the fleet or the owner process is replaced, the run reports `ContextLost` and
+the conversation carries on in a **new run**: the controller creates it with
+the same Agent, backend, tools and limits, seeded with the exchanges recorded
+so far (the initial task and its answer, then every succeeded turn), and the
+gateway places its parent on any node with capacity. The lost run ends with
+`status.cellnParent.continuedBy` naming the continuation; the continuation
+carries `spec.conversation.continuesFrom` and `spec.conversation.seed`. Its
+first turn is a fixed resume message, so the new parent shows what it
+remembers before you send anything.
+
+The same move is available on request: **Restart elsewhere** in the UI, or
+`POST /api/v1/runs/{name}/continue?namespace=…&uid=…`, creates the seeded
+continuation and deletes the old run (`keep=true` leaves it). Memory is
+bounded by the parent's turn context (about 2 KiB of text): a long
+conversation keeps its most recent exchanges, and only committed answers are
+remembered, never failed turns, tool output or instructions. A run with
+`spec.conversation.continuation: none` is not re-created; a chain stops after
+16 automatic continuations.
 
 ## Leases and budgets
 

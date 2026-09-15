@@ -46,6 +46,9 @@ type HostProvisionPlan struct {
 	RunUID       string `json:"runUid"`
 	IntentSHA256 string `json:"intentSHA256"`
 	NativeProvisionConfig
+	// History seeds a continued conversation's parent with its past; the
+	// host delivers it once before any turn. Absent for a fresh conversation.
+	History []api.ConversationExchange `json:"history,omitempty"`
 }
 
 // BuildHostProvisionPlan performs no writes or host execution. A trusted caller
@@ -101,7 +104,14 @@ func BuildHostProvisionPlan(ctx context.Context, loader cellnauthority.Loader, i
 	if err != nil {
 		return nil, err
 	}
-	raw, err := json.Marshal(HostProvisionPlan{APIVersion: "celln.parent-provision-plan/v1", Scope: template.Scope, RunUID: string(intent.Selection.Run.UID), IntentSHA256: digest, NativeProvisionConfig: n})
+	var history []api.ConversationExchange
+	if intent.Spec.Conversation != nil && len(intent.Spec.Conversation.Seed) != 0 {
+		if !SeedFits(intent.Spec.Conversation.Seed) {
+			return nil, fmt.Errorf("conversation seed exceeds the parent's context bound")
+		}
+		history = intent.Spec.Conversation.Seed
+	}
+	raw, err := json.Marshal(HostProvisionPlan{APIVersion: "celln.parent-provision-plan/v1", Scope: template.Scope, RunUID: string(intent.Selection.Run.UID), IntentSHA256: digest, NativeProvisionConfig: n, History: history})
 	if err != nil || len(raw) > 65536 {
 		return nil, fmt.Errorf("bounded host provision plan required")
 	}

@@ -257,6 +257,15 @@ func BuildPlatformProvisionPlan(run api.AgentRun, resolution cellnauthority.Plat
 	if plan.IntentSHA256 == "" {
 		return nil, "", fmt.Errorf("decision digest unavailable")
 	}
+	// A continued conversation: the new parent starts with the recorded
+	// exchanges. The decision digest already binds the run's spec, seed
+	// included, so the plan carries it verbatim.
+	if enduring && run.Spec.Conversation != nil && len(run.Spec.Conversation.Seed) != 0 {
+		if !SeedFits(run.Spec.Conversation.Seed) {
+			return nil, "", fmt.Errorf("conversation seed exceeds the parent's context bound")
+		}
+		plan.History = run.Spec.Conversation.Seed
+	}
 	raw, err := json.Marshal(plan)
 	if err != nil || len(raw) > 65536 {
 		return nil, "", fmt.Errorf("bounded platform provision plan required")

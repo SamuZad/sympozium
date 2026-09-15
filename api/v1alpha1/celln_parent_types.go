@@ -61,6 +61,11 @@ type CellnParentStatus struct {
 	// authority and never authorizes reconstruction.
 	// +optional
 	OwnerOutcome *CellnParentOwnerOutcome `json:"ownerOutcome,omitempty"`
+	// ContinuedBy names the run that continues this conversation after its
+	// context was lost; set once by the controller or the API.
+	// +kubebuilder:validation:MaxLength=253
+	// +optional
+	ContinuedBy string `json:"continuedBy,omitempty"`
 }
 
 // CellnParentOwnerOutcome is the immutable failure signature for a parent
