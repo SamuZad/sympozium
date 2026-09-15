@@ -226,7 +226,7 @@ namespace's policy lends exactly those revisions. Two kinds live side by side:
   through host brokers with the quotas the policy shows.
 - **Borrowed commands** are ordinary programs taken from container images
   pinned by digest in Celln's catalogue (`tools.toml`), for example busybox's
-  grep, sed, awk, sort, uniq, wc, cut, head, tail, tr, base64, sha256sum and
+  grep, sed, awk, sort, uniq, wc, cut, head, tail, base64, sha256sum and
   date, and jq. Nothing is reimplemented. Each command's static executable is
   extracted from the pinned image when the package is built and lent inside
   the signed worker closure; the model calls it through the `celln.argv/v1`
@@ -260,7 +260,7 @@ No recompilation. On the packaging machine:
      { name = "csvq", exec = "/usr/bin/csvq", args = ["{query}"], stdin = "csv",
        description = "Run a SQL query over CSV text.",
        params = [ { name = "query", type = "string", required = true, max = 2048 },
-                  { name = "csv", type = "string", required = true, max = 32768 } ] },
+                  { name = "csv", type = "string", required = true, max = 4096 } ] },
    ]
    ```
 
