@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.10.73](https://github.com/sympozium-ai/sympozium/compare/v0.10.72...v0.10.73) (2026-09-15)
+
+
+### Bug Fixes
+
+* **release:** find mke2fs and debugfs on Debian runners ([63ae579](https://github.com/sympozium-ai/sympozium/commit/63ae5797f54dce927877464d218f90ed45e14def))
+* **release:** find mke2fs and debugfs on Debian runners ([26e64f9](https://github.com/sympozium-ai/sympozium/commit/26e64f96666be5ba5a2977060ef0251d35328ddf))
+
 ## [0.10.72](https://github.com/sympozium-ai/sympozium/compare/v0.10.71...v0.10.72) (2026-09-15)
 
 
