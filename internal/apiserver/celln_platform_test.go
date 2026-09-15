@@ -30,6 +30,7 @@ func TestCellnPlatformProfilesAndWrappersFollowTheNamespacePolicy(t *testing.T) 
 	policy := &sympoziumv1alpha1.CellnExecutionPolicy{ObjectMeta: metav1.ObjectMeta{Name: "celln-fleet-trial"}, Spec: sympoziumv1alpha1.CellnExecutionPolicySpec{
 		NamespaceSelector: cellnplatform.OpenSelector(cellnplatform.SystemNamespaces("sympozium-system")),
 		RuntimeProfiles:   []sympoziumv1alpha1.CellnExecutionPolicyRuntime{{Ref: sympoziumv1alpha1.CellnRuntimeProfileRef{Name: profile.Name, Revision: "v1"}}, {Ref: sympoziumv1alpha1.CellnRuntimeProfileRef{Name: local.Name, Revision: "v1"}}},
+		Tools:             []sympoziumv1alpha1.CellnExecutionPolicyTool{{Ref: sympoziumv1alpha1.ClusterCellnToolRef{Name: "celln-trial-workspace-read", Revision: "v1"}}},
 		Routes: []sympoziumv1alpha1.CellnExecutionPolicyRoute{
 			{Provider: "deepseek", Protocol: "openai-chat", Models: []string{"deepseek-chat"}, EndpointOrigins: []string{"https://api.deepseek.com"}, Auth: "host-profile"},
 			{Provider: "llama-server", Protocol: "openai-chat", Models: []string{"qwen.gguf"}, EndpointOrigins: []string{"http://100.81.163.75:8080"}, Auth: "host-profile", AllowInsecure: true},
@@ -59,7 +60,7 @@ func TestCellnPlatformProfilesAndWrappersFollowTheNamespacePolicy(t *testing.T) 
 	for _, p := range got {
 		byName[p.Name] = p
 	}
-	if p := byName["celln-native-trial"]; len(got) != 2 || p.Provider != "deepseek" || p.Model != "deepseek-chat" || p.CredentialProfile != "trial" || p.Backend != "native" || p.Wrapper != "celln-native" || p.Agent != "celln-agent" || p.SystemPrompt != "host persona" || p.Ceilings.LeaseSeconds != 86400 || p.SessionDefaults.LeaseSeconds != 14400 || p.SessionDefaults.MaxTurns != 64 {
+	if p := byName["celln-native-trial"]; len(got) != 2 || p.Provider != "deepseek" || p.Model != "deepseek-chat" || p.CredentialProfile != "trial" || p.Backend != "native" || p.Wrapper != "celln-native" || p.Agent != "celln-agent" || len(p.Tools) != 1 || p.Tools[0].Name != "celln-trial-workspace-read" || p.SystemPrompt != "host persona" || p.Ceilings.LeaseSeconds != 86400 || p.SessionDefaults.LeaseSeconds != 14400 || p.SessionDefaults.MaxTurns != 64 {
 		t.Fatalf("tenant profiles: %+v", got)
 	}
 	if p := byName["celln-native-trial-local"]; p.Provider != "llama-server" || p.Model != "qwen.gguf" || p.CredentialProfile != "trial-local" || p.Backend != "local" || p.Wrapper != "celln-local" || p.Agent != "celln-agent-local" {
@@ -90,5 +91,17 @@ func TestCellnPlatformProfilesAndWrappersFollowTheNamespacePolicy(t *testing.T) 
 	}
 	if res := post("team-a", `{}`); res.Code != http.StatusBadRequest {
 		t.Fatalf("empty profile accepted: %d", res.Code)
+	}
+	// A run on a fleet wrapper that names no persona gets the profile's bound
+	// persona, so the API and UI never trip the plan's persona check.
+	res = httptest.NewRecorder()
+	body := `{"agentRef":"celln-agent","task":"Where is Botswana?","backend":"celln","executionLifecycle":"one-shot","model":"deepseek-chat","modelConnectionRef":"celln-native","cellnSelection":{"runtimeRef":"celln-native","toolRefs":[],"clusterToolRefs":[{"name":"celln-trial-workspace-read","revision":"v1"}]}}`
+	srv.Handler(nil).ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/api/v1/runs?namespace=team-a", strings.NewReader(body)))
+	var run sympoziumv1alpha1.AgentRun
+	if res.Code != http.StatusCreated && res.Code != http.StatusOK || json.Unmarshal(res.Body.Bytes(), &run) != nil {
+		t.Fatalf("one-shot on a wrapper refused: %d %s", res.Code, res.Body.String())
+	}
+	if run.Spec.SystemPrompt != "host persona" || run.Spec.ExecutionLifecycle != "one-shot" || run.Spec.Enduring != nil || run.Spec.CellnSelection == nil || run.Spec.CellnSelection.RuntimeRef != "celln-native" {
+		t.Fatalf("run did not inherit the profile's persona as a platform one-shot: %+v", run.Spec)
 	}
 }

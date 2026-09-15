@@ -194,7 +194,12 @@ task once, the run succeeds with that answer as its `status.result`, and
 the parent is stopped so its cells return to the node. A one-shot takes no
 follow-up turns; ask again with a new run.
 
-The API call is an enduring conversation minus the lifecycle and lease:
+In the UI, an Agent's Harness tab has a **Model backend** picker listing
+every backend the namespace's fleet offers (provider, model, protocol);
+choosing one creates the backend's wrapper objects on first use and rebinds
+the Agent to it. The conversation panel's **Answer once** box sends the next
+message as a one-shot. The API call is an enduring conversation minus the
+lifecycle and lease (the profile's persona is filled in when omitted):
 
 ```sh
 curl -X POST "$API/api/v1/runs?namespace=team-a" -d '{

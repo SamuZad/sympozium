@@ -10,11 +10,13 @@ import {
   useSetHarnessSessionState,
   useRuntimes,
   useRuns,
+  useCellnPlatformProfiles,
 } from "@/hooks/use-api";
 import { HarnessSessionChatDialog } from "@/components/harness-session-dialog";
 import { CellnAgentConversation } from "@/components/celln-agent-conversation";
 import { CellnStarterTools } from "@/components/celln-starter-tools";
 import { CellnPermissionPreview } from "@/components/celln-permission-preview";
+import { CellnBackendPicker, backendLabel } from "@/components/celln-backend-picker";
 import { StatusBadge } from "@/components/status-badge";
 import { GithubAuthDialog } from "@/components/github-auth-dialog";
 import {
@@ -522,6 +524,7 @@ function AgentRuntimeCard({ inst, runtimes }: { inst: Agent; runtimes: import("@
   const patchAgent = usePatchAgent();
   const catalogue = useCellnTools();
   const capabilities = useCapabilities();
+  const platformProfiles = useCellnPlatformProfiles();
   const selected = inst.spec.runtimeRef || "none";
   const selectedRuntime = runtimes.find((runtime) => runtime.metadata.name === (inst.spec.runtimeRef || ""));
   const execution = inst.spec.execution;
@@ -529,8 +532,21 @@ function AgentRuntimeCard({ inst, runtimes }: { inst: Agent; runtimes: import("@
   const lifecycle =
     execution?.executionLifecycle || (backend === "celln" ? "enduring" : "one-shot");
   const tools = execution?.cellnSelection?.toolRefs || [];
-  const compatibleHarness = selectedRuntime?.spec.celln?.contractVersion === "celln.json-tools/v1";
+  // A fleet wrapper (cellnProfileRef) is native Celln too: its tools and model
+  // route come from the shared platform policy rather than namespace grants.
+  const wrapperRuntime = !!selectedRuntime?.spec.cellnProfileRef;
+  const wrapperProfile = wrapperRuntime ? (platformProfiles.data || []).find((profile) => profile.name === selectedRuntime?.spec.cellnProfileRef?.name) : undefined;
+  const compatibleHarness = selectedRuntime?.spec.celln?.contractVersion === "celln.json-tools/v1" || wrapperRuntime;
   const hasSkills = !!inst.spec.skills?.length;
+  // Every save keeps the selection's runtime and shared tools; only the
+  // borrowed (namespaced) tool list is what the card edits.
+  const selectionWith = (toolRefs: typeof tools) => ({ ...(execution?.cellnSelection || {}), toolRefs });
+  const enduringDefaults = execution?.enduring || wrapperProfile?.sessionDefaults || { leaseSeconds: 600, maxTurns: 8, maxModelRequests: 24, maxOutputTokens: 8192 };
+  const runtimeLabel = (runtime: import("@/lib/api").AgentRuntime) => {
+    const profile = runtime.spec.cellnProfileRef ? (platformProfiles.data || []).find((candidate) => candidate.name === runtime.spec.cellnProfileRef?.name) : undefined;
+    if (profile) return `${runtime.metadata.name} — fleet backend ${backendLabel(profile)}`;
+    return `${runtime.metadata.name}${runtime.spec.supportOwner ? ` — ${runtime.spec.supportOwner}` : ""}${runtime.spec.celln?.contractVersion === "celln.json-tools/v1" ? " · native Celln" : ""}`;
+  };
 
   function saveExecution(next: AgentExecutionDefaults | undefined) {
     if (!next) {
@@ -572,9 +588,9 @@ function AgentRuntimeCard({ inst, runtimes }: { inst: Agent; runtimes: import("@
                     executionLifecycle: nextLifecycle,
                     provider: execution?.modelConnectionRef ? undefined : execution?.provider || "deepseek",
                     modelConnectionRef: execution?.modelConnectionRef,
-                    model: execution?.model || "deepseek-chat",
-                    cellnSelection: { toolRefs: tools },
-                    enduring: nextLifecycle === "enduring" ? (execution?.enduring || { leaseSeconds: 600, maxTurns: 8, maxModelRequests: 24, maxOutputTokens: 8192 }) : undefined,
+                    model: execution?.model || wrapperProfile?.model || "deepseek-chat",
+                    cellnSelection: selectionWith(tools),
+                    enduring: nextLifecycle === "enduring" ? enduringDefaults : undefined,
                   });
                 }}
               >
@@ -608,7 +624,7 @@ function AgentRuntimeCard({ inst, runtimes }: { inst: Agent; runtimes: import("@
               <SelectItem value="none">Built-in agent-runner</SelectItem>
               {runtimes.map((runtime) => (
                 <SelectItem key={runtime.metadata.name} value={runtime.metadata.name}>
-                  {runtime.metadata.name}{runtime.spec.supportOwner ? ` — ${runtime.spec.supportOwner}` : ""}{runtime.spec.celln?.contractVersion === "celln.json-tools/v1" ? " · native Celln" : ""}
+                  {runtimeLabel(runtime)}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -617,15 +633,18 @@ function AgentRuntimeCard({ inst, runtimes }: { inst: Agent; runtimes: import("@
           {backend === "celln" && !compatibleHarness && <p role="alert" className="text-xs text-red-400">Celln defaults need a harness that declares celln.json-tools/v1.</p>}
         </div>
 
+        {backend === "celln" && <CellnBackendPicker agent={inst} runtimes={runtimes} />}
+
         {backend === "celln" && (
           <div className="space-y-3 rounded-md border p-3">
             <Label>Default lifecycle</Label>
-            <div className="flex gap-3 text-sm">
-              {(["one-shot", "enduring"] as const).map((value) => (
-                <label key={value} className="flex items-center gap-2">
+            <div className="grid gap-2 sm:grid-cols-2 text-sm" data-testid="agent-lifecycle">
+              {([["one-shot", "One-shot", "Answers once on a single-turn parent, then releases its cells."], ["enduring", "Enduring", "A conversation: the parent keeps its context for the lease and takes follow-up turns."]] as const).map(([value, title, description]) => (
+                <label key={value} className={`flex items-start gap-2 rounded-md border p-3 ${lifecycle === value ? "border-primary bg-primary/5" : "border-border"}`}>
                   <input
                     type="radio"
                     name="agent-lifecycle"
+                    className="mt-1"
                     checked={lifecycle === value}
                     disabled={patchAgent.isPending}
                     onChange={() => saveExecution({
@@ -633,15 +652,26 @@ function AgentRuntimeCard({ inst, runtimes }: { inst: Agent; runtimes: import("@
                       executionLifecycle: value,
                       provider: execution?.modelConnectionRef ? undefined : execution?.provider || "deepseek",
                       modelConnectionRef: execution?.modelConnectionRef,
-                      model: execution?.model || "deepseek-chat",
-                      cellnSelection: { toolRefs: tools },
-                      enduring: value === "enduring" ? (execution?.enduring || { leaseSeconds: 600, maxTurns: 8, maxModelRequests: 24, maxOutputTokens: 8192 }) : undefined,
+                      model: execution?.model || wrapperProfile?.model || "deepseek-chat",
+                      cellnSelection: selectionWith(tools),
+                      enduring: value === "enduring" ? enduringDefaults : undefined,
                     })}
                   />
-                  {value}
+                  <span>
+                    <span className="font-medium">{title}</span>
+                    <span className="block text-xs text-muted-foreground">{description}</span>
+                  </span>
                 </label>
               ))}
             </div>
+            {wrapperRuntime ? (
+              <div className="space-y-1" data-testid="agent-shared-tools">
+                <Label>Shared tools (from the fleet policy)</Label>
+                <p className="text-xs text-muted-foreground">
+                  {(execution?.cellnSelection?.clusterToolRefs?.length ? execution.cellnSelection.clusterToolRefs : wrapperProfile?.tools || []).map((tool) => tool.name).join(", ") || "none"}. Lent by the platform policy; nothing is copied into this namespace.
+                </p>
+              </div>
+            ) : (
             <div className="space-y-2">
               <Label>Approved borrowed tools (default)</Label>
               <p className="text-xs text-muted-foreground">An explicit empty selection lends no tools and is distinct from leaving defaults unset. Starter suggestions do not grant permission.</p>
@@ -652,8 +682,8 @@ function AgentRuntimeCard({ inst, runtimes }: { inst: Agent; runtimes: import("@
                   provider: execution?.modelConnectionRef ? undefined : execution?.provider || "deepseek",
                   modelConnectionRef: execution?.modelConnectionRef,
                   model: execution?.model || "deepseek-chat",
-                  cellnSelection: { toolRefs },
-                  enduring: lifecycle === "enduring" ? (execution?.enduring || { leaseSeconds: 600, maxTurns: 8, maxModelRequests: 24, maxOutputTokens: 8192 }) : undefined,
+                  cellnSelection: selectionWith(toolRefs),
+                  enduring: lifecycle === "enduring" ? enduringDefaults : undefined,
                 })} />
               )}
               {compatibleHarness && <CellnPermissionPreview enduring={lifecycle === "enduring"} agentRef={inst.metadata.name} selection={{ runtimeRef: inst.spec.runtimeRef || undefined, toolRefs: tools }} />}
@@ -663,10 +693,11 @@ function AgentRuntimeCard({ inst, runtimes }: { inst: Agent; runtimes: import("@
                 provider: execution?.modelConnectionRef ? undefined : execution?.provider || "deepseek",
                 modelConnectionRef: execution?.modelConnectionRef,
                 model: execution?.model || "deepseek-chat",
-                cellnSelection: { toolRefs: [] },
-                enduring: lifecycle === "enduring" ? (execution?.enduring || { leaseSeconds: 600, maxTurns: 8, maxModelRequests: 24, maxOutputTokens: 8192 }) : undefined,
+                cellnSelection: selectionWith([]),
+                enduring: lifecycle === "enduring" ? enduringDefaults : undefined,
               })}>Set explicit empty tools</Button>
             </div>
+            )}
           </div>
         )}
 

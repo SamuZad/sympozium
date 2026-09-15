@@ -208,14 +208,14 @@ func BuildPlatformProvisionPlan(run api.AgentRun, resolution cellnauthority.Plat
 		return nil, "", fmt.Errorf("runtime profile native template is not a supported JSON harness")
 	}
 	if harness.System != native.SystemPrompt || run.Spec.SystemPrompt != native.SystemPrompt {
-		return nil, "", fmt.Errorf("run persona differs from the runtime profile's bound persona")
+		return nil, "", cellnauthority.Refuse(cellnauthority.ReasonPolicyContracted, "run persona differs from the runtime profile's bound persona; send the profile's systemPrompt verbatim")
 	}
 	origin, err := api.ModelEndpointOriginInsecure(harness.URL, true)
 	if err != nil || harness.Model != d.Route.Model || origin != d.Route.EndpointOrigin {
-		return nil, "", fmt.Errorf("runtime profile model route differs from the resolved route")
+		return nil, "", cellnauthority.Refuse(cellnauthority.ReasonPolicyContracted, "runtime profile model route differs from the resolved route")
 	}
 	if harness.RequireToolCall != requireToolCall {
-		return nil, "", fmt.Errorf("runtime profile tool-call requirement differs from run intent")
+		return nil, "", cellnauthority.Refuse(cellnauthority.ReasonPolicyContracted, "runtime profile tool-call requirement differs from run intent")
 	}
 	if !hashPattern.MatchString(native.ModelProfile) || native.ReservedMemoryBytes < 1 || native.AdmissionWindowMs < 1 || native.TurnModelRequests < 1 || native.TurnOutputTokens < 1 {
 		return nil, "", fmt.Errorf("runtime profile native material is incomplete")

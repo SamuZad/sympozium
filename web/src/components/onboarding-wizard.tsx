@@ -1151,11 +1151,14 @@ export function OnboardingWizard({
             >
               <SelectTrigger><SelectValue placeholder={celln ? "Choose native Celln runtime" : "Choose Pi or Hermes"} /></SelectTrigger>
               <SelectContent>
-                {selectableRuntimes.map((runtime) => (
+                {selectableRuntimes.map((runtime) => {
+                  const profile = runtime.spec.cellnProfileRef ? (platformProfiles.data || []).find((candidate) => candidate.name === runtime.spec.cellnProfileRef?.name) : undefined;
+                  return (
                   <SelectItem key={runtime.metadata.name} value={runtime.metadata.name}>
-                    {celln ? runtime.metadata.name : `${persistentHarnessName(runtime)} — persistent chat`}
+                    {celln ? (profile ? `${runtime.metadata.name} — fleet backend ${profile.backend} (${profile.provider} / ${profile.model})` : runtime.metadata.name) : `${persistentHarnessName(runtime)} — persistent chat`}
                   </SelectItem>
-                ))}
+                  );
+                })}
               </SelectContent>
             </Select>
             {form.runtimeRef ? (

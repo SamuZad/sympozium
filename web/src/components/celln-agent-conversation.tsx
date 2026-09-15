@@ -28,6 +28,9 @@ export function CellnAgentConversation({
   const [error, setError] = useState("");
   const [selected, setSelected] = useState<string>("");
   const [composing, setComposing] = useState(false);
+  // "Answer once" sends the message as a one-shot: a single-turn parent that
+  // answers and releases its cells, on the same backend as a conversation.
+  const [once, setOnce] = useState(false);
 
   const execution = agent.spec.execution;
   const runtimeRef =
@@ -39,8 +42,9 @@ export function CellnAgentConversation({
   const provider = modelConnectionRef ? undefined : execution?.provider;
   // An Agent created before session defaults existed carries no budget; take
   // the platform profile's suggestion when there is one, else the legacy one.
-  const profiles = useCellnPlatformProfiles(!execution?.enduring);
-  const platformDefaults = profiles.data?.find((profile) => profile.wrapper === runtimeRef)?.sessionDefaults;
+  const profiles = useCellnPlatformProfiles();
+  const platformProfile = profiles.data?.find((profile) => profile.wrapper === runtimeRef);
+  const platformDefaults = platformProfile?.sessionDefaults;
   const limits = execution?.enduring || platformDefaults || LEGACY_ENDURING_DEFAULTS;
 
   const current = parents.find((run) => run.metadata.name === selected) || parents[0];
@@ -55,13 +59,15 @@ export function CellnAgentConversation({
         agentRef: agent.metadata.name,
         task: text,
         backend: "celln",
+        // A fleet profile binds its persona; the run must carry it verbatim.
+        ...(platformProfile?.systemPrompt ? { systemPrompt: platformProfile.systemPrompt } : {}),
         model: model || undefined,
         modelConnectionRef,
         provider,
         cellnSelection: { runtimeRef: runtimeRef || undefined, toolRefs, ...(clusterToolRefs.length ? { clusterToolRefs } : {}) },
-        timeout: `${limits.leaseSeconds}s`,
-        executionLifecycle: "enduring",
-        enduring: limits,
+        ...(once
+          ? { executionLifecycle: "one-shot" as const }
+          : { timeout: `${limits.leaseSeconds}s`, executionLifecycle: "enduring" as const, enduring: limits }),
       },
       {
         onSuccess: (run) => {
@@ -138,12 +144,22 @@ export function CellnAgentConversation({
             placeholder="Ask the parent a question to begin…"
           />
         </label>
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            data-testid="celln-agent-once"
+            checked={once}
+            onChange={(event) => setOnce(event.target.checked)}
+            disabled={createRun.isPending}
+          />
+          Answer once (one-shot: no follow-up turns, cells released after the answer)
+        </label>
         <Button
           data-testid="celln-agent-start"
           onClick={start}
           disabled={createRun.isPending || message.trim().length === 0}
         >
-          {createRun.isPending ? "Starting…" : "Start conversation"}
+          {createRun.isPending ? "Starting…" : once ? "Ask once" : "Start conversation"}
         </Button>
         {error && (
           <p role="alert" className="text-sm text-destructive">
