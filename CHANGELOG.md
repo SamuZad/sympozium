@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.10.75](https://github.com/sympozium-ai/sympozium/compare/v0.10.74...v0.10.75) (2026-09-15)
+
+
+### Features
+
+* **celln:** a conversation outlives its node — continue a lost parent elsewhere with its memory ([7a21e97](https://github.com/sympozium-ai/sympozium/commit/7a21e970fe0aa7f1ae6116725e3a8e64cc0cba56))
+* **celln:** a conversation outlives its node — continue a lost parent elsewhere with its memory ([b41f7f0](https://github.com/sympozium-ai/sympozium/commit/b41f7f083268180d01a8b6b305e81c8b33840473))
+
 ## [0.10.74](https://github.com/sympozium-ai/sympozium/compare/v0.10.73...v0.10.74) (2026-09-15)
 
 
