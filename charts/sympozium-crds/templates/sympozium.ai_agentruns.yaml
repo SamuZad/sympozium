@@ -226,7 +226,7 @@ spec:
                           - name
                           - path
                           type: object
-                        maxItems: 16
+                        maxItems: 24
                         minItems: 0
                         type: array
                       contractVersion:
@@ -388,7 +388,7 @@ spec:
                       - name
                       - revision
                       type: object
-                    maxItems: 16
+                    maxItems: 24
                     type: array
                     x-kubernetes-list-type: atomic
                   runtimeRef:
@@ -415,7 +415,7 @@ spec:
                       - name
                       - revision
                       type: object
-                    maxItems: 16
+                    maxItems: 24
                     type: array
                     x-kubernetes-list-type: atomic
                 required:

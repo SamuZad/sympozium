@@ -19,13 +19,13 @@ type CellnCatalogueSelection struct {
 	// +kubebuilder:validation:Pattern="^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
 	// +optional
 	RuntimeRef string `json:"runtimeRef,omitempty"`
-	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:MaxItems=24
 	// +listType=atomic
 	ToolRefs []CellnCatalogueToolRef `json:"toolRefs"`
 	// ClusterToolRefs selects exact shared catalogue revisions. Empty means no
 	// shared tools, not every installed tool.
 	// +optional
-	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:MaxItems=24
 	// +listType=atomic
 	ClusterToolRefs []ClusterCellnToolRef `json:"clusterToolRefs,omitempty"`
 }
@@ -71,7 +71,7 @@ type CellnHarnessSpec struct {
 	ContractVersion string            `json:"contractVersion"`
 	ModelGrant      CellnImmutableRef `json:"modelGrant"`
 	// +kubebuilder:validation:MinItems=0
-	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:MaxItems=24
 	BorrowedTools []CellnBorrowedTool `json:"borrowedTools"`
 	// +optional
 	JSON *CellnHarnessJSONLimits `json:"json,omitempty"`

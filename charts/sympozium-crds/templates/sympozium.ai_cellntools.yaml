@@ -130,9 +130,16 @@ spec:
                         minimum: 1
                         type: integer
                       operation:
+                        description: |-
+                          Operation is what the broker performs: read, list and search follow the
+                          profile's read grant; write, append and delete follow its write grant.
                         enum:
                         - read
                         - write
+                        - list
+                        - append
+                        - search
+                        - delete
                         type: string
                     required:
                     - maxFileBytes

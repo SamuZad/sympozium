@@ -67,7 +67,17 @@ type FleetOptions struct {
 	Backends []FleetBackend
 	// Limits are the scope's parent ceilings; zero fields take DefaultFleetLimits.
 	Limits FleetLimits
+	// HTTPSHosts are the exact hosts the https-fetch and https-post-json
+	// starter tools may reach; empty keeps Celln's reviewed default, example.com.
+	HTTPSHosts []string
 }
+
+// StarterToolNames are Celln's own brokered tools, in the order the starter
+// package bundles them. Every other catalogue tool is a command borrowed from
+// a pinned image.
+var StarterToolNames = []string{"workspace-read", "workspace-write", "https-fetch", "workspace-list", "workspace-append", "workspace-search", "workspace-delete", "https-post-json"}
+
+var httpsHostPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?)+$`)
 
 // FleetBackend is one model backend of a scope: a DNS-label name, its route
 // and the local file holding its provider key (empty for keyless backends).
@@ -245,6 +255,14 @@ func (o FleetOptions) validate() error {
 		o.Principal == "" || o.Publisher == "" || strings.ContainsAny(identities, " \t\r\n,=") {
 		return fmt.Errorf("fleet requires a DNS-label scope, a digest-pinned package image, a blake3 package hash, a publisher and a principal")
 	}
+	if len(o.HTTPSHosts) > 16 {
+		return fmt.Errorf("at most 16 HTTPS hosts")
+	}
+	for _, host := range o.HTTPSHosts {
+		if len(host) > 253 || !httpsHostPattern.MatchString(host) {
+			return fmt.Errorf("HTTPS host %q must be a lowercase DNS name", host)
+		}
+	}
 	return nil
 }
 
@@ -262,7 +280,10 @@ func FleetValues(o FleetOptions) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	values := make([]string, 0, 16+8*len(backends))
+	values := make([]string, 0, 16+8*len(backends)+len(o.HTTPSHosts))
+	for i, host := range o.HTTPSHosts {
+		values = append(values, fmt.Sprintf("celln.fleet.httpsHosts[%d]=%s", i, host))
+	}
 	for i, b := range backends {
 		prefix := fmt.Sprintf("celln.fleet.backends[%d].", i)
 		values = append(values,

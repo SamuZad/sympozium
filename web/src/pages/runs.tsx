@@ -396,7 +396,7 @@ export function RunsPage() {
                         <p className="text-xs">Max turns includes the initial message. Initial message: {new TextEncoder().encode(form.task).length}/2048 UTF-8 bytes. Context is retained while the parent lives, not restored after a crash.</p>
                         {invalidParent && <p role="alert" className="text-xs text-red-400">Correct the bounded integer limits or initial message before submitting.</p>}
                       </div>}
-                      <Label>Borrowed catalogue tools (optional, maximum 16)</Label>
+                      <Label>Borrowed catalogue tools (optional, maximum 24)</Label>
                       {enduringRequest && compatibleHarness && !catalogue.isLoading && !catalogue.isError && <CellnStarterTools agentRef={form.agentRef} runtimeRef={form.runtimeRef || undefined} catalogue={catalogue.data || []} onSelect={setLentTools} />}
                       <p className="text-xs text-muted-foreground" data-testid="celln-tools-explanation">Choose the tools this Harness may request. Selections are pinned to this run; installing a tool does not grant permission to use it. Agent, runtime and operator approvals must all allow it.</p>
                       <p className="text-xs text-muted-foreground">Only installed catalogue tools appear below. Shell, Python, general HTTP access and workspace read/write are not implicitly included. Adding tools to an existing enduring parent requires a new run.</p>
@@ -407,7 +407,7 @@ export function RunsPage() {
                         const checked = lentTools.some((ref) => ref.name === tool.metadata.name && ref.revision === tool.spec.revision);
                         const supported = (tool.spec.invocationABI === "celln.json-stdio/v1" || tool.spec.invocationABI === "celln.argv/v1") && tool.spec.lane === "tool";
                         return <label key={tool.metadata.uid || tool.metadata.name} className="block space-y-1 rounded border p-2 text-xs">
-                          <span className="flex items-center gap-2"><input type="checkbox" checked={checked} disabled={!compatibleHarness || !supported || (!checked && lentTools.length >= 16)} onChange={() => setLentTools(checked ? lentTools.filter((ref) => ref.name !== tool.metadata.name) : [...lentTools, { name: tool.metadata.name, revision: tool.spec.revision }])} />
+                          <span className="flex items-center gap-2"><input type="checkbox" checked={checked} disabled={!compatibleHarness || !supported || (!checked && lentTools.length >= 24)} onChange={() => setLentTools(checked ? lentTools.filter((ref) => ref.name !== tool.metadata.name) : [...lentTools, { name: tool.metadata.name, revision: tool.spec.revision }])} />
                             <span>{tool.metadata.name}@{tool.spec.revision}{!supported ? " — unsupported ABI/lane" : ""}</span></span>
                           <span className="block text-muted-foreground">{tool.spec.description}{tool.spec.sourceImage ? ` · from ${tool.spec.sourceImage.replace(/@sha256:([0-9a-f]{12})[0-9a-f]*$/, "@sha256:$1…")}` : ""}</span>
                           <span className="block text-muted-foreground">Support owner: {tool.spec.supportOwner}</span>

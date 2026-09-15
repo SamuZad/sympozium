@@ -103,7 +103,7 @@ func readBackendConfiguration(dir, backend, packageHash, principal string) (back
 	if c.PackageHash != packageHash || c.CatalogueHash != hashes["catalogue.json"] || c.NativeTemplateHash != hashes["native-template.json"] {
 		return b, fmt.Errorf("backend %s: configuration differs from reviewed package/receipt", backend)
 	}
-	if c.APIVersion != "celln.native-starter-configured/v1" || c.ExecutionAuthorized || c.Readiness != "not_established" || b.native.ModelProfile != c.ModelProfile || c.Principal != principal || len(b.cat.Tools) < 3 || len(b.cat.Tools) > 16 || b.cat.Worker.ContractVersion != "celln.json-tools/v1" {
+	if c.APIVersion != "celln.native-starter-configured/v1" || c.ExecutionAuthorized || c.Readiness != "not_established" || b.native.ModelProfile != c.ModelProfile || c.Principal != principal || len(b.cat.Tools) < 3 || len(b.cat.Tools) > 24 || b.cat.Worker.ContractVersion != "celln.json-tools/v1" {
 		return b, fmt.Errorf("backend %s: operator starter configuration mismatch", backend)
 	}
 	if json.Unmarshal(b.native.Template, &b.harness) != nil || b.harness.Contract != "celln.json-tools/v1" || b.harness.System != b.cat.SystemPrompt || b.harness.Model != c.Model.Model {

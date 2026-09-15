@@ -221,12 +221,20 @@ lifecycle.
 Every run on the fleet borrows tools from the scope's package, and the
 namespace's policy lends exactly those revisions. Two kinds live side by side:
 
-- **Brokered tools** are Celln's own: `workspace-read`, `workspace-write` and
-  `https-fetch`. They are the only way a cell touches files or the network,
-  through host brokers with the quotas the policy shows.
+- **Brokered tools** are Celln's own, eight of them: the run's files through
+  `workspace-read`, `workspace-write`, `workspace-list`, `workspace-append`,
+  `workspace-search` (exact substring, file and line back) and
+  `workspace-delete`, and the network through `https-fetch` (GET) and
+  `https-post-json` (a JSON object, given as text, posted with no credential).
+  They are the only way a cell touches files or the network, through host
+  brokers with the quotas the policy shows: every write-like operation is an
+  approved effect, reads are not. The hosts the two HTTPS tools may reach are
+  the scope's `--celln-fleet-https-host` list (default `example.com`); a
+  backend approved with `allow-insecure` may also post over plain HTTP to a
+  private host, for example a receiver inside the cluster.
 - **Borrowed commands** are ordinary programs taken from container images
   pinned by digest in Celln's catalogue (`tools.toml`), for example busybox's
-  grep, sed, awk, sort, uniq, wc, cut, head, tail, base64, sha256sum and
+  grep, sed, awk, sort, uniq, wc, cut, head, tail, tr, base64, sha256sum and
   date, and jq. Nothing is reimplemented. Each command's static executable is
   extracted from the pinned image when the package is built and lent inside
   the signed worker closure; the model calls it through the `celln.argv/v1`
@@ -243,7 +251,7 @@ celln --root /var/lib/celln-packaging starter-package ... \
 ```
 
 The images are pulled once into that root's image store and verified by
-digest. A worker carries at most 16 tools (3 brokered plus 13 commands).
+digest. A worker carries at most 24 tools (8 brokered plus 16 commands).
 
 ### Extending the toolbox
 

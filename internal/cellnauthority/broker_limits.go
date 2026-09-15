@@ -7,12 +7,19 @@ import (
 	api "github.com/sympozium-ai/sympozium/api/v1alpha1"
 )
 
+// ArtifactOperations are the run-data operations a brokered tool may declare;
+// ArtifactWrites are those that change run data and so need declared effects.
+var (
+	ArtifactOperations = map[string]bool{"read": true, "write": true, "list": true, "append": true, "search": true, "delete": true}
+	ArtifactWrites     = map[string]bool{"write": true, "append": true, "delete": true}
+)
+
 func validateBrokerLimits(l api.CellnToolLimits) error {
 	if l.Artifacts != nil && l.HTTPS != nil {
 		return fmt.Errorf("one broker capability per starter tool required")
 	}
 	if a := l.Artifacts; a != nil {
-		if (a.Operation != "read" && a.Operation != "write") || a.MaxOperations < 1 || a.MaxOperations > 64 || a.MaxFiles < 1 || a.MaxFiles > 256 || a.MaxFileBytes < 1 || a.MaxFileBytes > 4096 || a.MaxTotalBytes < a.MaxFileBytes || a.MaxTotalBytes > 1048576 || (a.Operation == "write" && l.Effects != "external-side-effects") {
+		if !ArtifactOperations[a.Operation] || a.MaxOperations < 1 || a.MaxOperations > 64 || a.MaxFiles < 1 || a.MaxFiles > 256 || a.MaxFileBytes < 1 || a.MaxFileBytes > 4096 || a.MaxTotalBytes < a.MaxFileBytes || a.MaxTotalBytes > 1048576 || (ArtifactWrites[a.Operation] && l.Effects != "external-side-effects") {
 			return fmt.Errorf("invalid run-artifact broker limits")
 		}
 	}

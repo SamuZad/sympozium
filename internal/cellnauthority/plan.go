@@ -49,7 +49,7 @@ func prepare(snapshot SelectionSnapshot, imageBytes int64, allowBroker bool) (*P
 		return nil, fmt.Errorf("invalid or unsupported JSON runtime profile")
 	}
 	l := p.Limits
-	if l.TimeoutMillis < 1 || l.TimeoutMillis > 300000 || l.MemoryBytes < 1 || l.MemoryBytes > 268435456 || l.TaskBytes < 1 || l.TaskBytes > 2048 || l.OutputBytes < 1 || l.OutputBytes > 65536 || l.Workspace != "none" || len(snapshot.Tools) > 16 {
+	if l.TimeoutMillis < 1 || l.TimeoutMillis > 300000 || l.MemoryBytes < 1 || l.MemoryBytes > 268435456 || l.TaskBytes < 1 || l.TaskBytes > 2048 || l.OutputBytes < 1 || l.OutputBytes > 65536 || l.Workspace != "none" || len(snapshot.Tools) > 24 {
 		return nil, fmt.Errorf("invalid runtime ceilings")
 	}
 	if imageBytes < 33554432 || imageBytes > 536870912 || imageBytes%2097152 != 0 {
