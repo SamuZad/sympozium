@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.10.74](https://github.com/sympozium-ai/sympozium/compare/v0.10.73...v0.10.74) (2026-09-15)
+
+
+### Features
+
+* **install:** every provider key in the environment becomes a backend ([4b4d464](https://github.com/sympozium-ai/sympozium/commit/4b4d4642cfcd5d5ae393be9a1b9ef10899cfc054))
+* **install:** every provider key in the environment becomes a backend ([63666c4](https://github.com/sympozium-ai/sympozium/commit/63666c468fdfb287153e6f76df2c1c82f2fde543))
+
 ## [0.10.73](https://github.com/sympozium-ai/sympozium/compare/v0.10.72...v0.10.73) (2026-09-15)
 
 
