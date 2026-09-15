@@ -50,7 +50,7 @@ jobs:
           printf '%s  native-dist/celln.tar.gz\n' "$CELLN_SHA256" | sha256sum --check
           tar -xzf native-dist/celln.tar.gz -C native-dist/package
           native-dist/package/bin/celln --version
-          for binary in celln-pilot pilot-fetch celln-harness-parent celln-harness-turn celln-workspace-read celln-workspace-write celln-https-fetch; do
+          for binary in celln-pilot pilot-fetch celln-harness-parent celln-harness-turn celln-workspace-read celln-workspace-write celln-https-fetch celln-workspace-list celln-workspace-append celln-workspace-search celln-workspace-delete celln-https-post-json; do
             test -x "native-dist/package/share/celln/pilot/$binary"
             if readelf -l "native-dist/package/share/celln/pilot/$binary" | grep -q INTERP; then
               echo "Native guest binary is not static: $binary" >&2

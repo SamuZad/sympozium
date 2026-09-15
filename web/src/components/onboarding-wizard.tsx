@@ -1186,7 +1186,7 @@ export function OnboardingWizard({
                 kind="harness"
                 value={form.executionBackend || "job"}
                 disabledPlanes={nativeRuntimes.length === 0 ? ["celln"] : []}
-                disabledHint={{ celln: "Needs the native Celln install — not the one-shot router" }}
+                disabledHint={{ celln: "Needs the Celln fleet (sympozium install --celln-fleet …); the one-shot router alone does not run parents" }}
                 onChange={(plane) => {
                   toolsInitialized.current = false;
                   const planeRuntimes = plane === "celln" ? nativeRuntimes : persistentRuntimes;
@@ -1220,7 +1220,7 @@ export function OnboardingWizard({
                 <p role="status" className="text-xs text-amber-500">No persistent Pi or Hermes harness is installed in this namespace. Install the default harnesses{nativeRuntimes.length > 0 ? ", or choose Celln parent" : ""}.</p>
               )}
               {nativeRuntimes.length === 0 && (
-                <p role="status" className="text-xs text-amber-500">The <strong>Celln parent</strong> plane runs an enduring AgentHarness and needs a <strong>native Celln runtime</strong> registered in <em>this</em> namespace. That is a <em>separate operator install</em> from the one-shot Celln router + dispatcher that powers Runs — a running router does not provide it. Install it with <code className="break-all">sympozium install --celln-native …</code>, or use <strong>New Run → Celln cell</strong> for a single sealed computation.</p>
+                <p role="status" className="text-xs text-amber-500">The <strong>Celln parent</strong> plane runs the native harness inside a hardware-isolated cell on the Celln fleet. This cluster has no fleet yet: the plain install only deploys the one-shot router that powers <strong>New Run → Celln cell</strong>. An operator enables parents for every namespace with <code className="break-all">sympozium install --celln-fleet --celln-fleet-backend name=native,provider=… </code> and by labelling KVM nodes <code>celln.dev/kvm=true</code>; see the <a className="underline" href="https://github.com/sympozium-ai/sympozium/blob/main/docs/guides/celln-fleet-installation.md" target="_blank" rel="noreferrer">fleet installation guide</a>. Pi and Hermes run on the Kubernetes plane; the Celln parent runs the native harness with the fleet's toolbox.</p>
               )}
               {form.executionBackend === "celln" && (
                 <div className="space-y-2 rounded-md border p-3">
