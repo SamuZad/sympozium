@@ -148,7 +148,8 @@ certManager:
 # simply absent from the UI.
 #
 # ergoz (a collector for accelerator power draw) is the reference
-# implementation and ships in `ergoz-system`. It is not privileged by
+# implementation and ships in `ergoz-system`; `sympozium install` deploys
+# the pinned release there by default (--no-ergoz skips it). It is not privileged by
 # sympozium in any way: anything serving the same fleet-snapshot shape works,
 # and no implementation name appears anywhere in the controller or apiserver.
 energyCollector:

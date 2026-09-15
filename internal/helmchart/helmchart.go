@@ -2,6 +2,8 @@
 package helmchart
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"fmt"
 	"io/fs"
 
@@ -9,6 +11,7 @@ import (
 	"helm.sh/helm/v3/pkg/chart/loader"
 
 	"github.com/sympozium-ai/sympozium/charts"
+	"github.com/sympozium-ai/sympozium/config/ergoz"
 )
 
 // Load returns the embedded Sympozium Helm chart, ready for use with the
@@ -47,4 +50,25 @@ func collectFiles(root string) ([]*loader.BufferedFile, error) {
 		return nil
 	})
 	return files, err
+}
+
+// LoadErgoz returns the vendored ergoz chart after checking it is exactly
+// the release config/ergoz/release.json pins.
+func LoadErgoz() (*chart.Chart, ergoz.Release, error) {
+	pin, err := ergoz.Pinned()
+	if err != nil {
+		return nil, ergoz.Release{}, fmt.Errorf("reading the ergoz pin: %w", err)
+	}
+	data, err := fs.ReadFile(charts.Ergoz, "ergoz/"+pin.Chart)
+	if err != nil {
+		return nil, pin, fmt.Errorf("vendored ergoz chart %s missing: %w", pin.Chart, err)
+	}
+	if sum := fmt.Sprintf("%x", sha256.Sum256(data)); sum != pin.ChartSHA256 {
+		return nil, pin, fmt.Errorf("vendored ergoz chart %s does not match its pin", pin.Chart)
+	}
+	ch, err := loader.LoadArchive(bytes.NewReader(data))
+	if err != nil {
+		return nil, pin, fmt.Errorf("loading ergoz chart: %w", err)
+	}
+	return ch, pin, nil
 }

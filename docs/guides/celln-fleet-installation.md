@@ -49,6 +49,9 @@ kernel under `/boot` with `celln.dev/kvm=true`; a label an operator set is
 never changed. To keep such a node out of the fleet, or to drain it, set
 `celln.dev/kvm=false` explicitly: a removed label is added back. Every flag below still works and overrides the corresponding
 default; `--celln-fleet` with your own package keeps the reviewed path.
+The same command installs [ergoz](https://github.com/sympozium-ai/ergoz)
+(accelerator power telemetry, pinned in `config/ergoz/release.json`) into
+`ergoz-system`; `--no-ergoz` skips it.
 
 ## Trust and credentials
 

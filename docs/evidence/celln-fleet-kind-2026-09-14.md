@@ -426,6 +426,17 @@ both (an uncertain teardown still does not continue, the old parent may be
 live); and the node probe re-adds a removed `celln.dev/kvm` label, so a drain
 is `celln.dev/kvm=false`, an explicit value the probe leaves alone.
 
+## ergoz comes with the install
+
+`sympozium install` now deploys the pinned [ergoz](https://github.com/sympozium-ai/ergoz)
+release (accelerator power telemetry) into `ergoz-system` from the chart
+vendored under `charts/ergoz` and checked against `config/ergoz/release.json`
+before install; `--no-ergoz` skips it and a failure to install it never fails
+the rest. The one-liner journey (run 3, Kind `oneliner`) checked that the
+`ergoz-collector` Deployment became ready and that its Service carries the
+`sympozium.ai/collector=energy` label Sympozium discovers, then went on to
+label the nodes, offer the Celln parent plane and answer a one-shot as before.
+
 ## Environment caveats
 
 - Kind nodes have no kernel in `/boot`; the dispatcher's readiness gate

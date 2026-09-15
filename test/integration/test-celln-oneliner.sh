@@ -91,6 +91,11 @@ grep -q 'Using the default Celln starter package' "$WORK/install.log" || fail "t
 grep -q 'from SYMPOZIUM_CELLN_BACKEND' "$WORK/install.log" || fail "the install did not take the backend from the environment"
 pass "installed with the pinned package and the environment's backend"
 
+log "ergoz came with the install"
+wait_for "ergoz collector" 240 bash -c "kubectl --context kind-$CLUSTER -n ergoz-system get deploy ergoz-collector -o jsonpath='{.status.readyReplicas}' | grep -qx 1"
+kc -n ergoz-system get svc -l sympozium.ai/collector=energy -o name | grep -q . || fail "ergoz collector Service is not labelled for discovery"
+pass "ergoz release deployed into ergoz-system with a discoverable collector"
+
 log "Nodes joined by themselves"
 labelled="$(kc get nodes -l celln.dev/kvm=true -o name | wc -l)"
 [ "$labelled" -eq 2 ] || fail "expected both workers labelled by the probe, got $labelled"
