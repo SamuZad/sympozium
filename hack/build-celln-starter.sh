@@ -30,13 +30,17 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$bundle" ] && [ -n "$kernel" ] && [ -n "$image" ] && [ -n "$out" ] || { echo "usage: $0 --bundle DIR --kernel FILE --image REPO:TAG --out DIR [--tool-image NAME]... [--push]" >&2; exit 2; }
 [ ${#tool_images[@]} -gt 0 ] || tool_images=(busybox jq)
+# celln refuses relative packaging paths; callers may pass either.
+mkdir -p "$out"
+bundle="$(readlink -f "$bundle")" kernel="$(readlink -f "$kernel")" out="$(readlink -f "$out")"
+[ -z "$seed" ] || seed="$(readlink -f "$seed")"
+[ -z "$root" ] || root="$(readlink -f "$root")"
 celln="$bundle/bin/celln"
 [ -x "$celln" ] || { echo "no celln CLI at $celln" >&2; exit 1; }
 [ -r "$kernel" ] || { echo "kernel $kernel is not readable" >&2; exit 1; }
 for tool in skopeo debugfs mke2fs gcc cpio docker; do
 	command -v "$tool" >/dev/null 2>&1 || { echo "$tool is required" >&2; exit 1; }
 done
-mkdir -p "$out"
 [ -n "$root" ] || root="$out/celln-root"
 if [ -z "$seed" ]; then
 	seed="$out/publisher.seed"
@@ -49,7 +53,8 @@ rm -rf "$out/package"
 "$celln" --root "$root" starter-package --runtime-dir "$bundle/share/celln" --guest-dir "$bundle/share/celln/pilot" \
 	--kernel "$kernel" --signing-key "$seed" --output "$out/package" "${args[@]}"
 "$celln" starter-inspect "$out/package" >"$out/inspect.json"
-version="$("$celln" --version | awk '{print "v"$2}')"
+# The pinned release version when the caller knows it (CI), else the CLI's own.
+version="${CELLN_VERSION:-$("$celln" --version | awk '{print "v"$2}')}"
 rm -rf "$out/image" && mkdir -p "$out/image" && cp -r "$out/package" "$out/image/package"
 printf 'FROM scratch\nCOPY package /package\n' >"$out/image/Dockerfile"
 docker build -q -t "$image" "$out/image" >/dev/null
