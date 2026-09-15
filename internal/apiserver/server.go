@@ -207,6 +207,7 @@ func (s *Server) buildMux(frontendFS fs.FS, expected *tokenReader) http.Handler 
 	mux.HandleFunc("GET /api/v1/runs", s.listRuns)
 	mux.HandleFunc("GET /api/v1/runs/{name}", s.getRun)
 	mux.HandleFunc("GET /api/v1/runs/{name}/turns", s.listRunTurns)
+	mux.HandleFunc("POST /api/v1/runs/{name}/continue", s.continueRun)
 	mux.HandleFunc("POST /api/v1/runs/{name}/turns", s.createRunTurn)
 	mux.HandleFunc("POST /api/v1/runs/{name}/turns/{turn}/cancel", s.cancelRunTurn)
 	mux.HandleFunc("GET /api/v1/runs/{name}/telemetry", s.getRunTelemetry)

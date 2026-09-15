@@ -21,6 +21,56 @@ type EnduringRunSpec struct {
 	MaxOutputTokens int64 `json:"maxOutputTokens"`
 }
 
+// ConversationSpec is how an enduring run relates to the conversation it
+// belongs to: whether a lost parent is re-created, and, for a run that
+// continues an earlier one, the memory it starts with.
+type ConversationSpec struct {
+	// Continuation decides what happens when this parent's live context is
+	// lost (its node left the fleet, its owner process was replaced):
+	// automatic creates a new run that continues the conversation on any
+	// node with capacity, seeded with the recorded exchanges; none ends it.
+	// +kubebuilder:validation:Enum=automatic;none
+	// +optional
+	Continuation string `json:"continuation,omitempty"`
+	// ContinuesFrom names the run whose conversation this run continues. Set
+	// by the controller (automatic continuation) or the API (a restart); the
+	// transcript travels in Seed so the previous run may already be gone.
+	// +kubebuilder:validation:MaxLength=253
+	// +optional
+	ContinuesFrom string `json:"continuesFrom,omitempty"`
+	// Depth counts continuations along the chain so a fleet that keeps
+	// losing nodes cannot re-create a parent forever.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=16
+	// +optional
+	Depth int32 `json:"depth,omitempty"`
+	// Seed is the memory a continued parent starts with: the committed
+	// exchanges of the conversation so far, oldest first, bounded so a first
+	// message still fits the turn. Text only; never instructions or tools.
+	// +kubebuilder:validation:MaxItems=16
+	// +listType=atomic
+	// +optional
+	Seed []ConversationExchange `json:"seed,omitempty"`
+}
+
+// ConversationExchange is one committed user message and the answer it got.
+type ConversationExchange struct {
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=2048
+	User string `json:"user"`
+	// +kubebuilder:validation:MaxLength=2048
+	Assistant string `json:"assistant"`
+}
+
+// MaxContinuationDepth bounds automatic re-creation along one conversation.
+const MaxContinuationDepth = 16
+
+// ContinuesOnLoss reports whether a lost parent is re-created automatically;
+// an enduring run without a conversation block is continued by default.
+func (s *AgentRunSpec) ContinuesOnLoss() bool {
+	return s.ExecutionLifecycle == "enduring" && (s.Conversation == nil || s.Conversation.Continuation != "none")
+}
+
 // PlatformOneShotShape reports whether this spec asks for a single answer from
 // the shared catalogue: backend celln, a one-shot lifecycle, cluster tools or a
 // platform wrapper (no namespaced tools), the namespace's model connection and

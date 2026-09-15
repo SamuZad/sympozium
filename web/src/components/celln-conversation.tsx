@@ -89,7 +89,9 @@ export function CellnConversation({ run, observationUnavailable = false, retainE
     : scoped && parentCondition?.status === "False"
     ? parentCondition.message || "Scoped parent admission or execution is not confirmed. No replacement work will be submitted."
     : unavailableReason === "ContextLost"
-    ? "Live harness context was lost. Recorded answers remain available, but this parent cannot resume. It will not be silently recreated."
+    ? parent?.continuedBy
+      ? `Live harness context was lost; the conversation continues as ${parent.continuedBy} on another node, seeded with what was said here.`
+      : "Live harness context was lost. Recorded answers remain available, but this parent cannot resume."
     : unavailableReason === "Stopped"
     ? "The parent has stopped. Recorded answers remain available; this conversation cannot accept more turns."
     : unavailableReason === "TeardownUncertain"

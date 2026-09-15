@@ -546,7 +546,8 @@ fi
 if [ -n "$second_run" ]; then
 	kc -n "$tenant" delete agentrun "$second_run" --timeout=180s >/dev/null || fail "$second_run could not be deleted"
 fi
-kc -n "$tenant" delete agentrun "$tenant_run2" --timeout=180s >/dev/null || fail "$tenant_run2 could not be deleted"
+# tenant_run2 (the one that remembers "saffron") stays alive: the drain
+# below takes its owner away and its conversation must carry on elsewhere.
 [ "$(kc -n "$tenant" get configmap -o name | grep -c grant-)" = 0 ] || fail "grant ConfigMaps appeared in $tenant"
 [ "$(kc -n "$tenant" get cellntool -o name | wc -l)" = 0 ] || fail "namespaced tools appeared in $tenant"
 tenant_node="$(node_of "$(kc -n "$tenant" get agentrun "$tenant_run" -o jsonpath='{.status.cellnParent.binding.launchProfile}')")"
@@ -559,13 +560,47 @@ wait_for "policy refusal for $denied_run" 90 bash -c "kubectl --context kind-$CL
 [ -z "$(kc -n "$denied" get agentrun "$denied_run" -o jsonpath='{.status.cellnParent}')" ] || fail "$denied_run was issued a parent without policy"
 pass "$denied_run in excluded $denied refused with AUTH_POLICY_WITHDRAWN and no parent"
 
-log "Removing a node's label drains its owner and reports context loss"
-kc label node "$tenant_node" celln.dev/kvm- >/dev/null
-wait_for "owner drain on $tenant_node" 120 bash -c "[ \$(kubectl --context kind-$CLUSTER -n celln-system get pods -l app.kubernetes.io/name=celln-node --field-selector spec.nodeName=$tenant_node -o name | wc -l) = 0 ]"
-wait_for "context loss report for $tenant_run" 180 bash -c "kubectl --context kind-$CLUSTER -n $tenant get agentrun $tenant_run -o jsonpath='{.status.error}' | grep -q 'context lost or stopped'"
-pass "$tenant_run reports ContextLost with owner outcome after its owner left"
-kc -n "$tenant" delete agentrun "$tenant_run" --timeout=120s >/dev/null || fail "$tenant_run could not be deleted after its owner left"
-pass "$tenant_run deleted; cleanup released after owner removal"
+log "Restarting a conversation by hand moves it to a new parent with its memory"
+# The API restart: a new run seeded with the transcript, the old run deleted.
+kubectl --context "kind-$CLUSTER" -n sympozium-system port-forward svc/sympozium-apiserver "$api_port:8080" >/dev/null 2>&1 &
+api_pf=$!
+wait_for "apiserver port-forward" 60 curl -sf "${api_auth[@]}" "http://127.0.0.1:$api_port/api/v1/celln-platform/profiles?namespace=$tenant" -o /dev/null
+run_uid="$(kc -n "$tenant" get agentrun "$tenant_run" -o jsonpath='{.metadata.uid}')"
+restarted="$(curl -sf "${api_auth[@]}" -X POST "http://127.0.0.1:$api_port/api/v1/runs/$tenant_run/continue?namespace=$tenant&uid=$run_uid" | python3 -c 'import json,sys; r=json.load(sys.stdin); print(r["metadata"]["name"])')" || fail "API refused to restart $tenant_run"
+kill "$api_pf" >/dev/null 2>&1 || true
+[ "$(kc -n "$tenant" get agentrun "$restarted" -o jsonpath='{.spec.conversation.continuesFrom}')" = "$tenant_run" ] || fail "$restarted does not continue $tenant_run"
+[ "$(kc -n "$tenant" get agentrun "$restarted" -o jsonpath='{.spec.conversation.seed[0].user}' | cut -c1-20)" = "$(echo "$tenant_task" | cut -c1-20)" ] || fail "$restarted was not seeded with the transcript: $(kc -n "$tenant" get agentrun "$restarted" -o jsonpath='{.spec.conversation.seed}' | cut -c1-200)"
+wait_for "old run $tenant_run gone" 120 bash -c "! kubectl --context kind-$CLUSTER -n $tenant get agentrun $tenant_run >/dev/null 2>&1"
+wait_for "parent $restarted ready" 240 run_ready "$restarted" "$tenant"
+wait_for "resume turn of $restarted" 300 turn_recorded "$restarted" "$tenant"
+require_turn_succeeded "$restarted" "$tenant"
+pass "$tenant_run restarted as $restarted: seeded, old run deleted, new parent ready and it resumed: $(kc -n "$tenant" get agentrun "$restarted" -o jsonpath='{.status.cellnParent.initialTurn.result.answer}' | cut -c1-120)"
+kc -n "$tenant" delete agentrun "$restarted" --timeout=180s >/dev/null || fail "$restarted could not be deleted"
 
-kc label node --overwrite "$tenant_node" celln.dev/kvm=true >/dev/null
+log "Removing a node's label drains its owner; the conversation there continues on another node with its memory"
+memory_node="$(node_of "$(kc -n "$tenant" get agentrun "$tenant_run2" -o jsonpath='{.status.cellnParent.binding.launchProfile}')")"
+[ -n "$memory_node" ] || fail "owner of $tenant_run2 not found"
+# An explicit false keeps the node out; the node probe re-adds a missing
+# label on any node with KVM and a kernel, so removal alone would not drain.
+kc label node --overwrite "$memory_node" celln.dev/kvm=false >/dev/null
+wait_for "owner drain on $memory_node" 120 bash -c "[ \$(kubectl --context kind-$CLUSTER -n celln-system get pods -l app.kubernetes.io/name=celln-node --field-selector spec.nodeName=$memory_node -o name | wc -l) = 0 ]"
+wait_for "context loss report for $tenant_run2" 180 bash -c "kubectl --context kind-$CLUSTER -n $tenant get agentrun $tenant_run2 -o jsonpath='{.status.error}' | grep -q 'context lost or stopped'"
+continued="$(kc -n "$tenant" get agentrun "$tenant_run2" -o jsonpath='{.status.cellnParent.continuedBy}')"
+[ -n "$continued" ] || fail "$tenant_run2 lost its context but was not continued: $(kc -n "$tenant" get agentrun "$tenant_run2" -o jsonpath='{.status.error}')"
+pass "$tenant_run2 reports ContextLost and was continued as $continued"
+[ "$(kc -n "$tenant" get agentrun "$continued" -o jsonpath='{.spec.conversation.continuesFrom}')" = "$tenant_run2" ] || fail "$continued does not continue $tenant_run2"
+wait_for "parent $continued ready on another node" 300 run_ready "$continued" "$tenant"
+continued_node="$(node_of "$(kc -n "$tenant" get agentrun "$continued" -o jsonpath='{.status.cellnParent.binding.launchProfile}')")"
+[ -n "$continued_node" ] && [ "$continued_node" != "$memory_node" ] || fail "continuation landed on $continued_node, expected another node than $memory_node"
+wait_for "resume turn of $continued" 300 turn_recorded "$continued" "$tenant"
+require_turn_succeeded "$continued" "$tenant"
+answer="$(turn_answer "$continued" "$continued-recall" "Which word did I ask you to remember? Reply with only that word." "$tenant")"
+echo "$answer" | grep -qi 'saffron' || fail "the continued conversation lost its memory: $answer"
+pass "$continued on $continued_node remembers: $(echo "$answer" | tr '\n' ' ' | cut -c1-80)"
+for run in "$tenant_run2" "$continued"; do
+	kc -n "$tenant" delete agentrun "$run" --timeout=120s >/dev/null || fail "$run could not be deleted"
+done
+pass "lost and continued runs deleted; cleanup released"
+
+kc label node --overwrite "$memory_node" celln.dev/kvm=true >/dev/null
 pass "celln fleet integration complete (work dir: $WORK)"

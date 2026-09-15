@@ -213,3 +213,48 @@ func (s *Server) listRunTurns(w http.ResponseWriter, r *http.Request) {
 	})
 	writeJSON(w, map[string]any{"runUID": string(run.UID), "items": items, "continue": list.Continue})
 }
+
+// continueRun restarts an enduring conversation in a new run: the transcript
+// recorded so far becomes the new run's seed, the platform places its parent
+// on any node with capacity, and the previous run is deleted (pass keep=true
+// to leave it). The caller must name the run's observed UID so a reused name
+// cannot be retargeted.
+func (s *Server) continueRun(w http.ResponseWriter, r *http.Request) {
+	run := s.turnParent(w, r)
+	if run == nil {
+		return
+	}
+	uid := r.URL.Query().Get("uid")
+	if uid == "" || uid != string(run.UID) {
+		http.Error(w, "the run's observed uid is required", http.StatusBadRequest)
+		return
+	}
+	if run.Spec.ExecutionLifecycle != "enduring" || run.DeletionTimestamp != nil {
+		http.Error(w, "only a live enduring conversation can be continued", http.StatusBadRequest)
+		return
+	}
+	seed, err := cellnparent.Transcript(r.Context(), s.client, run)
+	if err != nil {
+		http.Error(w, "turn history unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	next, err := cellnparent.Continuation(run, seed)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := s.client.Create(r.Context(), next); err != nil {
+		http.Error(w, "could not create the continuation: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	if r.URL.Query().Get("keep") != "true" {
+		previous := types.UID(run.UID)
+		if err := s.client.Delete(r.Context(), run, client.Preconditions{UID: &previous}); err != nil && !apierrors.IsNotFound(err) {
+			// The continuation exists and carries the transcript; report the
+			// leftover rather than failing the restart.
+			next.Annotations["sympozium.ai/previous-run-retained"] = err.Error()
+		}
+	}
+	w.WriteHeader(http.StatusCreated)
+	writeJSON(w, next)
+}

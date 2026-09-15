@@ -345,9 +345,13 @@ export interface TaskModeSpec {
 
 export type AgentRunTask = string | TaskModeSpec;
 
+export interface ConversationExchange { user: string; assistant: string }
+
 export interface AgentRunSpec {
   executionLifecycle?: "one-shot" | "enduring";
   enduring?: { leaseSeconds: number; maxTurns: number; maxModelRequests: number; maxOutputTokens: number; requireToolCall?: boolean };
+  /** A continued conversation: the run this one carries on from and the memory it started with. */
+  conversation?: { continuation?: "automatic" | "none"; continuesFrom?: string; depth?: number; seed?: ConversationExchange[] };
   modelConnectionRef?: string;
   cellnSelection?: CellnSelection;
   agentRef: string;
@@ -385,6 +389,8 @@ export interface AgentRunStatus {
     initialTurn?: ParentTurnExecution;
     acceptedTurns: number;
     activeTurn?: { name: string; uid: string };
+    /** The run that continues this conversation after its context was lost. */
+    continuedBy?: string;
   };
   phase?: string;
   podName?: string;
@@ -1468,6 +1474,9 @@ export const api = {
       apiFetch<AgentRunTurn>(`/api/v1/runs/${encodeURIComponent(name)}/turns/${encodeURIComponent(turn)}/cancel?namespace=${encodeURIComponent(namespace)}`, { method: "POST", body: JSON.stringify(body), skipNamespace: true, retryNetwork: false }),
     deleteEnduring: (name: string, namespace: string, uid: string) =>
       apiFetch<void>(`/api/v1/runs/${encodeURIComponent(name)}?namespace=${encodeURIComponent(namespace)}&uid=${encodeURIComponent(uid)}`, { method: "DELETE", skipNamespace: true, retryNetwork: false }),
+    /** Restart a conversation in a new parent on any node with capacity, seeded with its transcript; the old run is deleted. */
+    continue: (name: string, namespace: string, uid: string) =>
+      apiFetch<AgentRun>(`/api/v1/runs/${encodeURIComponent(name)}/continue?namespace=${encodeURIComponent(namespace)}&uid=${encodeURIComponent(uid)}`, { method: "POST", skipNamespace: true, retryNetwork: false }),
     turns: (name: string, namespace: string, cursor = "") =>
       apiFetch<{ runUID: string; items: AgentRunTurn[]; continue: string }>(`/api/v1/runs/${encodeURIComponent(name)}/turns?namespace=${encodeURIComponent(namespace)}&continue=${encodeURIComponent(cursor)}`, { skipNamespace: true }),
     submitTurn: (name: string, namespace: string, body: { runUID: string; requestId: string; message: string }) =>

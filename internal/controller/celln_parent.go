@@ -119,12 +119,28 @@ func (r *AgentRunReconciler) reconcileCellnParent(ctx context.Context, run *api.
 			outcome := recordOwnerOutcome(&fresh, observed.Owner.Status)
 			meta.SetStatusCondition(&fresh.Status.Conditions, metav1.Condition{Type: "CellnParentReady", Status: metav1.ConditionFalse, Reason: observed.Owner.Status, Message: outcome, ObservedGeneration: fresh.Generation})
 			slog.WarnContext(ctx, "celln.parent.owner-lost", "agent_run", fresh.Name, "ownerStatus", observed.Owner.Status, "detail", outcome)
+			// A lost or stopped parent ends this run, not the conversation:
+			// an enduring run continues in a new run on any node with
+			// capacity, seeded with what was said so far. Stopped covers an
+			// owner draining (its node leaving the fleet) and a lease that ran
+			// out; the new run gets its own lease under policy. An uncertain
+			// teardown is not continued: the old parent may still be live.
+			continued := ""
+			if (observed.Owner.Status == "ContextLost" || observed.Owner.Status == "Stopped") && fresh.Spec.ContinuesOnLoss() && fresh.Status.CellnParent != nil && fresh.Status.CellnParent.ContinuedBy == "" {
+				name, err := r.continueConversation(ctx, &fresh)
+				if err != nil {
+					slog.WarnContext(ctx, "celln.parent.continuation-failed", "agent_run", fresh.Name, "error", err)
+				} else {
+					fresh.Status.CellnParent.ContinuedBy = name
+					continued = "; continued as " + name
+				}
+			}
 			// failRun rereads status and applies only terminal fields. Persist
 			// these independent turn/owner observations before that fresh read.
 			if err := r.Status().Update(ctx, &fresh); err != nil {
 				return ctrl.Result{}, err
 			}
-			return ctrl.Result{}, r.failRun(ctx, &fresh, "Celln parent context lost or stopped; reconcile recorded turns: "+outcome)
+			return ctrl.Result{}, r.failRun(ctx, &fresh, "Celln parent context lost or stopped; reconcile recorded turns: "+outcome+continued)
 		}
 	}
 	meta.SetStatusCondition(&fresh.Status.Conditions, condition)
@@ -167,6 +183,24 @@ func (r *AgentRunReconciler) recordParentAdmissionPending(ctx context.Context, o
 // whether Ready was ever live, how long after admission the loss landed, and
 // the frozen incarnation and launch-profile hashes that identify the worker
 // the owner failed to prepare. Recording grants no replay authority.
+// continueConversation creates the run that carries a lost enduring parent's
+// conversation on, seeded with its recorded exchanges, and returns its name.
+func (r *AgentRunReconciler) continueConversation(ctx context.Context, lost *api.AgentRun) (string, error) {
+	seed, err := cellnparent.Transcript(ctx, r.parentReader(), lost)
+	if err != nil {
+		return "", err
+	}
+	next, err := cellnparent.Continuation(lost, seed)
+	if err != nil {
+		return "", err
+	}
+	if err := r.Create(ctx, next); err != nil {
+		return "", err
+	}
+	slog.InfoContext(ctx, "celln.parent.continued", "agent_run", lost.Name, "continuation", next.Name, "exchanges", len(seed))
+	return next.Name, nil
+}
+
 func recordOwnerOutcome(run *api.AgentRun, status string) string {
 	reachedReady := meta.IsStatusConditionTrue(run.Status.Conditions, "CellnParentReady")
 	now := metav1.Now()

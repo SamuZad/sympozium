@@ -91,6 +91,12 @@ idempotency for initial run creation remains future work.
 
 ## Admission and conversation
 
+A conversation is not tied to one parent. If the parent's node leaves the
+fleet, the controller continues the conversation in a new run seeded with the
+recorded exchanges (`spec.conversation`), and the UI follows the link; an
+operator can force the same move with **Restart elsewhere**. See the fleet
+guide, "Conversations survive their node".
+
 The controller requires `CELLN_PARENT_CONFIG` pointing to trusted operator
 configuration. Each approval binds the created run's namespace, name, Kubernetes
 UID and exact spec digest to a specific host target, principal, launch profile

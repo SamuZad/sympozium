@@ -314,3 +314,48 @@ func TestPlatformAdmissionIssuesSingleTurnParentForOneShot(t *testing.T) {
 		t.Fatalf("one-shot slot claim must refuse without dereferencing enduring limits: %v", err)
 	}
 }
+
+func TestPlatformPlanCarriesAContinuedConversationsSeed(t *testing.T) {
+	ctx := context.Background()
+	store := platformStore(t, platformObjects("tenant-a")...)
+	key := types.NamespacedName{Namespace: "tenant-a", Name: "conversation"}
+	var run api.AgentRun
+	if err := store.Get(ctx, key, &run); err != nil {
+		t.Fatal(err)
+	}
+	run.Spec.Conversation = &api.ConversationSpec{Continuation: "automatic", ContinuesFrom: "earlier", Depth: 1, Seed: []api.ConversationExchange{{User: "Remember the word saffron.", Assistant: "Noted: saffron."}}}
+	if err := store.Update(ctx, &run); err != nil {
+		t.Fatal(err)
+	}
+	expected, err := cellnauthority.ScopedParentIncarnation("cluster", "tenant-a-uid", "tenant-a-run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lastPlan HostProvisionPlan
+	owner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 65537))
+		if json.Unmarshal(body, &lastPlan) != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"apiVersion": "celln.parent-provisioned/v1", "launchProfile": "blake3:" + strings.Repeat("e", 64), "incarnation": expected})
+	}))
+	defer owner.Close()
+	root := t.TempDir()
+	token := filepath.Join(root, "token")
+	if err := os.WriteFile(token, []byte("platform-admission-test-credential"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	p := PlatformProvisioner{ClusterID: "cluster", Journal: filepath.Join(root, "journal"), Approvals: filepath.Join(root, "approvals"), Target: owner.URL, TokenFile: token}
+	for _, dir := range []string{p.Journal, p.Approvals} {
+		if err := os.Mkdir(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := p.Admit(ctx, store, key); err != nil {
+		t.Fatal(err)
+	}
+	if len(lastPlan.History) != 1 || lastPlan.History[0].User != "Remember the word saffron." || lastPlan.History[0].Assistant != "Noted: saffron." {
+		t.Fatalf("plan must carry the seed as history: %+v", lastPlan.History)
+	}
+}

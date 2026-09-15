@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { Agent, AgentRun } from "@/lib/api";
-import { useCreateRun } from "@/hooks/use-api";
+import { useContinueRun, useCreateRun } from "@/hooks/use-api";
 import { CellnConversation } from "@/components/celln-conversation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -24,6 +24,7 @@ export function CellnAgentConversation({
   parents?: AgentRun[];
 }) {
   const createRun = useCreateRun();
+  const continueRun = useContinueRun();
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [selected, setSelected] = useState<string>("");
@@ -47,8 +48,20 @@ export function CellnAgentConversation({
   const platformDefaults = platformProfile?.sessionDefaults;
   const limits = execution?.enduring || platformDefaults || LEGACY_ENDURING_DEFAULTS;
 
-  const current = parents.find((run) => run.metadata.name === selected) || parents[0];
+  // A conversation whose parent was lost carries on in the run that continues
+  // it; follow that link rather than leaving the reader on a dead parent.
+  const chosen = parents.find((run) => run.metadata.name === selected) || parents[0];
+  const continuedBy = chosen?.status?.cellnParent?.continuedBy;
+  const current = (continuedBy && parents.find((run) => run.metadata.name === continuedBy)) || chosen;
   const showComposer = composing || parents.length === 0;
+  const canRestart = Boolean(current && current.spec.executionLifecycle === "enduring" && !current.metadata.deletionTimestamp && !continueRun.isPending);
+  function restart() {
+    if (!current?.metadata.uid) return;
+    continueRun.mutate(
+      { name: current.metadata.name, namespace: current.metadata.namespace || "default", uid: current.metadata.uid },
+      { onSuccess: (run) => { if (run?.metadata?.name) setSelected(run.metadata.name); setComposing(false); } },
+    );
+  }
 
   function start() {
     const text = message.trim();
@@ -99,12 +112,18 @@ export function CellnAgentConversation({
           >
             {run.metadata.name}
             <span className="ml-2 text-xs opacity-70">{run.status?.phase || "Pending"}</span>
+            {run.spec.conversation?.continuesFrom && <span className="ml-2 text-xs opacity-70" title={`Continues ${run.spec.conversation.continuesFrom} with ${run.spec.conversation.seed?.length || 0} remembered exchange(s)`}>↺ continued</span>}
           </Button>
         );
       })}
       <Button size="sm" variant={showComposer ? "default" : "secondary"} data-testid="celln-agent-new-conversation" onClick={() => setComposing(true)}>
         New conversation
       </Button>
+      {!showComposer && canRestart && (
+        <Button size="sm" variant="outline" data-testid="celln-agent-restart" onClick={restart} title="Move this conversation to a new parent on any node with capacity, seeded with what was said so far. The current run is deleted.">
+          Restart elsewhere
+        </Button>
+      )}
     </div>
   );
 

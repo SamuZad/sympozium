@@ -226,6 +226,18 @@ export function useCreateRun() {
   });
 }
 
+export function useContinueRun() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ name, namespace, uid }: { name: string; namespace: string; uid: string }) => api.runs.continue(name, namespace, uid),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["runs"] });
+      toast.success("Conversation restarted on a new parent");
+    },
+    onError: toastError,
+  });
+}
+
 export function useDeleteRun() {
   const qc = useQueryClient();
   return useMutation({

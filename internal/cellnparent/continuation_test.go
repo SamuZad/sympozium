@@ -1,0 +1,112 @@
+package cellnparent
+
+import (
+	"context"
+	"strings"
+	"testing"
+
+	api "github.com/sympozium-ai/sympozium/api/v1alpha1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+)
+
+func enduringRun() *api.AgentRun {
+	return &api.AgentRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "celln-agent-abc", Namespace: "tenant", UID: types.UID("uid-1"), Labels: map[string]string{"sympozium.ai/instance": "celln-agent"}},
+		Spec: api.AgentRunSpec{
+			AgentRef: "celln-agent", Backend: "celln", ExecutionLifecycle: "enduring",
+			Task:           api.NewStringTask("Remember the word saffron."),
+			Enduring:       &api.EnduringRunSpec{LeaseSeconds: 3600, MaxTurns: 8, MaxModelRequests: 24, MaxOutputTokens: 4096},
+			CellnSelection: &api.CellnCatalogueSelection{RuntimeRef: "celln-native", ToolRefs: []api.CellnCatalogueToolRef{}},
+		},
+		Status: api.AgentRunStatus{CellnParent: &api.CellnParentStatus{InitialTurn: &api.CellnParentTurnStatus{Result: &api.CellnParentTurnResult{Succeeded: true, Answer: "Noted: saffron."}}}},
+	}
+}
+
+func TestTranscriptOrdersCommittedExchangesAndSkipsFailures(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = api.AddToScheme(scheme)
+	run := enduringRun()
+	store := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		&api.AgentRunTurn{ObjectMeta: metav1.ObjectMeta{Name: "t2", Namespace: "tenant", CreationTimestamp: metav1.NewTime(metav1.Now().Add(2e9))}, Spec: api.AgentRunTurnSpec{RunName: run.Name, RunUID: "uid-1", Message: "and the number seven"}, Status: api.AgentRunTurnStatus{Execution: &api.CellnParentTurnStatus{Result: &api.CellnParentTurnResult{Succeeded: true, Answer: "Seven, noted."}}}},
+		&api.AgentRunTurn{ObjectMeta: metav1.ObjectMeta{Name: "t1", Namespace: "tenant", CreationTimestamp: metav1.NewTime(metav1.Now().Add(1e9))}, Spec: api.AgentRunTurnSpec{RunName: run.Name, RunUID: "uid-1", Message: "what colour?"}, Status: api.AgentRunTurnStatus{Execution: &api.CellnParentTurnStatus{Result: &api.CellnParentTurnResult{Succeeded: true, Answer: "Violet."}}}},
+		&api.AgentRunTurn{ObjectMeta: metav1.ObjectMeta{Name: "t3", Namespace: "tenant", CreationTimestamp: metav1.NewTime(metav1.Now().Add(3e9))}, Spec: api.AgentRunTurnSpec{RunName: run.Name, RunUID: "uid-1", Message: "failed one"}, Status: api.AgentRunTurnStatus{Execution: &api.CellnParentTurnStatus{Result: &api.CellnParentTurnResult{Succeeded: false, Answer: "tool crashed"}}}},
+		&api.AgentRunTurn{ObjectMeta: metav1.ObjectMeta{Name: "other", Namespace: "tenant"}, Spec: api.AgentRunTurnSpec{RunName: "other-run", RunUID: "uid-9", Message: "not ours"}, Status: api.AgentRunTurnStatus{Execution: &api.CellnParentTurnStatus{Result: &api.CellnParentTurnResult{Succeeded: true, Answer: "x"}}}},
+	).Build()
+	got, err := Transcript(context.Background(), store, run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []api.ConversationExchange{
+		{User: "Remember the word saffron.", Assistant: "Noted: saffron."},
+		{User: "what colour?", Assistant: "Violet."},
+		{User: "and the number seven", Assistant: "Seven, noted."},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("transcript: %+v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("exchange %d: %+v want %+v", i, got[i], want[i])
+		}
+	}
+	// A continued run's own seed comes first.
+	run.Spec.Conversation = &api.ConversationSpec{ContinuesFrom: "earlier", Depth: 1, Seed: []api.ConversationExchange{{User: "first ever", Assistant: "hello"}}}
+	got, _ = Transcript(context.Background(), store, run)
+	if len(got) != 4 || got[0].User != "first ever" {
+		t.Fatalf("seed must lead the transcript: %+v", got)
+	}
+}
+
+func TestTrimSeedKeepsTheNewestThatFit(t *testing.T) {
+	var long []api.ConversationExchange
+	for i := 0; i < 20; i++ {
+		long = append(long, api.ConversationExchange{User: strings.Repeat("u", 100), Assistant: strings.Repeat("a", 100)})
+	}
+	long = append(long, api.ConversationExchange{User: "last", Assistant: "kept"})
+	trimmed := TrimSeed(long)
+	if !SeedFits(trimmed) || trimmed[len(trimmed)-1].User != "last" || len(trimmed) >= 16 {
+		t.Fatalf("trim must keep the newest within bounds: %d %+v", len(trimmed), trimmed[len(trimmed)-1])
+	}
+	if got := TrimSeed([]api.ConversationExchange{{User: " ", Assistant: "x"}, {User: "ok", Assistant: "y\x00"}, {User: "fine", Assistant: "z"}}); len(got) != 1 || got[0].User != "fine" {
+		t.Fatalf("blank or NUL exchanges are dropped: %+v", got)
+	}
+}
+
+func TestContinuationCarriesSpecSeedAndDepth(t *testing.T) {
+	previous := enduringRun()
+	seed := []api.ConversationExchange{{User: "Remember the word saffron.", Assistant: "Noted: saffron."}}
+	next, err := Continuation(previous, seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.GenerateName != "celln-agent-" || next.Namespace != "tenant" || next.Labels["sympozium.ai/instance"] != "celln-agent" || next.Annotations[ContinuedFromAnnotation] != "celln-agent-abc" {
+		t.Fatalf("metadata: %+v", next.ObjectMeta)
+	}
+	if next.Spec.Task.GetPrompt() != ResumeMessage || next.Spec.Conversation == nil || next.Spec.Conversation.ContinuesFrom != "celln-agent-abc" || next.Spec.Conversation.Depth != 1 || next.Spec.Conversation.Continuation != "automatic" || len(next.Spec.Conversation.Seed) != 1 || next.Spec.ExecutionLifecycle != "enduring" || next.Spec.Enduring.MaxTurns != 8 || next.Spec.CellnSelection.RuntimeRef != "celln-native" {
+		t.Fatalf("spec: %+v", next.Spec)
+	}
+	if !next.Spec.ContinuesOnLoss() {
+		t.Fatal("a continued run continues on loss like its predecessor")
+	}
+	// Depth accumulates and is bounded; a run told not to continue stays so.
+	next.Name = "celln-agent-def"
+	next.Spec.Conversation.Depth = api.MaxContinuationDepth
+	if _, err := Continuation(next, seed); err == nil {
+		t.Fatal("depth bound must stop the chain")
+	}
+	previous.Spec.Conversation = &api.ConversationSpec{Continuation: "none"}
+	if !previous.Spec.ContinuesOnLoss() == false {
+		t.Fatal("continuation none must be honoured")
+	}
+	oneShot := enduringRun()
+	oneShot.Spec.ExecutionLifecycle = "one-shot"
+	if _, err := Continuation(oneShot, nil); err == nil {
+		t.Fatal("only enduring runs continue")
+	}
+	if _, err := Continuation(enduringRun(), []api.ConversationExchange{{User: strings.Repeat("u", 2000), Assistant: strings.Repeat("a", 2000)}}); err == nil {
+		t.Fatal("an oversized seed is refused, not trimmed silently here")
+	}
+}
