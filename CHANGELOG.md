@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.10.68](https://github.com/sympozium-ai/sympozium/compare/v0.10.67...v0.10.68) (2026-09-15)
+
+
+### Features
+
+* **celln:** pick an Agent's fleet backend and answer once from the UI ([9ca6488](https://github.com/sympozium-ai/sympozium/commit/9ca64880d3a0605fa3d846f45206353a66b37468))
+* **celln:** pick an Agent's fleet backend and answer once from the UI ([0676ff5](https://github.com/sympozium-ai/sympozium/commit/0676ff5947462481181c2573b0b5d67f553460da))
+
 ## [0.10.67](https://github.com/sympozium-ai/sympozium/compare/v0.10.66...v0.10.67) (2026-09-14)
 
 
