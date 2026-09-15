@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.10.71](https://github.com/sympozium-ai/sympozium/compare/v0.10.70...v0.10.71) (2026-09-15)
+
+
+### Bug Fixes
+
+* **ui:** say what enables the Celln parent plane ([55c7d03](https://github.com/sympozium-ai/sympozium/commit/55c7d03262f56cce50e61ad1501d9028e31c99fd))
+* **ui:** say what enables the Celln parent plane ([c193c6b](https://github.com/sympozium-ai/sympozium/commit/c193c6b6c41e9941d60ec65f49906bb10f63aa38))
+
 ## [0.10.70](https://github.com/sympozium-ai/sympozium/compare/v0.10.69...v0.10.70) (2026-09-15)
 
 
