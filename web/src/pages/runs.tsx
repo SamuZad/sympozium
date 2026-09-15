@@ -405,11 +405,11 @@ export function RunsPage() {
                       {!catalogue.isLoading && !catalogue.isError && !(catalogue.data || []).length && <p className="text-xs">No reviewed tools in this namespace. An empty selection lends no tools.</p>}
                       {(catalogue.data || []).map((tool) => {
                         const checked = lentTools.some((ref) => ref.name === tool.metadata.name && ref.revision === tool.spec.revision);
-                        const supported = tool.spec.invocationABI === "celln.json-stdio/v1" && tool.spec.lane === "tool";
+                        const supported = (tool.spec.invocationABI === "celln.json-stdio/v1" || tool.spec.invocationABI === "celln.argv/v1") && tool.spec.lane === "tool";
                         return <label key={tool.metadata.uid || tool.metadata.name} className="block space-y-1 rounded border p-2 text-xs">
                           <span className="flex items-center gap-2"><input type="checkbox" checked={checked} disabled={!compatibleHarness || !supported || (!checked && lentTools.length >= 16)} onChange={() => setLentTools(checked ? lentTools.filter((ref) => ref.name !== tool.metadata.name) : [...lentTools, { name: tool.metadata.name, revision: tool.spec.revision }])} />
                             <span>{tool.metadata.name}@{tool.spec.revision}{!supported ? " — unsupported ABI/lane" : ""}</span></span>
-                          <span className="block text-muted-foreground">{tool.spec.description}</span>
+                          <span className="block text-muted-foreground">{tool.spec.description}{tool.spec.sourceImage ? ` · from ${tool.spec.sourceImage.replace(/@sha256:([0-9a-f]{12})[0-9a-f]*$/, "@sha256:$1…")}` : ""}</span>
                           <span className="block text-muted-foreground">Support owner: {tool.spec.supportOwner}</span>
                           <span className="block break-all text-muted-foreground">Publisher: {tool.spec.publisherKey}</span>
                           <span className="block text-muted-foreground">Declared limits: {tool.spec.limits.timeoutMillis} ms · {tool.spec.limits.memoryBytes} bytes memory · workspace {tool.spec.limits.workspace} · effects {tool.spec.limits.effects}</span>

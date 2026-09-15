@@ -13,7 +13,7 @@ export function CellnStarterTools({ agentRef, runtimeRef, catalogue, onSelect }:
   onSelect: (tools: CellnSelection["toolRefs"]) => void;
 }) {
   const tools = names.map((name) => catalogue.find((tool) => tool.metadata.name === name));
-  const compatible = tools.map((tool, index) => !!tool && tool.spec.invocationABI === "celln.json-stdio/v1" && tool.spec.lane === "tool" && (
+  const compatible = tools.map((tool, index) => !!tool && (tool.spec.invocationABI === "celln.json-stdio/v1" || tool.spec.invocationABI === "celln.argv/v1") && tool.spec.lane === "tool" && (
     index === 2 ? !!tool.spec.limits.https : tool.spec.limits.artifacts?.operation === (index === 0 ? "read" : "write")
   ));
   const approvals = useQueries({ queries: tools.map((tool, index) => ({

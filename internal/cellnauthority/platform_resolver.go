@@ -758,7 +758,7 @@ func validateRuntimeProfile(profile api.CellnRuntimeProfile, lifecycle string) e
 
 func validateClusterTool(tool api.ClusterCellnTool) error {
 	s := tool.Spec
-	if s.Revision == "" || s.InvocationABI != "celln.json-stdio/v1" || s.Lane != "tool" || s.Platform != "linux/amd64" || !hashPattern.MatchString(s.Executable.Hash) || !hashPattern.MatchString(s.Closure.Hash) || !hashPattern.MatchString(s.ArgumentsSchema.Hash) || !hashPattern.MatchString(s.ResultSchema.Hash) || !publisherPattern.MatchString(s.PublisherKey) || !pathPattern.MatchString(s.EntryPoint) || !validToolLimits(s.Limits) {
+	if s.Revision == "" || (s.InvocationABI != "celln.json-stdio/v1" && s.InvocationABI != "celln.argv/v1") || s.Lane != "tool" || s.Platform != "linux/amd64" || !hashPattern.MatchString(s.Executable.Hash) || !hashPattern.MatchString(s.Closure.Hash) || !hashPattern.MatchString(s.ArgumentsSchema.Hash) || !hashPattern.MatchString(s.ResultSchema.Hash) || !publisherPattern.MatchString(s.PublisherKey) || !pathPattern.MatchString(s.EntryPoint) || !validToolLimits(s.Limits) {
 		return deny(ReasonToolUnknown, "unsupported cluster tool")
 	}
 	return nil

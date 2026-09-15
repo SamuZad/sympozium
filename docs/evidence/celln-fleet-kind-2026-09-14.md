@@ -322,6 +322,35 @@ when a client omits it, and the plan's persona/route/tool-call mismatches
 are platform refusals (`AUTH_POLICY_CONTRACTED`) rather than generic
 pending states.
 
+## Borrowed commands from pinned images (Celln toolbox)
+
+The fleet's toolbox now comes from container images pinned by digest.
+`celln starter-package --tool-image busybox --tool-image jq` extracted each
+command's static executable from the pinned image, lent it inside the
+signed worker closure under its own alias, and recorded the image as the
+tool's source; `starter-configure` turned them into `celln.argv/v1` tools.
+On `fleet-ci` (scope `ci`, two llama-server backends):
+
+| Check | Result |
+| --- | --- |
+| Catalogue | 16 cluster tools: 3 brokered (`workspace-read`, `workspace-write`, `https-fetch`) and 13 `celln.argv/v1` commands, 12 naming `docker.io/library/busybox@sha256:fc6ddd…` (grep, sed, awk, sort, uniq, wc, cut, head, tail, base64, sha256sum, date) and `jq` naming `ghcr.io/jqlang/jq@sha256:4f34c6…`. |
+| Worker | Parents with the 16-tool template started, completed real turns, held live context across a follow-up turn and were deleted through the gateway, as before. |
+| jq | One-shot `celln-agent-hnpsd`: "call the jq tool with filter .capital, raw output, on {"capital":"Gaborone",…}" → answered `Gaborone`. |
+| grep | One-shot `celln-agent-8j4lk`: "call the grep tool with pattern ^vio on red, violet, blue" → answered `violet`. |
+| Cells | The one-shots released their cells: live cells back to the 6 held by the three enduring parents. |
+| Add backend | With the file-based bodies, a third backend (`spare`) joined the running scope: configure pods published it with zero restarts, owners untouched, the enduring run kept going, and a one-shot on `spare` answered. Full journey: 26 checks passed, exit 0. |
+
+Three things the runs found and that are fixed in the same change set: the
+tool schema validator accepts a strict subset (no per-field descriptions,
+strings at most 4096 characters), so command schemas are generated within
+it and parameter notes are folded into the tool description; every borrowed
+tool needs its own executable path, so each command is lent under its own
+alias (hard-linked to the same bytes) and a multi-call binary picks its
+applet from argv[0]; and the node script passed the whole configuration
+ConfigMap as one command-line argument, which three backends with 16-tool
+templates pushed past the kernel's limit, so bodies now travel through
+files.
+
 ## Environment caveats
 
 - Kind nodes have no kernel in `/boot`; the dispatcher's readiness gate

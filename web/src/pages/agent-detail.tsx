@@ -668,7 +668,7 @@ function AgentRuntimeCard({ inst, runtimes }: { inst: Agent; runtimes: import("@
               <div className="space-y-1" data-testid="agent-shared-tools">
                 <Label>Shared tools (from the fleet policy)</Label>
                 <p className="text-xs text-muted-foreground">
-                  {(execution?.cellnSelection?.clusterToolRefs?.length ? execution.cellnSelection.clusterToolRefs : wrapperProfile?.tools || []).map((tool) => tool.name).join(", ") || "none"}. Lent by the platform policy; nothing is copied into this namespace.
+                  {(execution?.cellnSelection?.clusterToolRefs?.length ? execution.cellnSelection.clusterToolRefs : wrapperProfile?.tools || []).map((tool) => tool.name).join(", ") || "none"}. Lent by the platform policy; nothing is copied into this namespace. Commands such as grep or jq are real programs from digest-pinned images; the Runs page shows each tool's source image.
                 </p>
               </div>
             ) : (

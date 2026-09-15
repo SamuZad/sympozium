@@ -216,6 +216,65 @@ turn of the profile's allowance. Every backend of the scope serves one-shots
 the same way, so an Agent picks its provider per run regardless of
 lifecycle.
 
+## The toolbox
+
+Every run on the fleet borrows tools from the scope's package, and the
+namespace's policy lends exactly those revisions. Two kinds live side by side:
+
+- **Brokered tools** are Celln's own: `workspace-read`, `workspace-write` and
+  `https-fetch`. They are the only way a cell touches files or the network,
+  through host brokers with the quotas the policy shows.
+- **Borrowed commands** are ordinary programs taken from container images
+  pinned by digest in Celln's catalogue (`tools.toml`), for example busybox's
+  grep, sed, awk, sort, uniq, wc, cut, head, tail, tr, base64, sha256sum and
+  date, and jq. Nothing is reimplemented. Each command's static executable is
+  extracted from the pinned image when the package is built and lent inside
+  the signed worker closure; the model calls it through the `celln.argv/v1`
+  binding (validated arguments become the command line, no shell), and gets
+  its stdout and exit status back. Each such cluster tool names the image it
+  came from in `spec.sourceImage`, so the catalogue of layers a fleet borrows
+  from is exactly `kubectl get clustercellntool -o custom-columns=NAME:.metadata.name,SOURCE:.spec.sourceImage`.
+
+Build the package with the commands you want:
+
+```sh
+celln --root /var/lib/celln-packaging starter-package ... \
+  --tool-image busybox --tool-image jq
+```
+
+The images are pulled once into that root's image store and verified by
+digest. A worker carries at most 16 tools (3 brokered plus 13 commands).
+
+### Extending the toolbox
+
+No recompilation. On the packaging machine:
+
+1. Pin an image into your own catalogue (`~/.celln/tools.toml` under the
+   root you package with): `celln image add ghcr.io/example/tool:1.2`. This
+   resolves the tag to a digest and records it; a local entry adds a name,
+   never authority.
+2. Declare the commands the model may call, in that entry:
+
+   ```toml
+   commands = [
+     { name = "csvq", exec = "/usr/bin/csvq", args = ["{query}"], stdin = "csv",
+       description = "Run a SQL query over CSV text.",
+       params = [ { name = "query", type = "string", required = true, max = 2048 },
+                  { name = "csv", type = "string", required = true, max = 32768 } ] },
+   ]
+   ```
+
+   Arguments are literals, `{field}` (the value), `{field?FLAG}` (FLAG when a
+   boolean is true) or `{field:FLAG}` (FLAG then the value when present);
+   `stdin` names the string fed to the program. String parameters and a
+   command's output are bounded at 4096 characters each (the tool schema
+   subset). The executable must be a static Linux amd64 binary; a
+   dynamically linked one is refused with that reason (lending a whole image
+   as a closure is the path for those).
+3. Rebuild the starter package with `--tool-image NAME` and install it as a
+   new scope; the fleet's catalogue, policy and every namespace's wrappers
+   follow from the package.
+
 ## Leases and budgets
 
 A parent lives for its run's `leaseSeconds` and may spend up to its run's

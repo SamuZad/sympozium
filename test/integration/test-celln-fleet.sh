@@ -87,8 +87,13 @@ log "Starter package (built once per bundle)"
 package="$WORK/package"
 if [ ! -f "$package/package.json" ]; then
 	[ -f "$WORK/publisher.seed" ] || { head -c 32 /dev/urandom >"$WORK/publisher.seed"; chmod 600 "$WORK/publisher.seed"; }
-	"$CELLN_BUNDLE/bin/celln" starter-package --runtime-dir "$CELLN_BUNDLE/share/celln" --guest-dir "$CELLN_BUNDLE/share/celln/pilot" \
-		--kernel "$kernel" --signing-key "$WORK/publisher.seed" --output "$package" >"$WORK/starter-package.log" 2>&1
+	# FLEET_TOOL_IMAGES names catalogue images whose commands join the
+	# worker as borrowed tools (e.g. "busybox jq"); their static executables
+	# are taken from the digest-pinned images in this work directory's root.
+	TOOL_IMAGE_ARGS=()
+	for image in ${FLEET_TOOL_IMAGES:-}; do TOOL_IMAGE_ARGS+=(--tool-image "$image"); done
+	"$CELLN_BUNDLE/bin/celln" --root "$WORK/celln-root" starter-package --runtime-dir "$CELLN_BUNDLE/share/celln" --guest-dir "$CELLN_BUNDLE/share/celln/pilot" \
+		--kernel "$kernel" --signing-key "$WORK/publisher.seed" --output "$package" "${TOOL_IMAGE_ARGS[@]}" >"$WORK/starter-package.log" 2>&1 || { tail -5 "$WORK/starter-package.log"; fail "starter package"; }
 fi
 "$CELLN_BUNDLE/bin/celln" starter-inspect "$package" >"$WORK/inspect.json"
 package_hash="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["packageHash"])' "$WORK/inspect.json")"
@@ -348,6 +353,16 @@ if [ -n "$second_run" ]; then
 	pass "$second_run answered on backend $SECOND_BACKEND in the same namespace as the native runs: ${second_answer:0:160}"
 fi
 
+if [ -n "${FLEET_TOOL_IMAGES:-}" ]; then
+	log "Borrowed commands from pinned images: the catalogue carries their source, the model calls them through the argv binding"
+	tool_count="$(kc get clustercellntool -o json | python3 -c '
+import json,sys
+tools=[t for t in json.load(sys.stdin)["items"] if t["spec"].get("invocationABI")=="celln.argv/v1"]
+for t in tools: assert t["spec"].get("sourceImage",""), t["metadata"]["name"]+" lacks a source image"
+print(len(tools))')"
+	[ "$tool_count" -ge 2 ] || fail "borrowed commands not installed as cluster tools with provenance ($tool_count)"
+	pass "$tool_count borrowed commands installed as cluster tools, each naming its pinned source image"
+fi
 log "One-shot runs on the fleet: a single-turn parent per run, any backend, finished with its answer"
 # The same API call as an enduring conversation minus the lifecycle and lease:
 # the platform admits it, one parent answers once, the run succeeds with the
@@ -382,6 +397,12 @@ print(json.dumps({"agentRef": agent, "task": sys.argv[2], "systemPrompt": r["sys
 one_shot_runs=()
 one_shot_native="$(api_one_shot "Where is Botswana? Reply with one short sentence; do not use tools.")" || fail "API refused a one-shot run on the native backend in $tenant"
 one_shot_runs+=("$one_shot_native")
+if [ -n "${FLEET_TOOL_IMAGES:-}" ]; then
+	# Real commands borrowed from images: jq over a JSON document and grep over text.
+	one_shot_jq="$(api_one_shot "Call the jq tool exactly once with filter .capital, raw output, and this input: {\"capital\":\"Gaborone\",\"country\":\"Botswana\"}. Reply with only the tool's output.")" || fail "API refused a jq one-shot"
+	one_shot_grep="$(api_one_shot "Call the grep tool exactly once with pattern ^vio and this text (three lines): red, violet, blue. Reply with only the matching line.")" || fail "API refused a grep one-shot"
+	one_shot_runs+=("$one_shot_jq" "$one_shot_grep")
+fi
 if [ -n "$SECOND_BACKEND" ]; then
 	one_shot_second="$(api_one_shot "What is the capital of Botswana? Reply with one short sentence; do not use tools." "$SECOND_BACKEND")" || fail "API refused a one-shot run on backend $SECOND_BACKEND in $tenant"
 	one_shot_runs+=("$one_shot_second")
@@ -395,6 +416,13 @@ for run in "${one_shot_runs[@]}"; do
 	[ -n "$answer" ] || fail "one-shot $run finished without a result"
 	pass "one-shot $run (runtime $(kc -n "$tenant" get agentrun "$run" -o jsonpath='{.spec.cellnSelection.runtimeRef}')) succeeded: ${answer:0:160}"
 done
+if [ -n "${FLEET_TOOL_IMAGES:-}" ]; then
+	jq_answer="$(kc -n "$tenant" get agentrun "$one_shot_jq" -o jsonpath='{.status.result}')"
+	grep_answer="$(kc -n "$tenant" get agentrun "$one_shot_grep" -o jsonpath='{.status.result}')"
+	echo "$jq_answer" | grep -q 'Gaborone' || fail "jq one-shot did not return the extracted value: $jq_answer"
+	echo "$grep_answer" | grep -q 'violet' || fail "grep one-shot did not return the matching line: $grep_answer"
+	pass "borrowed jq and grep answered through the argv binding: '$jq_answer' / '$grep_answer'"
+fi
 wait_for "one-shot parents released (live cells back to $cells_before)" 120 bash -c "[ \"\$(
 	total=0; for pod in \$(kubectl --context kind-$CLUSTER -n celln-system get pods -l app.kubernetes.io/name=celln-node --field-selector status.phase=Running -o name); do
 		n=\$(kubectl --context kind-$CLUSTER -n celln-system exec \$pod -c dispatcher -- curl -s http://127.0.0.1:8787/v1/health | python3 -c 'import json,sys; print(json.load(sys.stdin)[\"node\"][\"live_cells\"])'); total=\$((total + n)); done; echo \$total)\" = $cells_before ]"
