@@ -70,7 +70,7 @@ curl -fsSL https://deploy.sympozium.ai/install.sh | sh
 Then deploy to your cluster and activate your first agents:
 
 ```bash
-sympozium install          # deploys CRDs, controllers, built-in Ensembles, and the Celln plane
+sympozium install          # deploys CRDs, controllers, built-in Ensembles, the Celln plane and ergoz
 # With DEEPSEEK_API_KEY, OPENAI_API_KEY and/or ANTHROPIC_API_KEY set (or a prompt in a
 # terminal), the same command installs the Celln fleet: every node with KVM runs
 # hardware-isolated, long-running agents for every namespace, one backend per key,

@@ -1250,6 +1250,7 @@ func newInstallCmd() *cobra.Command {
 	var setValues []string
 	var enableHermeticWorkloads bool
 	var noCelln bool
+	var noErgoz bool
 	var cellnBackends []string
 	var cellnRouterImage string
 	var cellnInstallerImage string
@@ -1304,7 +1305,10 @@ layers (enduring native parents); it requires the operator-reviewed
 				if err != nil {
 					return err
 				}
-				return installCellnFleet(cmd.Context(), fleet, imageTag, append(setValues, cellnValues...), cellnNativeApprove)
+				if err := installCellnFleet(cmd.Context(), fleet, imageTag, append(setValues, cellnValues...), cellnNativeApprove); err != nil {
+					return err
+				}
+				return installErgozUnless(noErgoz)
 			}
 			if cellnNative {
 				if noCelln || cellnHostInstaller || len(cellnBackends) != 0 {
@@ -1332,6 +1336,9 @@ layers (enduring native parents); it requires the operator-reviewed
 				setValues = append(setValues, cellnValues...)
 			}
 			if err := runInstall(imageTag, setValues); err != nil {
+				return err
+			}
+			if err := installErgozUnless(noErgoz); err != nil {
 				return err
 			}
 			if !noCelln && !cellnNative {
@@ -1369,6 +1376,7 @@ layers (enduring native parents); it requires the operator-reviewed
 	cmd.Flags().StringArrayVar(&setValues, "set", nil, "Set Helm values (key=value, can be repeated)")
 	cmd.Flags().BoolVar(&enableHermeticWorkloads, "enable-hermetic-workloads", false, "Deprecated: Celln is enabled by default; use --no-celln to skip it")
 	cmd.Flags().BoolVar(&noCelln, "no-celln", false, "Do not deploy the Celln backend (dispatcher, router, credentials, ownership PVC)")
+	cmd.Flags().BoolVar(&noErgoz, "no-ergoz", false, "Do not install ergoz (accelerator power telemetry) into ergoz-system")
 	cmd.Flags().BoolVar(&cellnHostInstaller, "celln-host-installer", false, "Deploy the privileged host-installer DaemonSet (bare-metal systemd dispatcher) instead of the in-cluster pod dispatcher; requires --celln-backend")
 	cmd.Flags().StringArrayVar(&cellnBackends, "celln-backend", nil, "Celln router dispatcher origin(s) http://host:port (repeatable); defaults to the in-cluster celln-dispatcher Service")
 	cmd.Flags().StringVar(&cellnRouterImage, "celln-router-image", "", "Celln router image repo:tag or repo@sha256:... (default ghcr.io/sympozium-ai/celln:v0.5.20)")
@@ -1674,10 +1682,51 @@ func runInstall(imageTag string, setValues []string) error {
 	return nil
 }
 
-// helmInstallOrUpgrade installs the release, or upgrades a deployed one,
-// recovering a failed previous release by reinstalling.
+// helmInstallOrUpgrade installs the Sympozium release, or upgrades a
+// deployed one, recovering a failed previous release by reinstalling.
 func helmInstallOrUpgrade(ch *chart.Chart, vals map[string]interface{}) error {
-	cfg, err := newHelmConfig(helmNamespace)
+	return helmInstallOrUpgradeRelease(helmReleaseName, helmNamespace, ch, vals)
+}
+
+// The ergoz release: accelerator power telemetry, discovered by Sympozium
+// through the collector's Service label. Installed by default; --no-ergoz
+// skips it. It is best effort: a cluster that cannot run its host-path
+// agent keeps everything else.
+const (
+	ergozReleaseName = "ergoz"
+	ergozNamespace   = "ergoz-system"
+)
+
+// installErgozUnless runs the ergoz install and reports, never fails, the
+// whole installation over it.
+func installErgozUnless(skip bool) error {
+	if skip {
+		return nil
+	}
+	if err := installErgoz(); err != nil {
+		fmt.Printf("  ergoz not installed: %v. Everything else is in place; rerun with --no-ergoz to silence this.\n", err)
+	}
+	return nil
+}
+
+func installErgoz() error {
+	ch, pin, err := helmchart.LoadErgoz()
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  Installing ergoz %s (accelerator power telemetry) into %s...\n", pin.Version, ergozNamespace)
+	vals := map[string]interface{}{"sympozium": map[string]interface{}{"advertise": true}}
+	if err := helmInstallOrUpgradeRelease(ergozReleaseName, ergozNamespace, ch, vals); err != nil {
+		return err
+	}
+	fmt.Println("  ergoz installed; power readings appear in the UI once its collector is up. Skip it next time with --no-ergoz.")
+	return nil
+}
+
+// helmInstallOrUpgradeRelease installs or upgrades one Helm release,
+// recovering a failed previous revision by reinstalling.
+func helmInstallOrUpgradeRelease(name, namespace string, ch *chart.Chart, vals map[string]interface{}) error {
+	cfg, err := newHelmConfig(namespace)
 	if err != nil {
 		return err
 	}
@@ -1685,7 +1734,7 @@ func helmInstallOrUpgrade(ch *chart.Chart, vals map[string]interface{}) error {
 	// Check if a release already exists and in what state.
 	histClient := action.NewHistory(cfg)
 	histClient.Max = 1
-	history, histErr := histClient.Run(helmReleaseName)
+	history, histErr := histClient.Run(name)
 
 	// A release is recoverable-by-install if history is missing, or if the
 	// most recent revision is in a non-deployed state (failed, pending-*,
@@ -1701,7 +1750,7 @@ func helmInstallOrUpgrade(ch *chart.Chart, vals map[string]interface{}) error {
 			uninstall := action.NewUninstall(cfg)
 			uninstall.Wait = true
 			uninstall.Timeout = 2 * time.Minute
-			if _, err := uninstall.Run(helmReleaseName); err != nil {
+			if _, err := uninstall.Run(name); err != nil {
 				return fmt.Errorf("cleaning up failed release: %w", err)
 			}
 			needsFreshInstall = true
@@ -1711,8 +1760,8 @@ func helmInstallOrUpgrade(ch *chart.Chart, vals map[string]interface{}) error {
 	if needsFreshInstall {
 		fmt.Println("  Running Helm install...")
 		install := action.NewInstall(cfg)
-		install.ReleaseName = helmReleaseName
-		install.Namespace = helmNamespace
+		install.ReleaseName = name
+		install.Namespace = namespace
 		// Safe to always request namespace creation: Helm treats an existing
 		// namespace as a no-op, and the chart's own Namespace template is
 		// disabled via buildHelmValues (createNamespace=false), so there is
@@ -1729,12 +1778,12 @@ func helmInstallOrUpgrade(ch *chart.Chart, vals map[string]interface{}) error {
 		// Existing deployed release — upgrade.
 		fmt.Println("  Running Helm upgrade...")
 		upgrade := action.NewUpgrade(cfg)
-		upgrade.Namespace = helmNamespace
+		upgrade.Namespace = namespace
 		upgrade.SkipCRDs = true
 		upgrade.Wait = false
 		upgrade.Timeout = 5 * time.Minute
 
-		if _, err := upgrade.Run(helmReleaseName, ch, vals); err != nil {
+		if _, err := upgrade.Run(name, ch, vals); err != nil {
 			return fmt.Errorf("helm upgrade: %w", err)
 		}
 	}
