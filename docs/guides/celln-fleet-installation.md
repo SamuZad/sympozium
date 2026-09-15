@@ -28,10 +28,17 @@ with a key generated in CI and discarded; the identity is the
 Celln plane and a bare install is enough:
 
 ```sh
-export DEEPSEEK_API_KEY=...        # or OPENAI_API_KEY, ANTHROPIC_API_KEY, or
-                                   # SYMPOZIUM_CELLN_BACKEND=name=native,provider=llama-server,model=M,endpoint=http://H:8080/v1/chat/completions,allow-insecure=true
+export DEEPSEEK_API_KEY=...        # every present key (DeepSeek, OpenAI, Anthropic) becomes a backend;
+                                   # the first is the default, the rest are named after their provider
+export SYMPOZIUM_CELLN_BACKEND='name=native,provider=llama-server,model=M,endpoint=http://H:8080/v1/chat/completions,allow-insecure=true'
+                                   # explicit specs, several separated by semicolons, come first
 sympozium install
 ```
+
+Several providers side by side is the normal case: each backend is a
+wrapper in every namespace (`celln-<name>`) and each Agent picks its
+backend in the wizard. Rerunning the install with one more backend adds it
+to the running fleet without restarting anyone's conversation.
 
 In a terminal with none of those set, the install asks for a provider and a
 key; without a terminal it installs the one-shot router only and says what to

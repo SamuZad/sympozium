@@ -65,31 +65,56 @@ var keyedProviders = []providerDefault{
 	{env: "ANTHROPIC_API_KEY", provider: cellninstall.ModelProviderAnthropic, model: "claude-sonnet-5"},
 }
 
-// backendsFromEnvironment finds a model backend without flags: an explicit
-// SYMPOZIUM_CELLN_BACKEND (the --celln-fleet-backend syntax) or the first
-// provider key present. The first backend found is the fleet's default one.
+// backendsFromEnvironment finds model backends without flags. Explicit
+// specs in SYMPOZIUM_CELLN_BACKEND (the --celln-fleet-backend syntax, several
+// separated by semicolons) come first; then every provider key present adds
+// a backend named after its provider. The first backend found is the fleet's
+// default one, named native, unless a spec already claims that name.
 func backendsFromEnvironment() ([]cellninstall.FleetBackend, string, error) {
-	if spec := strings.TrimSpace(os.Getenv("SYMPOZIUM_CELLN_BACKEND")); spec != "" {
-		backends, err := parseFleetBackends([]string{spec})
+	var backends []cellninstall.FleetBackend
+	var sources []string
+	if raw := strings.TrimSpace(os.Getenv("SYMPOZIUM_CELLN_BACKEND")); raw != "" {
+		var specs []string
+		for _, spec := range strings.Split(raw, ";") {
+			if spec = strings.TrimSpace(spec); spec != "" {
+				specs = append(specs, spec)
+			}
+		}
+		parsed, err := parseFleetBackends(specs)
 		if err != nil {
 			return nil, "", fmt.Errorf("SYMPOZIUM_CELLN_BACKEND: %w", err)
 		}
-		return backends, "SYMPOZIUM_CELLN_BACKEND", nil
+		backends = append(backends, parsed...)
+		sources = append(sources, "SYMPOZIUM_CELLN_BACKEND")
+	}
+	named := map[string]bool{}
+	for _, b := range backends {
+		named[b.Name] = true
 	}
 	for _, p := range keyedProviders {
 		if strings.TrimSpace(os.Getenv(p.env)) == "" {
 			continue
 		}
-		return []cellninstall.FleetBackend{{Name: cellnplatform.DefaultBackend, Model: cellninstall.FleetModel{Provider: p.provider, Name: p.model}, CredentialEnv: p.env}}, p.env, nil
+		name := p.provider
+		if len(backends) == 0 {
+			name = cellnplatform.DefaultBackend
+		}
+		if named[name] {
+			continue
+		}
+		named[name] = true
+		backends = append(backends, cellninstall.FleetBackend{Name: name, Model: cellninstall.FleetModel{Provider: p.provider, Name: p.model}, CredentialEnv: p.env})
+		sources = append(sources, p.env)
 	}
-	return nil, "", nil
+	return backends, strings.Join(sources, ", "), nil
 }
 
 // promptFleetBackend asks an interactive operator for one backend. An empty
 // answer, or "skip", installs without the fleet.
 func promptFleetBackend(reader *bufio.Reader) (*cellninstall.FleetBackend, string, error) {
 	fmt.Println("\n  Celln agents run against a model backend whose key stays on the fleet nodes.")
-	fmt.Println("  Set DEEPSEEK_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY or SYMPOZIUM_CELLN_BACKEND to skip this prompt.")
+	fmt.Println("  Set DEEPSEEK_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY (each present key becomes a backend) or")
+	fmt.Println("  SYMPOZIUM_CELLN_BACKEND (specs separated by semicolons) to skip this prompt.")
 	provider := strings.ToLower(prompt(reader, "  Model provider (deepseek, openai, anthropic, llama-server, or skip)", cellninstall.ModelProviderDeepSeek))
 	switch provider {
 	case "", "skip", "none", "no":
@@ -201,7 +226,11 @@ func (f *cellnFleetFlags) enableByDefault(reader *bufio.Reader) (bool, error) {
 	}
 	f.options.Backends = append(f.options.Backends, backends...)
 	f.defaulted = true
-	fmt.Printf("  Celln fleet: scope %q, backend %s (%s) from %s, state under %s.\n", f.options.Scope, backends[0].Name, backends[0].Model.Provider, source, f.outputDir)
+	names := make([]string, 0, len(backends))
+	for _, b := range backends {
+		names = append(names, b.Name+" ("+b.Model.Provider+")")
+	}
+	fmt.Printf("  Celln fleet: scope %q, backend(s) %s from %s, state under %s.\n", f.options.Scope, strings.Join(names, ", "), source, f.outputDir)
 	fmt.Printf("  The starter tools are approved by this default: %s.\n", starterToolGrants)
 	return true, nil
 }
