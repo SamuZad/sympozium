@@ -20,13 +20,13 @@ func TestBackendsFromEnvironmentPrefersTheExplicitSpecThenTheFirstKey(t *testing
 	t.Setenv("OPENAI_API_KEY", "sk-"+strings.Repeat("x", 40))
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-"+strings.Repeat("y", 40))
 	backends, source, err := backendsFromEnvironment()
-	if err != nil || len(backends) != 1 || backends[0].Name != "native" || backends[0].Model.Provider != "openai" || backends[0].Model.Name != "gpt-4o-mini" || backends[0].CredentialEnv != "OPENAI_API_KEY" || source != "OPENAI_API_KEY" {
-		t.Fatalf("first provider key must become the default backend: %+v %q %v", backends, source, err)
+	if err != nil || len(backends) != 2 || backends[0].Name != "native" || backends[0].Model.Provider != "openai" || backends[0].Model.Name != "gpt-4o-mini" || backends[0].CredentialEnv != "OPENAI_API_KEY" || backends[1].Name != "anthropic" || backends[1].CredentialEnv != "ANTHROPIC_API_KEY" || source != "OPENAI_API_KEY, ANTHROPIC_API_KEY" {
+		t.Fatalf("every provider key becomes a backend, the first as the default: %+v %q %v", backends, source, err)
 	}
-	t.Setenv("SYMPOZIUM_CELLN_BACKEND", "name=native,provider=llama-server,model=q.gguf,endpoint=http://10.0.0.5:8080/v1/chat/completions,allow-insecure=true")
+	t.Setenv("SYMPOZIUM_CELLN_BACKEND", "name=native,provider=llama-server,model=q.gguf,endpoint=http://10.0.0.5:8080/v1/chat/completions,allow-insecure=true; name=openai,provider=openai,model=gpt-4o,credential-env=OPENAI_API_KEY")
 	backends, source, err = backendsFromEnvironment()
-	if err != nil || len(backends) != 1 || backends[0].Model.Provider != "llama-server" || !backends[0].Model.AllowInsecure || source != "SYMPOZIUM_CELLN_BACKEND" {
-		t.Fatalf("the explicit spec wins over provider keys: %+v %q %v", backends, source, err)
+	if err != nil || len(backends) != 3 || backends[0].Model.Provider != "llama-server" || !backends[0].Model.AllowInsecure || backends[1].Name != "openai" || backends[1].Model.Name != "gpt-4o" || backends[2].Name != "anthropic" || source != "SYMPOZIUM_CELLN_BACKEND, ANTHROPIC_API_KEY" {
+		t.Fatalf("specs come first, keys add backends they do not already name: %+v %q %v", backends, source, err)
 	}
 	t.Setenv("SYMPOZIUM_CELLN_BACKEND", "provider=openai")
 	if _, _, err := backendsFromEnvironment(); err == nil {
