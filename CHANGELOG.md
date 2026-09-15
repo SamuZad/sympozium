@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.10.72](https://github.com/sympozium-ai/sympozium/compare/v0.10.71...v0.10.72) (2026-09-15)
+
+
+### Bug Fixes
+
+* **release:** build the starter package from relative paths ([f88bbb1](https://github.com/sympozium-ai/sympozium/commit/f88bbb17b355ddbbd72628ffc249ced5ce1a11d3))
+* **release:** build the starter package from relative paths ([5cdccd0](https://github.com/sympozium-ai/sympozium/commit/5cdccd02c1e7c531efffb712b8c75964f835bf62))
+
 ## [0.10.71](https://github.com/sympozium-ai/sympozium/compare/v0.10.70...v0.10.71) (2026-09-15)
 
 
