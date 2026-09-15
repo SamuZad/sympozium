@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.10.70](https://github.com/sympozium-ai/sympozium/compare/v0.10.69...v0.10.70) (2026-09-15)
+
+
+### Features
+
+* **celln:** eight brokered tools — run files listed, appended, searched, deleted; JSON posted ([6331b72](https://github.com/sympozium-ai/sympozium/commit/6331b72553a525526077ae330b5555f603ad6b8a))
+* **celln:** eight brokered tools — run files listed, appended, searched, deleted; JSON posted ([326158c](https://github.com/sympozium-ai/sympozium/commit/326158c664a24c5d954ee65d58978baaf1a9c665))
+
 ## [0.10.69](https://github.com/sympozium-ai/sympozium/compare/v0.10.68...v0.10.69) (2026-09-15)
 
 
