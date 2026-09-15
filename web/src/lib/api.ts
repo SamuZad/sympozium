@@ -156,6 +156,8 @@ export interface CellnPlatformProfile {
   wrapper: string;
   /** Name of the Agent the wrappers create for this backend. */
   agent: string;
+  /** Shared catalogue revisions the policy lends to runs on this profile (cellnSelection.clusterToolRefs). */
+  tools: { name: string; revision: string }[];
   /** The policy's per-parent maxima and the budget a new conversation should ask for. */
   ceilings: EnduringLimits;
   sessionDefaults: EnduringLimits;

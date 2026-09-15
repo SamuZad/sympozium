@@ -527,10 +527,34 @@ type CellnPlatformProfile struct {
 	Backend string `json:"backend"`
 	Wrapper string `json:"wrapper"`
 	Agent   string `json:"agent"`
+	// Tools are the shared catalogue revisions the policy lends to runs on
+	// this profile; a run selects them as cellnSelection.clusterToolRefs.
+	Tools []sympoziumv1alpha1.ClusterCellnToolRef `json:"tools"`
 	// Ceilings are the policy's per-parent maxima; SessionDefaults is the
 	// budget a new conversation should ask for (within them).
 	Ceilings        sympoziumv1alpha1.EnduringRunSpec `json:"ceilings"`
 	SessionDefaults sympoziumv1alpha1.EnduringRunSpec `json:"sessionDefaults"`
+}
+
+// platformPersona returns the system prompt a fleet runtime profile binds
+// when the Agent (or the run's runtime override) is a platform wrapper.
+func (s *Server) platformPersona(ctx context.Context, ns string, inst *sympoziumv1alpha1.Agent, runtimeRef string) (string, bool) {
+	name := runtimeRef
+	if name == "" {
+		name = inst.Spec.RuntimeRef
+	}
+	if name == "" {
+		return "", false
+	}
+	var runtime sympoziumv1alpha1.AgentRuntime
+	if err := s.client.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &runtime); err != nil || runtime.Spec.CellnProfileRef == nil {
+		return "", false
+	}
+	var profile sympoziumv1alpha1.CellnRuntimeProfile
+	if err := s.client.Get(ctx, types.NamespacedName{Name: runtime.Spec.CellnProfileRef.Name}, &profile); err != nil || profile.Spec.Native == nil || profile.Spec.Native.SystemPrompt == "" {
+		return "", false
+	}
+	return profile.Spec.Native.SystemPrompt, true
 }
 
 // listCellnPlatformProfiles lists the native profiles the request namespace's
@@ -555,7 +579,11 @@ func (s *Server) listCellnPlatformProfiles(w http.ResponseWriter, r *http.Reques
 		c := a.Policy.Spec.Ceilings
 		ceilings := sympoziumv1alpha1.EnduringRunSpec{LeaseSeconds: int32(min(c.MaxParentLeaseSeconds, 86400)), MaxTurns: int32(min(c.MaxTurns, 1024)), MaxModelRequests: int32(min(c.MaxModelRequests, 6144)), MaxOutputTokens: c.MaxOutputTokens}
 		names := cellnplatform.WrapperNames(cellnplatform.Backend(&a.Profile))
-		out = append(out, CellnPlatformProfile{Name: a.Profile.Name, Revision: a.Profile.Spec.Revision, Policy: a.Policy.Name, Model: connection.Spec.Models[0], Provider: connection.Spec.Provider, Endpoint: connection.Spec.Endpoint, CredentialProfile: connection.Spec.CredentialProfile, SystemPrompt: a.Profile.Spec.Native.SystemPrompt, Backend: names.Backend, Wrapper: names.Runtime, Agent: names.Agent, Ceilings: ceilings, SessionDefaults: *cellninstall.SessionDefaults(ceilings)})
+		tools := make([]sympoziumv1alpha1.ClusterCellnToolRef, 0, len(a.Policy.Spec.Tools))
+		for _, t := range a.Policy.Spec.Tools {
+			tools = append(tools, t.Ref)
+		}
+		out = append(out, CellnPlatformProfile{Name: a.Profile.Name, Revision: a.Profile.Spec.Revision, Policy: a.Policy.Name, Model: connection.Spec.Models[0], Provider: connection.Spec.Provider, Endpoint: connection.Spec.Endpoint, CredentialProfile: connection.Spec.CredentialProfile, SystemPrompt: a.Profile.Spec.Native.SystemPrompt, Backend: names.Backend, Wrapper: names.Runtime, Agent: names.Agent, Tools: tools, Ceilings: ceilings, SessionDefaults: *cellninstall.SessionDefaults(ceilings)})
 	}
 	writeJSON(w, out)
 }
@@ -1430,6 +1458,14 @@ func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
 	req.ModelConnectionRef = resolved.ModelConnectionRef
 	req.Provider = resolved.Provider
 	req.Model = resolved.Model
+	// A run on a fleet profile must carry the profile's bound persona
+	// verbatim; a client that sends none gets it here rather than a
+	// mismatch at admission.
+	if req.SystemPrompt == "" && req.Backend == "celln" && req.CellnSelection != nil && len(req.CellnSelection.ToolRefs) == 0 {
+		if persona, ok := s.platformPersona(r.Context(), ns, &inst, req.CellnSelection.RuntimeRef); ok {
+			req.SystemPrompt = persona
+		}
+	}
 
 	if req.ExecutionLifecycle == "enduring" && (len(req.Task) > 2048 || strings.ContainsRune(req.Task, '\x00')) {
 		http.Error(w, "enduring initial message must be at most 2048 UTF-8 bytes without NUL", http.StatusBadRequest)

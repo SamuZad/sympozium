@@ -300,6 +300,28 @@ The installer also probes every backend before touching the cluster (PR
 #548): on this run both backends answered a one-token request on their own
 protocol before the install began.
 
+## Picking a backend and answering once from the UI
+
+The Agent page's Harness tab now carries a **Model backend** picker (every
+backend the namespace's fleet offers, with provider, model and protocol),
+lifecycle cards that explain one-shot versus enduring, wrapper-aware runtime
+labels, and an **Answer once** box on the conversation panel. Proven with
+`web/cypress/e2e/agent-backend-picker.cy.ts` against `fleet-ci` through the
+Vite dev server and the live API:
+
+| Step | Result |
+| --- | --- |
+| Agent created on `native`; picker shows "Runs on …"; `messages` chosen | wrappers ensured, Agent rebound: runtime `celln-messages`, connection `celln-messages`, model and the policy's three shared tools |
+| Lifecycle cards | "single-turn parent" and "follow-up turns" explanations present |
+| "Ask once" with "Where is Botswana?" | one-shot run on `celln-messages`, no `enduring` block, Succeeded in about 24 s with an answer naming Botswana |
+
+Found on the way: a run created from the UI carried no `systemPrompt`, and
+the provision plan refuses a persona that differs from the profile's, so the
+run sat in admission pending. The API now fills a fleet profile's persona in
+when a client omits it, and the plan's persona/route/tool-call mismatches
+are platform refusals (`AUTH_POLICY_CONTRACTED`) rather than generic
+pending states.
+
 ## Environment caveats
 
 - Kind nodes have no kernel in `/boot`; the dispatcher's readiness gate
