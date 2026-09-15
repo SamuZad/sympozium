@@ -1324,6 +1324,13 @@ layers (enduring native parents); it requires the operator-reviewed
 			if err := runInstall(imageTag, setValues); err != nil {
 				return err
 			}
+			if !noCelln && !cellnNative {
+				// The plain install deploys the one-shot router only; say so
+				// here rather than leaving "Celln parent" greyed out in the UI.
+				fmt.Println("\n  Celln: the one-shot router is installed (New Run → Celln cell). Enduring Celln parents")
+				fmt.Println("  need the fleet: rerun with --celln-fleet and a model backend, then label KVM nodes")
+				fmt.Println("  celln.dev/kvm=true. Guide: docs/guides/celln-fleet-installation.md")
+			}
 			if cellnNative {
 				if err := initClient(); err != nil {
 					return err
