@@ -228,6 +228,8 @@ export interface CellnTool {
     supportOwner: string;
     publisherKey: string;
     invocationABI: string;
+    /** Digest-pinned image a borrowed command was taken from; provenance only. */
+    sourceImage?: string;
     lane: string;
     limits: { timeoutMillis: number; memoryBytes: number; argumentBytes: number; outputBytes: number; workspace: string; effects: string;
       artifacts?: { operation: "read" | "write"; maxOperations: number; maxFiles: number; maxFileBytes: number; maxTotalBytes: number };

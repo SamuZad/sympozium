@@ -145,7 +145,7 @@ func Install(ctx context.Context, store client.Client, o Options) error {
 	if configured.PackageHash != o.PackageHash || configured.CatalogueHash != hashes["catalogue.json"] || configured.NativeTemplateHash != hashes["native-template.json"] {
 		return fmt.Errorf("configuration differs from reviewed package/receipt")
 	}
-	if configured.APIVersion != "celln.native-starter-configured/v1" || configured.ExecutionAuthorized || configured.Readiness != "not_established" || native.ModelProfile != configured.ModelProfile || len(cat.Tools) != 3 || cat.Worker.ContractVersion != "celln.json-tools/v1" {
+	if configured.APIVersion != "celln.native-starter-configured/v1" || configured.ExecutionAuthorized || configured.Readiness != "not_established" || native.ModelProfile != configured.ModelProfile || len(cat.Tools) < 3 || len(cat.Tools) > 16 || cat.Worker.ContractVersion != "celln.json-tools/v1" {
 		return fmt.Errorf("operator starter configuration mismatch")
 	}
 	names := map[string]bool{"workspace-read": true, "workspace-write": true, "https-fetch": true}
