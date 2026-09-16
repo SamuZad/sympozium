@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	api "github.com/sympozium-ai/sympozium/api/v1alpha1"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -221,6 +222,7 @@ func (m FleetModel) Resolve(scope string) (FleetModel, error) {
 			return m, fmt.Errorf("model provider %q needs an explicit endpoint and protocol (openai-chat or anthropic-messages)", m.Provider)
 		}
 	}
+	m.Endpoint = CompleteModelEndpoint(m.Protocol, m.Endpoint)
 	if m.Name == "" {
 		return m, fmt.Errorf("model provider %q needs --celln-fleet-model (the model name the backend serves)", m.Provider)
 	}
@@ -235,6 +237,29 @@ func (m FleetModel) Resolve(scope string) (FleetModel, error) {
 		return m, fmt.Errorf("model provider, endpoint and name must not contain commas, equals signs or spaces")
 	}
 	return m, nil
+}
+
+// CompleteModelEndpoint turns a server root (http://host:8080) or API root
+// (…/v1) into the request URL the protocol posts to, so an operator can give
+// the address a local server prints. Any other path is kept as given.
+func CompleteModelEndpoint(protocol, endpoint string) string {
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Host == "" {
+		return endpoint
+	}
+	suffix := "/chat/completions"
+	if protocol == "anthropic-messages" {
+		suffix = "/messages"
+	}
+	switch path := strings.TrimRight(u.Path, "/"); {
+	case path == "":
+		u.Path = "/v1" + suffix
+	case strings.HasSuffix(path, "/v1"):
+		u.Path = path + suffix
+	default:
+		return endpoint
+	}
+	return u.String()
 }
 
 // NeedsCredential reports whether the backend requires a real provider key.
