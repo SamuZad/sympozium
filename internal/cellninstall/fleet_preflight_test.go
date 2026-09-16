@@ -99,3 +99,49 @@ func writeKey(t *testing.T, key string) string {
 	}
 	return path
 }
+
+// A local server given only by its address names its own model.
+func TestDetectModelReadsTheServedModel(t *testing.T) {
+	ctx := context.Background()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"qwen3-30b.gguf","object":"model"}]}`))
+		case "/empty/v1/models":
+			_, _ = w.Write([]byte(`{"data":[]}`))
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer server.Close()
+	for _, endpoint := range []string{server.URL + "/v1/chat/completions", server.URL + "/v1", server.URL + "/v1/"} {
+		if got, err := DetectModel(ctx, server.Client(), endpoint, ""); err != nil || got != "qwen3-30b.gguf" {
+			t.Fatalf("%s: %q %v", endpoint, got, err)
+		}
+	}
+	if _, err := DetectModel(ctx, server.Client(), server.URL+"/empty/v1/chat/completions", ""); err == nil || !strings.Contains(err.Error(), "lists no model") {
+		t.Fatalf("empty listing accepted: %v", err)
+	}
+	if _, err := DetectModel(ctx, server.Client(), server.URL+"/missing/v1/chat/completions", ""); err == nil || !strings.Contains(err.Error(), "HTTP 404") {
+		t.Fatalf("missing listing accepted: %v", err)
+	}
+}
+
+func TestCompleteModelEndpointFillsTheRequestPath(t *testing.T) {
+	for _, c := range [][3]string{
+		{"openai-chat", "http://framework:8080", "http://framework:8080/v1/chat/completions"},
+		{"openai-chat", "http://framework:8080/", "http://framework:8080/v1/chat/completions"},
+		{"openai-chat", "http://framework:8080/v1", "http://framework:8080/v1/chat/completions"},
+		{"anthropic-messages", "https://gw.example/v1/", "https://gw.example/v1/messages"},
+		{"openai-chat", "https://api.deepseek.com/chat/completions", "https://api.deepseek.com/chat/completions"},
+		{"openai-chat", "https://gw.example/custom/route", "https://gw.example/custom/route"},
+	} {
+		if got := CompleteModelEndpoint(c[0], c[1]); got != c[2] {
+			t.Fatalf("%s %s: got %s want %s", c[0], c[1], got, c[2])
+		}
+	}
+	got, err := FleetModel{Provider: ModelProviderLlamaServer, Name: "q", Endpoint: "http://framework:8080", AllowInsecure: true}.Resolve("trial")
+	if err != nil || got.Endpoint != "http://framework:8080/v1/chat/completions" {
+		t.Fatalf("bare llama-server address not completed: %+v %v", got, err)
+	}
+}

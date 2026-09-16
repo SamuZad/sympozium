@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useModelList, modelApiBaseURL } from "@/hooks/use-model-list";
 import { useProviderNodes } from "@/hooks/use-provider-nodes";
 import { Input } from "@/components/ui/input";
@@ -45,12 +45,13 @@ import {
 import { cn } from "@/lib/utils";
 import { providersForPlane } from "@/lib/creation";
 import { PlanePicker } from "@/components/plane-picker";
+import { CellnProviderPicker } from "@/components/celln-provider-picker";
 import { useCapabilities, useModels, useCellnTools, useClusterCellnTools, useModelConnections, useCellnPlatformProfiles } from "@/hooks/use-api";
 import { persistentHarnesses, persistentHarnessName } from "@/lib/persistent-harness";
 import { modelConnectionName, modelConnectionEndpoint } from "@/lib/agent-execution";
 import { api } from "@/lib/api";
 import type { WizardExecution } from "@/lib/agent-execution";
-import type { AgentRuntime, SympoziumPolicy, CellnSelection, ModelConnection } from "@/lib/api";
+import type { AgentRuntime, SympoziumPolicy, CellnSelection, CellnTool, CellnPlatformProfile, ModelConnection } from "@/lib/api";
 import {
   YamlModal,
   instanceYamlFromWizard,
@@ -702,24 +703,46 @@ export function OnboardingWizard({
   const catalogue = wrapperRuntime ? clusterCatalogue : namespacedCatalogue;
   const connections = useModelConnections();
   const hostConnections = useMemo(() => (connections.data || []).filter((connection) => !!connection.spec.credentialProfile && !connection.spec.disabled), [connections.data]);
-  const toolsInitialized = useRef(defaults?.borrowedTools !== undefined);
+  // The shared catalogue (wrapper runtimes) also admits argv tools and lends
+  // up to 24; a namespaced parent plan accepts only JSON-stdio tools, 16 max.
+  const toolSupported = useCallback(
+    (tool: CellnTool) => tool.spec.lane === "tool" && (tool.spec.invocationABI === "celln.json-stdio/v1" || (wrapperRuntime && tool.spec.invocationABI === "celln.argv/v1")),
+    [wrapperRuntime],
+  );
+  const maxTools = wrapperRuntime ? 24 : 16;
+  // Records which catalogue the default selection was taken from, so switching
+  // between the namespaced and shared catalogue re-selects every compatible tool.
+  const toolsInitialized = useRef<string | null>(defaults?.borrowedTools !== undefined ? "defaults" : null);
   useEffect(() => {
-    if (!celln || toolsInitialized.current || !catalogue.data) return;
-    toolsInitialized.current = true;
-    const borrowedTools = catalogue.data.filter((tool) => tool.spec.invocationABI === "celln.json-stdio/v1" && tool.spec.lane === "tool").map((tool) => ({ name: tool.metadata.name, revision: tool.spec.revision }));
+    const source = wrapperRuntime ? "cluster" : "namespace";
+    if (!celln || toolsInitialized.current === "defaults" || toolsInitialized.current === source || !catalogue.data) return;
+    toolsInitialized.current = source;
+    const borrowedTools = catalogue.data.filter(toolSupported).slice(0, maxTools).map((tool) => ({ name: tool.metadata.name, revision: tool.spec.revision }));
     setForm((current) => ({ ...current, borrowedTools }));
-  }, [celln, catalogue.data]);
+  }, [celln, wrapperRuntime, catalogue.data, toolSupported, maxTools]);
   const platformProfile = wrapperRuntime ? (platformProfiles.data || []).find((profile) => profile.name === selectedRuntime?.spec.cellnProfileRef?.name) : undefined;
+  // Binds the Agent to one fleet backend: its wrapper runtime and, when this
+  // namespace already has it, the host-profile connection for that backend
+  // (otherwise the wrappers are created on completion).
+  const bindProfile = useCallback((profile: CellnPlatformProfile) => {
+    const runtime = nativeRuntimes.find((candidate) => candidate.spec.cellnProfileRef?.name === profile.name);
+    const connection = hostConnections.find((candidate) => candidate.metadata.name === profile.wrapper && candidate.spec.credentialProfile === profile.credentialProfile)
+      || hostConnections.find((candidate) => candidate.spec.credentialProfile === profile.credentialProfile);
+    setForm((current) => ({
+      ...current,
+      runtimeRef: runtime?.metadata.name || profile.wrapper,
+      modelConnectionRef: connection?.metadata.name,
+      provider: profile.provider,
+      model: profile.model,
+      credentialProfile: profile.credentialProfile,
+    }));
+  }, [nativeRuntimes, hostConnections]);
+  const boundProfile = useRef<string | null>(null);
   useEffect(() => {
-    if (!wrapperRuntime || form.modelConnectionRef) return;
-    if (hostConnections.length > 0) {
-      const connection = hostConnections[0];
-      setForm((current) => ({ ...current, modelConnectionRef: connection.metadata.name, provider: connection.spec.provider, model: connection.spec.models[0] || current.model, credentialProfile: connection.spec.credentialProfile || "" }));
-    } else if (platformProfile) {
-      // The connection is created with the wrappers on completion.
-      setForm((current) => ({ ...current, provider: platformProfile.provider, model: platformProfile.model, credentialProfile: platformProfile.credentialProfile }));
-    }
-  }, [wrapperRuntime, form.modelConnectionRef, hostConnections, platformProfile]);
+    if (!platformProfile || connections.isLoading || boundProfile.current === platformProfile.name + ":" + hostConnections.length) return;
+    boundProfile.current = platformProfile.name + ":" + hostConnections.length;
+    bindProfile(platformProfile);
+  }, [platformProfile, connections.isLoading, hostConnections, bindProfile]);
   const compatibleRuntime = celln
     ? selectedRuntime?.spec.celln?.contractVersion === "celln.json-tools/v1" || wrapperRuntime
     : !form.runtimeRef || !!selectedRuntime?.spec.image;
@@ -735,7 +758,7 @@ export function OnboardingWizard({
       }),
     [celln, mode, creationKind, form.runtimeRef, form.allowInsecure],
   );
-  const staleTools = (form.borrowedTools || []).some((ref) => !(catalogue.data || []).some((tool) => tool.metadata.name === ref.name && tool.spec.revision === ref.revision && tool.spec.invocationABI === "celln.json-stdio/v1" && tool.spec.lane === "tool"));
+  const staleTools = (form.borrowedTools || []).some((ref) => !(catalogue.data || []).some((tool) => tool.metadata.name === ref.name && tool.spec.revision === ref.revision && toolSupported(tool)));
   const [inferenceMode, setInferenceMode] = useState<"workload" | "node">(
     "workload",
   );
@@ -819,11 +842,13 @@ export function OnboardingWizard({
       case "runtime":
         return !!form.runtimeRef && compatibleRuntime;
       case "provider":
+        // A fleet provider needs a ready backend before the Agent can bind to it.
+        if (wrapperRuntime) return !!platformProfile && platformProfile.provider === form.provider;
         return !!form.provider;
       case "plane":
         return true;
       case "tools":
-        return !catalogue.isLoading && !catalogue.isError && !staleTools && (form.borrowedTools || []).length <= 16;
+        return !catalogue.isLoading && !catalogue.isError && !staleTools && (form.borrowedTools || []).length <= maxTools;
       case "apikey":
         if (celln) return true;
         if (form.modelConnectionRef) return true;
@@ -991,7 +1016,7 @@ export function OnboardingWizard({
 
   // Reset form when defaults change (new wizard opened)
   function resetWith(d: Partial<WizardResult>) {
-    toolsInitialized.current = d.borrowedTools !== undefined;
+    toolsInitialized.current = d.borrowedTools !== undefined ? "defaults" : null;
     setForm({
       name: d.name || "",
       modelConnectionRef: d.modelConnectionRef,
@@ -1188,7 +1213,7 @@ export function OnboardingWizard({
                 disabledPlanes={nativeRuntimes.length === 0 ? ["celln"] : []}
                 disabledHint={{ celln: "Needs the Celln fleet (sympozium install --celln-fleet …); the one-shot router alone does not run parents" }}
                 onChange={(plane) => {
-                  toolsInitialized.current = false;
+                  toolsInitialized.current = null;
                   const planeRuntimes = plane === "celln" ? nativeRuntimes : persistentRuntimes;
                   const keepRuntime = planeRuntimes.some((runtime) => runtime.metadata.name === form.runtimeRef);
                   setForm({
@@ -1241,41 +1266,50 @@ export function OnboardingWizard({
           {catalogue.isError && <p role="alert">Cannot load the tool catalogue. Retry before creating this Agent.</p>}
           {catalogue.isError && <Button type="button" onClick={() => catalogue.refetch()}>Retry catalogue</Button>}
           {!catalogue.isLoading && !catalogue.isError && catalogue.data?.length === 0 && <p>{wrapperRuntime ? "The platform catalogue has no shared tools." : "No tools installed in this namespace."} An empty selection lends no tools.</p>}
-          {(catalogue.data || []).map((tool) => {
-            const selected = (form.borrowedTools || []).some((ref) => ref.name === tool.metadata.name && ref.revision === tool.spec.revision);
-            const supported = tool.spec.invocationABI === "celln.json-stdio/v1" && tool.spec.lane === "tool";
-            const suggested = ["workspace-read", "workspace-write", "https-fetch", "workspace-list", "workspace-append", "workspace-search", "workspace-delete", "https-post-json"].some((name) => tool.metadata.name === name || tool.metadata.name.endsWith("-" + name));
-            return <label key={tool.metadata.name} className="block rounded border p-3 text-sm">
-              <span className="flex items-center gap-2">
-                <input type="checkbox" disabled={!supported || (!selected && (form.borrowedTools || []).length >= 24)} checked={selected}
-                  onChange={() => setForm({ ...form, borrowedTools: selected ? (form.borrowedTools || []).filter((ref) => ref.name !== tool.metadata.name) : [...(form.borrowedTools || []), { name: tool.metadata.name, revision: tool.spec.revision }] })} />
-                {tool.metadata.name}@{tool.spec.revision}{suggested ? " — starter suggestion" : ""}{!supported ? " — unsupported ABI/lane" : ""}
-              </span>
-              <span className="mt-1 block text-xs text-muted-foreground">{tool.spec.description}</span>
-              <span className="block text-xs text-muted-foreground">Limit: {tool.spec.limits.timeoutMillis} ms · workspace: {tool.spec.limits.workspace} · effects: {tool.spec.limits.effects}</span>
-            </label>;
-          })}
-          {(form.borrowedTools || []).length > 16 && <p role="alert">Select at most 16 tools to continue.</p>}
-          <p className="text-xs">{(form.borrowedTools || []).length}/16 selected. No shell, Python, host mounts or unrestricted network access is included.</p>
+          {!!catalogue.data?.length && (() => {
+            const selectedTools = form.borrowedTools || [];
+            const supportedTools = catalogue.data.filter(toolSupported);
+            // Compatible tools first so the unsupported ones don't bury them.
+            const tools = [...supportedTools, ...catalogue.data.filter((tool) => !toolSupported(tool))];
+            const selectAll = () => setForm({ ...form, borrowedTools: supportedTools.slice(0, maxTools).map((tool) => ({ name: tool.metadata.name, revision: tool.spec.revision })) });
+            return <>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className={cn("text-xs", selectedTools.length > maxTools && "text-destructive")}>{selectedTools.length}/{maxTools} selected</span>
+                <span className="flex-1" />
+                <Button type="button" size="sm" variant="outline" disabled={selectedTools.length === Math.min(supportedTools.length, maxTools) && !staleTools} onClick={selectAll}>Select all</Button>
+                <Button type="button" size="sm" variant="outline" disabled={selectedTools.length === 0} onClick={() => setForm({ ...form, borrowedTools: [] })}>Lend no tools</Button>
+              </div>
+              <div className="grid max-h-[45vh] grid-cols-1 gap-2 overflow-y-auto rounded border p-2 sm:grid-cols-2">
+                {tools.map((tool) => {
+                  const selected = selectedTools.some((ref) => ref.name === tool.metadata.name && ref.revision === tool.spec.revision);
+                  const supported = toolSupported(tool);
+                  return <label key={tool.metadata.name} title={tool.spec.description} className={cn("flex min-w-0 gap-2 rounded border p-2 text-xs", supported ? "cursor-pointer hover:bg-muted/50" : "opacity-50", selected && "border-primary bg-primary/5")}>
+                    <input type="checkbox" className="mt-0.5 shrink-0" disabled={!supported || (!selected && selectedTools.length >= maxTools)} checked={selected}
+                      onChange={() => setForm({ ...form, borrowedTools: selected ? selectedTools.filter((ref) => ref.name !== tool.metadata.name) : [...selectedTools, { name: tool.metadata.name, revision: tool.spec.revision }] })} />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate font-medium">{tool.metadata.name}<span className="text-muted-foreground">@{tool.spec.revision}</span></span>
+                      <span className="line-clamp-2 text-muted-foreground">{tool.spec.description}</span>
+                      <span className="block truncate text-muted-foreground">{tool.spec.limits.timeoutMillis} ms · effects: {tool.spec.limits.effects}{!supported ? " · unsupported ABI/lane" : ""}</span>
+                    </span>
+                  </label>;
+                })}
+              </div>
+            </>;
+          })()}
+          {(form.borrowedTools || []).length > maxTools && <p role="alert">Select at most {maxTools} tools to continue.</p>}
+          <p className="text-xs text-muted-foreground">No shell, Python, host mounts or unrestricted network access is included.</p>
           {staleTools && <p role="alert">The catalogue changed. Clear the selection and choose current revisions.</p>}
-          {!!form.borrowedTools?.length && <Button type="button" variant="outline" onClick={() => setForm({ ...form, borrowedTools: [] })}>Lend no tools</Button>}
         </div>}
 
         {/* ── Provider step ─────────────────────────────────────────── */}
         {step === "provider" && wrapperRuntime && (
-          <div className="space-y-2 rounded-md border p-3" data-testid="platform-model-route">
-            <Label>Model route</Label>
-            {connections.isLoading && <p className="text-xs">Loading model connections…</p>}
-            {!connections.isLoading && hostConnections.length === 0 && platformProfile && <p className="text-xs">{platformProfile.provider} / {platformProfile.model} at {platformProfile.endpoint} through the owner-installed credential profile <code>{platformProfile.credentialProfile}</code>. This namespace's wrapper objects are created when you finish.</p>}
-            {!connections.isLoading && hostConnections.length === 0 && !platformProfile && <p role="alert" className="text-xs">No ModelConnection with a host credential profile exists in this namespace and no execution policy offers a platform profile here; without one this runtime cannot run.</p>}
-            {hostConnections.length > 0 && (
-              <Select value={form.modelConnectionRef || ""} onValueChange={(name) => { const connection = hostConnections.find((c) => c.metadata.name === name); if (connection) setForm({ ...form, modelConnectionRef: name, provider: connection.spec.provider, model: connection.spec.models[0] || form.model, credentialProfile: connection.spec.credentialProfile || "" }); }}>
-                <SelectTrigger><SelectValue placeholder="Choose a model connection" /></SelectTrigger>
-                <SelectContent>{hostConnections.map((connection) => <SelectItem key={connection.metadata.name} value={connection.metadata.name}>{connection.metadata.name} — {connection.spec.provider} / {connection.spec.models.join(", ")}</SelectItem>)}</SelectContent>
-              </Select>
-            )}
-            <p className="text-xs text-muted-foreground">The platform profile fixes the persona and the owner-installed credential; policy caps the ceilings. No key is entered here.</p>
-          </div>
+          <CellnProviderPicker
+            providers={PROVIDERS}
+            provider={form.provider}
+            selected={platformProfile}
+            onProvider={(provider) => setForm({ ...form, provider })}
+            onProfile={bindProfile}
+          />
         )}
         {step === "provider" && !wrapperRuntime && (
           <div className="space-y-4">

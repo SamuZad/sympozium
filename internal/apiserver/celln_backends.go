@@ -114,7 +114,21 @@ func (s *Server) addCellnFleetBackend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	model := cellninstall.FleetModel{Provider: strings.TrimSpace(req.Provider), Protocol: req.Protocol, Endpoint: req.Endpoint, Name: strings.TrimSpace(req.Model), AllowInsecure: req.AllowInsecure}
+	model := cellninstall.FleetModel{Provider: strings.TrimSpace(req.Provider), Protocol: req.Protocol, Endpoint: strings.TrimSpace(req.Endpoint), Name: strings.TrimSpace(req.Model), AllowInsecure: req.AllowInsecure}
+	// An OpenAI-compatible server given only by its address names its own
+	// model; a local llama-server serves exactly one.
+	if model.Name == "" && model.Endpoint != "" && (model.Protocol == "" || model.Protocol == "openai-chat") {
+		if req.SkipPreflight {
+			http.Error(w, "give the model name when the probe is skipped", http.StatusBadRequest)
+			return
+		}
+		detected, err := cellninstall.DetectModel(r.Context(), nil, cellninstall.CompleteModelEndpoint("openai-chat", model.Endpoint), strings.TrimSpace(req.Credential))
+		if err != nil {
+			http.Error(w, "model detection failed: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		model.Name = detected
+	}
 	resolved, err := model.Resolve(cellninstall.CredentialProfileFor(facts.Scope, req.Name))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)

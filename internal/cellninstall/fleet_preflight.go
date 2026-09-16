@@ -54,7 +54,7 @@ func PreflightBackend(ctx context.Context, httpClient *http.Client, b FleetBacke
 	}
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("backend %s: %s is unreachable from here: %w (use --celln-fleet-skip-preflight if only the nodes can reach it)", b.Name, b.Model.Endpoint, err)
+		return fmt.Errorf("backend %s: %s is unreachable from here: %w (if only the fleet nodes can reach it, skip the probe: --celln-fleet-skip-preflight, or skipPreflight in the API)", b.Name, b.Model.Endpoint, err)
 	}
 	defer resp.Body.Close()
 	snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
@@ -64,7 +64,7 @@ func PreflightBackend(ctx context.Context, httpClient *http.Client, b FleetBacke
 	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
 		return fmt.Errorf("backend %s: %s refused the key (HTTP %d): %s", b.Name, b.Model.Endpoint, resp.StatusCode, strings.TrimSpace(string(snippet)))
 	case resp.StatusCode >= 500:
-		return fmt.Errorf("backend %s: %s is not serving completions (HTTP %d): %s (retry later, or --celln-fleet-skip-preflight)", b.Name, b.Model.Endpoint, resp.StatusCode, strings.TrimSpace(string(snippet)))
+		return fmt.Errorf("backend %s: %s is not serving completions (HTTP %d): %s (retry later, or skip the probe)", b.Name, b.Model.Endpoint, resp.StatusCode, strings.TrimSpace(string(snippet)))
 	default:
 		return fmt.Errorf("backend %s: %s answered HTTP %d to a minimal chat request: %s (check the model name and protocol)", b.Name, b.Model.Endpoint, resp.StatusCode, strings.TrimSpace(string(snippet)))
 	}
@@ -90,4 +90,48 @@ func PreflightCredential(ctx context.Context, store client.Client, b FleetBacken
 		return fleetModelPlaceholderCredential, nil
 	}
 	return "", fmt.Errorf("backend %s needs a key: pass credential-file=/path (or --celln-fleet-model-credential-file for the native backend)", b.Name)
+}
+
+// DetectModel asks an OpenAI-compatible server which model it serves (GET
+// …/v1/models) and returns the first one. A local server such as
+// llama-server serves exactly one, so the operator needs only its address.
+func DetectModel(ctx context.Context, httpClient *http.Client, endpoint, credential string) (string, error) {
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: PreflightTimeout}
+	}
+	base := strings.TrimRight(endpoint, "/")
+	for _, suffix := range []string{"/chat/completions", "/completions", "/messages"} {
+		base = strings.TrimSuffix(base, suffix)
+	}
+	ctx, cancel := context.WithTimeout(ctx, PreflightTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/models", nil)
+	if err != nil {
+		return "", err
+	}
+	if credential != "" {
+		req.Header.Set("Authorization", "Bearer "+credential)
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("cannot list models at %s/models: %w", base, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("cannot list models at %s/models (HTTP %d); give the model name", base, resp.StatusCode)
+	}
+	var listing struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&listing); err != nil {
+		return "", fmt.Errorf("%s/models did not return a model list: %w", base, err)
+	}
+	for _, m := range listing.Data {
+		if id := strings.TrimSpace(m.ID); id != "" {
+			return id, nil
+		}
+	}
+	return "", fmt.Errorf("%s/models lists no model; give the model name", base)
 }
