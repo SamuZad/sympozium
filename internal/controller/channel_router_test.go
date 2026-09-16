@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -75,6 +77,133 @@ func TestHandleCompleted_Routing(t *testing.T) {
 				t.Fatalf("published topic = %q, want %q", bus.published[0].Topic, eventbus.TopicChannelMessageSend)
 			}
 		})
+	}
+}
+
+// TestHandleFailed_Routing: a failed channel-sourced run gets a reply in the
+// thread it came from — previously only successes were routed back, so a
+// timed-out or crashed run produced total silence in Slack/Telegram. The
+// classified reason bucket picks the advice; the raw error is quoted.
+func TestHandleFailed_Routing(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := sympoziumv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add sympozium scheme: %v", err)
+	}
+
+	channelRun := func() *sympoziumv1alpha1.AgentRun {
+		return &sympoziumv1alpha1.AgentRun{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "chan-run",
+				Namespace: "default",
+				Labels:    map[string]string{"sympozium.ai/source": "channel"},
+				Annotations: map[string]string{
+					"sympozium.ai/reply-channel":      "slack",
+					"sympozium.ai/reply-chat-id":      "C123",
+					"sympozium.ai/reply-thread-id":    "1700.1",
+					"sympozium.ai/reply-message-ts":   "1700.1",
+					"sympozium.ai/agent-display-name": "Support Bot",
+				},
+			},
+		}
+	}
+	scheduleRun := func() *sympoziumv1alpha1.AgentRun {
+		return &sympoziumv1alpha1.AgentRun{
+			ObjectMeta: metav1.ObjectMeta{Name: "chan-run", Namespace: "default"},
+		}
+	}
+
+	tests := []struct {
+		name          string
+		run           *sympoziumv1alpha1.AgentRun
+		bucket        string
+		errText       string
+		wantPublished int
+		wantContains  string
+	}{
+		{
+			name:          "timeout bucket gets runTimeout advice",
+			run:           channelRun(),
+			bucket:        "timeout",
+			errText:       "agent run exceeded timeout of 10m0s",
+			wantPublished: 1,
+			wantContains:  "runTimeout",
+		},
+		{
+			name:          "other bucket quotes the error",
+			run:           channelRun(),
+			bucket:        "llm_error",
+			errText:       "LLM completion failed: 429 rate limit",
+			wantPublished: 1,
+			wantContains:  "LLM completion failed: 429 rate limit",
+		},
+		{
+			name:          "non-channel run stays silent",
+			run:           scheduleRun(),
+			bucket:        "timeout",
+			errText:       "agent run exceeded timeout of 10m0s",
+			wantPublished: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tt.run).Build()
+			bus := &recordingEventBus{}
+			cr := &ChannelRouter{Client: cl, EventBus: bus, Log: logr.Discard()}
+
+			event, err := eventbus.NewEvent(eventbus.TopicAgentRunFailed, map[string]string{
+				"agentRunID":   "chan-run",
+				"instanceName": "demo",
+				"reason":       tt.bucket,
+			}, map[string]string{"error": tt.errText})
+			if err != nil {
+				t.Fatalf("build event: %v", err)
+			}
+
+			cr.handleFailed(context.Background(), event)
+
+			if len(bus.published) != tt.wantPublished {
+				t.Fatalf("published events = %d, want %d", len(bus.published), tt.wantPublished)
+			}
+			if tt.wantPublished == 0 {
+				return
+			}
+			got := bus.published[0]
+			if got.Topic != eventbus.TopicChannelMessageSend {
+				t.Fatalf("published topic = %q, want %q", got.Topic, eventbus.TopicChannelMessageSend)
+			}
+			if got.Event.Metadata["instanceName"] != "demo" || got.Event.Metadata["channel"] != "slack" {
+				t.Fatalf("outbound metadata = %v, want instanceName=demo channel=slack", got.Event.Metadata)
+			}
+			var out channel.OutboundMessage
+			if err := json.Unmarshal(got.Event.Data, &out); err != nil {
+				t.Fatalf("decode outbound message: %v", err)
+			}
+			if out.Channel != "slack" || out.ChatID != "C123" || out.ThreadID != "1700.1" {
+				t.Fatalf("reply addressed to %s/%s thread %q, want slack/C123 thread 1700.1", out.Channel, out.ChatID, out.ThreadID)
+			}
+			if out.Metadata["replyToTS"] != "1700.1" {
+				t.Fatalf("replyToTS = %q, want 1700.1", out.Metadata["replyToTS"])
+			}
+			if out.Username != "Support Bot" {
+				t.Fatalf("Username = %q, want the agent display name like a normal reply", out.Username)
+			}
+			if !strings.Contains(out.Text, tt.wantContains) {
+				t.Fatalf("reply text %q does not mention %q", out.Text, tt.wantContains)
+			}
+		})
+	}
+}
+
+func TestBuildFailureMessage(t *testing.T) {
+	if got := buildFailureMessage("", ""); !strings.Contains(got, "unknown error") {
+		t.Fatalf("empty bucket and detail: %q", got)
+	}
+	if got := buildFailureMessage("other", ""); !strings.Contains(got, "other") {
+		t.Fatalf("bucket should stand in for a missing detail: %q", got)
+	}
+	if got := buildFailureMessage("policy", "tool kubectl denied by policy"); !strings.Contains(got, "denied by policy") {
+		t.Fatalf("policy bucket should quote the detail: %q", got)
 	}
 }
 
