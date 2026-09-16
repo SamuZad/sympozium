@@ -45,12 +45,13 @@ import {
 import { cn } from "@/lib/utils";
 import { providersForPlane } from "@/lib/creation";
 import { PlanePicker } from "@/components/plane-picker";
+import { CellnProviderPicker } from "@/components/celln-provider-picker";
 import { useCapabilities, useModels, useCellnTools, useClusterCellnTools, useModelConnections, useCellnPlatformProfiles } from "@/hooks/use-api";
 import { persistentHarnesses, persistentHarnessName } from "@/lib/persistent-harness";
 import { modelConnectionName, modelConnectionEndpoint } from "@/lib/agent-execution";
 import { api } from "@/lib/api";
 import type { WizardExecution } from "@/lib/agent-execution";
-import type { AgentRuntime, SympoziumPolicy, CellnSelection, CellnTool, ModelConnection } from "@/lib/api";
+import type { AgentRuntime, SympoziumPolicy, CellnSelection, CellnTool, CellnPlatformProfile, ModelConnection } from "@/lib/api";
 import {
   YamlModal,
   instanceYamlFromWizard,
@@ -720,16 +721,28 @@ export function OnboardingWizard({
     setForm((current) => ({ ...current, borrowedTools }));
   }, [celln, wrapperRuntime, catalogue.data, toolSupported, maxTools]);
   const platformProfile = wrapperRuntime ? (platformProfiles.data || []).find((profile) => profile.name === selectedRuntime?.spec.cellnProfileRef?.name) : undefined;
+  // Binds the Agent to one fleet backend: its wrapper runtime and, when this
+  // namespace already has it, the host-profile connection for that backend
+  // (otherwise the wrappers are created on completion).
+  const bindProfile = useCallback((profile: CellnPlatformProfile) => {
+    const runtime = nativeRuntimes.find((candidate) => candidate.spec.cellnProfileRef?.name === profile.name);
+    const connection = hostConnections.find((candidate) => candidate.metadata.name === profile.wrapper && candidate.spec.credentialProfile === profile.credentialProfile)
+      || hostConnections.find((candidate) => candidate.spec.credentialProfile === profile.credentialProfile);
+    setForm((current) => ({
+      ...current,
+      runtimeRef: runtime?.metadata.name || profile.wrapper,
+      modelConnectionRef: connection?.metadata.name,
+      provider: profile.provider,
+      model: profile.model,
+      credentialProfile: profile.credentialProfile,
+    }));
+  }, [nativeRuntimes, hostConnections]);
+  const boundProfile = useRef<string | null>(null);
   useEffect(() => {
-    if (!wrapperRuntime || form.modelConnectionRef) return;
-    if (hostConnections.length > 0) {
-      const connection = hostConnections[0];
-      setForm((current) => ({ ...current, modelConnectionRef: connection.metadata.name, provider: connection.spec.provider, model: connection.spec.models[0] || current.model, credentialProfile: connection.spec.credentialProfile || "" }));
-    } else if (platformProfile) {
-      // The connection is created with the wrappers on completion.
-      setForm((current) => ({ ...current, provider: platformProfile.provider, model: platformProfile.model, credentialProfile: platformProfile.credentialProfile }));
-    }
-  }, [wrapperRuntime, form.modelConnectionRef, hostConnections, platformProfile]);
+    if (!platformProfile || connections.isLoading || boundProfile.current === platformProfile.name + ":" + hostConnections.length) return;
+    boundProfile.current = platformProfile.name + ":" + hostConnections.length;
+    bindProfile(platformProfile);
+  }, [platformProfile, connections.isLoading, hostConnections, bindProfile]);
   const compatibleRuntime = celln
     ? selectedRuntime?.spec.celln?.contractVersion === "celln.json-tools/v1" || wrapperRuntime
     : !form.runtimeRef || !!selectedRuntime?.spec.image;
@@ -829,6 +842,8 @@ export function OnboardingWizard({
       case "runtime":
         return !!form.runtimeRef && compatibleRuntime;
       case "provider":
+        // A fleet provider needs a ready backend before the Agent can bind to it.
+        if (wrapperRuntime) return !!platformProfile && platformProfile.provider === form.provider;
         return !!form.provider;
       case "plane":
         return true;
@@ -1288,19 +1303,13 @@ export function OnboardingWizard({
 
         {/* ── Provider step ─────────────────────────────────────────── */}
         {step === "provider" && wrapperRuntime && (
-          <div className="space-y-2 rounded-md border p-3" data-testid="platform-model-route">
-            <Label>Model route</Label>
-            {connections.isLoading && <p className="text-xs">Loading model connections…</p>}
-            {!connections.isLoading && hostConnections.length === 0 && platformProfile && <p className="text-xs">{platformProfile.provider} / {platformProfile.model} at {platformProfile.endpoint} through the owner-installed credential profile <code>{platformProfile.credentialProfile}</code>. This namespace's wrapper objects are created when you finish.</p>}
-            {!connections.isLoading && hostConnections.length === 0 && !platformProfile && <p role="alert" className="text-xs">No ModelConnection with a host credential profile exists in this namespace and no execution policy offers a platform profile here; without one this runtime cannot run.</p>}
-            {hostConnections.length > 0 && (
-              <Select value={form.modelConnectionRef || ""} onValueChange={(name) => { const connection = hostConnections.find((c) => c.metadata.name === name); if (connection) setForm({ ...form, modelConnectionRef: name, provider: connection.spec.provider, model: connection.spec.models[0] || form.model, credentialProfile: connection.spec.credentialProfile || "" }); }}>
-                <SelectTrigger><SelectValue placeholder="Choose a model connection" /></SelectTrigger>
-                <SelectContent>{hostConnections.map((connection) => <SelectItem key={connection.metadata.name} value={connection.metadata.name}>{connection.metadata.name} — {connection.spec.provider} / {connection.spec.models.join(", ")}</SelectItem>)}</SelectContent>
-              </Select>
-            )}
-            <p className="text-xs text-muted-foreground">The platform profile fixes the persona and the owner-installed credential; policy caps the ceilings. No key is entered here.</p>
-          </div>
+          <CellnProviderPicker
+            providers={PROVIDERS}
+            provider={form.provider}
+            selected={platformProfile}
+            onProvider={(provider) => setForm({ ...form, provider })}
+            onProfile={bindProfile}
+          />
         )}
         {step === "provider" && !wrapperRuntime && (
           <div className="space-y-4">

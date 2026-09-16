@@ -49,7 +49,7 @@ export function CellnAddBackend() {
     };
     if (!body.name) return setError("Give the backend a name (a DNS label, e.g. claude).");
     if (preset.keyed && !credential) return setError(`${preset.label} needs an API key.`);
-    if (provider === "llama-server" && (!body.endpoint || !body.model)) return setError("llama-server needs its chat endpoint and the model name it serves.");
+    if (provider === "llama-server" && !body.endpoint) return setError("llama-server needs its address, e.g. http://framework:8080; the model is detected when left blank.");
     add.mutate(body, { onSuccess: () => { setOpen(false); setCredential(""); setName(""); } });
   }
 
@@ -82,9 +82,9 @@ export function CellnAddBackend() {
             </Select>
           </label>
           <label className="space-y-1 text-sm"><span>Name</span><Input value={name} onChange={(e) => setName(e.target.value)} placeholder={provider} /></label>
-          <label className="space-y-1 text-sm"><span>Model</span><Input value={model} onChange={(e) => setModel(e.target.value)} placeholder={preset.model || "the model the server reports"} /></label>
+          <label className="space-y-1 text-sm"><span>Model</span><Input value={model} onChange={(e) => setModel(e.target.value)} placeholder={preset.model || "detected from the server"} /></label>
           {provider === "llama-server" ? (
-            <label className="space-y-1 text-sm"><span>Chat endpoint</span><Input value={endpoint} onChange={(e) => setEndpoint(e.target.value)} placeholder="http://HOST:8080/v1/chat/completions" /></label>
+            <label className="space-y-1 text-sm"><span>Chat endpoint</span><Input value={endpoint} onChange={(e) => setEndpoint(e.target.value)} placeholder="http://HOST:8080" /></label>
           ) : (
             <label className="space-y-1 text-sm"><span>API key</span><Input type="password" value={credential} onChange={(e) => setCredential(e.target.value)} placeholder="published once to the fleet, never shown" /></label>
           )}
