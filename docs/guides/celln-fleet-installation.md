@@ -81,17 +81,22 @@ The same command installs [ergoz](https://github.com/sympozium-ai/ergoz)
    and an enforcing CNI if you rely on the rendered NetworkPolicies. The node
    probe labels a node that has both `celln.dev/kvm=true`; the fleet
    DaemonSets run only there, and the install waits for the first such node.
-2. **Kind is a development environment only.** Its nodes ship without a
-   kernel, so nothing gets labelled and a plain install waits for a node that
-   never qualifies. For development, copy the host's kernel into each node
-   before or during the install; the probe labels the node within seconds:
+2. **Kind is a development environment only.** Each cell is a microVM and
+   the VMM boots it from a kernel image file on the node, matched to
+   `/lib/modules`. On a Linux host, Kind nodes already see `/dev/kvm` and
+   mount the host's `/lib/modules`, but ship no `/boot`, so nothing gets
+   labelled and a plain install waits for a node that never qualifies. The
+   mitigation is to copy the host's **running** kernel (its version matches
+   the mounted modules) into each node, before or during the install; the
+   probe labels the node within seconds:
 
    ```sh
    docker cp /boot/vmlinuz-$(uname -r) kind-control-plane:/boot/   # and each worker
    ```
 
-   The installer prints this hint when no node has qualified within the first
-   minute of its wait. Real nodes need nothing of the sort.
+   Kind on macOS or Windows runs inside a VM without `/dev/kvm` and cannot
+   run the fleet. The installer prints this hint when no node has qualified
+   within the first minute of its wait. Real nodes need nothing of the sort.
 3. A reviewed starter package, built **once** on any Linux host with the
    pinned Celln release (`config/celln/release.json`):
 

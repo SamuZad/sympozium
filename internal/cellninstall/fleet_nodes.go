@@ -38,8 +38,9 @@ func KVMNodes(ctx context.Context, store client.Client) (labelled, unlabelled []
 // for, the Kind case (its nodes ship without a kernel), and the manual label.
 func NoKVMNodeHint(unlabelled []string) string {
 	hint := "  No node carries " + KVMNodeLabel + "=true yet, so the fleet DaemonSets have nowhere to run. The node probe labels a node that has /dev/kvm and a kernel under /boot.\n" +
-		"  Kind nodes ship without a kernel (Kind is a development environment only): copy the host's in and the probe labels the node within seconds:\n" +
+		"  Kind on a Linux host (development only): its nodes see /dev/kvm but ship no kernel image; copy the host's running kernel in and the probe labels the node within seconds:\n" +
 		"    docker cp /boot/vmlinuz-$(uname -r) <kind-node>:/boot/\n" +
+		"  Kind on macOS or Windows has no /dev/kvm and cannot run the fleet.\n" +
 		"  A node you know can run cells can be labelled by hand: kubectl label node <name> " + KVMNodeLabel + "=true\n"
 	if len(unlabelled) != 0 {
 		hint += "  Nodes without the label:"
