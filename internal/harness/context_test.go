@@ -105,11 +105,77 @@ func TestSympoziumToolsSection_OnlyWhenInstalled(t *testing.T) {
 		t.Fatal(err)
 	}
 	sympoziumToolPath = tool
+	t.Setenv("MEMORY_SERVER_URL", "http://sympozium-memory-server.sympozium-system.svc:8080")
 	got := SympoziumToolsSection()
 	for _, want := range []string{"memory-search", "sympozium-tool exec --target", "send-message", "schedule --name", "get-attachment"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("tools section missing %q", want)
 		}
+	}
+}
+
+func TestSympoziumToolsSection_MemoryOnlyWhenServerConfigured(t *testing.T) {
+	orig := sympoziumToolPath
+	t.Cleanup(func() { sympoziumToolPath = orig })
+	tool := filepath.Join(t.TempDir(), "sympozium-tool")
+	if err := os.WriteFile(tool, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sympoziumToolPath = tool
+
+	// Memory disabled on the Agent: the controller injects no MEMORY_SERVER_URL.
+	t.Setenv("MEMORY_SERVER_URL", "")
+	got := SympoziumToolsSection()
+	for _, absent := range []string{"## memory", "memory-search", "memory-store", "memory-list"} {
+		if strings.Contains(got, absent) {
+			t.Errorf("memory guidance %q must not be advertised without a memory server:\n%s", absent, got)
+		}
+	}
+	// Everything else is still documented.
+	for _, want := range []string{"sympozium-tool exec --target", "send-message", "schedule --name", "get-attachment"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("tools section missing %q", want)
+		}
+	}
+
+	t.Setenv("MEMORY_SERVER_URL", "http://sympozium-memory-server.sympozium-system.svc:8080")
+	got = SympoziumToolsSection()
+	for _, want := range []string{"## memory", "memory-search", "memory-store", "memory-list"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("tools section missing %q with a memory server configured", want)
+		}
+	}
+}
+
+func TestSkillsMarkdown_SkipsMemorySkillWithoutServer(t *testing.T) {
+	dir := t.TempDir()
+	for _, f := range []struct{ path, body string }{
+		{filepath.Join("memory", "memory.md"), "# Persistent Memory\n"},
+		{"memory.md", "# Persistent Memory (top-level)\n"},
+		{filepath.Join("k8s-ops", "pods.md"), "# Pods\n"},
+	} {
+		p := filepath.Join(dir, f.path)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(f.body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Setenv("MEMORY_SERVER_URL", "")
+	got := SkillsMarkdown(dir)
+	if strings.Contains(got, "Persistent Memory") {
+		t.Fatalf("memory skill must be skipped without a memory server:\n%s", got)
+	}
+	if !strings.Contains(got, "# Pods") {
+		t.Fatalf("other skills must still be inlined:\n%s", got)
+	}
+
+	t.Setenv("MEMORY_SERVER_URL", "http://sympozium-memory-server.sympozium-system.svc:8080")
+	got = SkillsMarkdown(dir)
+	if strings.Count(got, "Persistent Memory") != 2 || !strings.Contains(got, "# Pods") {
+		t.Fatalf("expected memory skill (both layouts) and other skills with a memory server:\n%s", got)
 	}
 }
 

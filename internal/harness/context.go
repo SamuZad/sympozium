@@ -14,16 +14,48 @@ const SympoziumToolPath = "/usr/local/bin/sympozium-tool"
 // sympoziumToolPath is overridable in tests.
 var sympoziumToolPath = SympoziumToolPath
 
+// memorySkillPack is the name of the built-in SkillPack the ensemble
+// controller attaches to every Agent; it mounts at <skillsDir>/memory/.
+const memorySkillPack = "memory"
+
+// MemoryConfigured reports whether this run has a memory-server to talk to.
+// The AgentRun controller injects MEMORY_SERVER_URL only when the parent
+// Agent has memory enabled, and `sympozium-tool memory-*` refuses to run
+// without it, so this is the single switch the harness keys its memory
+// guidance on. Advertising memory to a run that cannot use it only makes the
+// model burn turns on calls that fail with "memory is disabled for this run".
+func MemoryConfigured() bool {
+	return strings.TrimSpace(os.Getenv("MEMORY_SERVER_URL")) != ""
+}
+
+// isMemorySkillFile reports whether path belongs to the built-in memory
+// SkillPack in either mounted layout: <skillsDir>/memory/*.md or
+// <skillsDir>/memory.md.
+func isMemorySkillFile(skillsDir, path string) bool {
+	rel, err := filepath.Rel(skillsDir, path)
+	if err != nil {
+		return false
+	}
+	first := strings.SplitN(filepath.ToSlash(rel), "/", 2)[0]
+	return first == memorySkillPack || first == memorySkillPack+".md"
+}
+
 // SkillsMarkdown concatenates every mounted skill file into one Markdown
 // document. Agent-runner parity: skills live at <skillsDir>/<pack>/<skill>.md
 // AND <skillsDir>/<skill>.md (top-level); both layouts are inlined, each file
 // once, in glob order. Returns "" when no skills are mounted.
+//
+// The built-in "memory" skill is left out when the run has no memory-server
+// (see MemoryConfigured): the ensemble controller attaches it to every Agent
+// regardless of memory being enabled, and its text tells the model to search
+// and store memory on every task.
 func SkillsMarkdown(skillsDir string) string {
 	var b strings.Builder
 	patterns := []string{
 		filepath.Join(skillsDir, "*", "*.md"),
 		filepath.Join(skillsDir, "*.md"),
 	}
+	skipMemory := !MemoryConfigured()
 	seen := map[string]bool{}
 	for _, pat := range patterns {
 		matches, _ := filepath.Glob(pat)
@@ -32,6 +64,9 @@ func SkillsMarkdown(skillsDir string) string {
 				continue
 			}
 			seen[m] = true
+			if skipMemory && isMemorySkillFile(skillsDir, m) {
+				continue
+			}
 			data, err := os.ReadFile(m)
 			if err != nil {
 				continue
@@ -119,18 +154,23 @@ func SympoziumToolsSection() string {
 	if _, err := os.Stat(sympoziumToolPath); err != nil {
 		return ""
 	}
-	return "\n# Sympozium tools (shell)\n\n" +
+	var b strings.Builder
+	b.WriteString("\n# Sympozium tools (shell)\n\n" +
 		"Sympozium-specific capabilities are exposed via the `sympozium-tool` CLI on PATH. " +
-		"All subcommands accept `--help`.\n\n" +
-		"## memory (persistent, shared with other harnesses)\n\n" +
-		"Search before investigating; store concise findings after.\n\n" +
-		"```\n" +
-		"sympozium-tool memory-search --query \"...\" [--top-k 5] [--scope agent|ensemble]\n" +
-		"sympozium-tool memory-store  --content \"...\" [--tags a,b] [--scope agent|ensemble] [--visibility public|trusted]\n" +
-		"sympozium-tool memory-list   [--scope agent|ensemble] [--limit 20]\n" +
-		"```\n\n" +
-		"`--scope agent` (default) is private to you; `--scope ensemble` is shared with personas in the same ensemble.\n\n" +
-		"## exec (run in a SkillPack sidecar)\n\n" +
+		"All subcommands accept `--help`.\n\n")
+	// Memory guidance only for runs that actually have a memory-server; see
+	// MemoryConfigured for why advertising it otherwise is harmful.
+	if MemoryConfigured() {
+		b.WriteString("## memory (persistent, shared with other harnesses)\n\n" +
+			"Search before investigating; store concise findings after.\n\n" +
+			"```\n" +
+			"sympozium-tool memory-search --query \"...\" [--top-k 5] [--scope agent|ensemble]\n" +
+			"sympozium-tool memory-store  --content \"...\" [--tags a,b] [--scope agent|ensemble] [--visibility public|trusted]\n" +
+			"sympozium-tool memory-list   [--scope agent|ensemble] [--limit 20]\n" +
+			"```\n\n" +
+			"`--scope agent` (default) is private to you; `--scope ensemble` is shared with personas in the same ensemble.\n\n")
+	}
+	b.WriteString("## exec (run in a SkillPack sidecar)\n\n" +
 		"Your agent container is intentionally low-privilege. Use `exec` whenever a SkillPack sidecar holds the needed tooling/RBAC (e.g. kubectl, gh).\n\n" +
 		"```\n" +
 		"sympozium-tool exec --target <skillpack> [--workdir DIR] [--timeout SECS] -- <cmd> [args...]\n" +
@@ -158,5 +198,6 @@ func SympoziumToolsSection() string {
 		"Inbound channel attachments are normally pre-downloaded to /workspace/attachments/ (listed in the \"Inbound attachments\" section when present). To re-download one by artifact ID:\n\n" +
 		"```\n" +
 		"sympozium-tool get-attachment --id <artifactID> [--output /workspace/file.bin]\n" +
-		"```\n"
+		"```\n")
+	return b.String()
 }
