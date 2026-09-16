@@ -203,6 +203,9 @@ spec:
       annotations:
         celln.sympozium.ai/package: {{ $package.hash | quote }}
         celln.sympozium.ai/backends: {{ toJson $backendExport | sha256sum | quote }}
+        # The API server bumps this when it adds a backend, rolling the
+        # configure pods so they pick up the extra list.
+        celln.sympozium.ai/backends-extra: {{ .Values.celln.fleet.backendsExtraRevision | default "" | quote }}
     spec:
       serviceAccountName: celln-node
       automountServiceAccountToken: false
@@ -265,6 +268,9 @@ spec:
             - name: parent-clients
               mountPath: /etc/celln-fleet/clients
               readOnly: true
+            - name: backends-extra
+              mountPath: /etc/celln-fleet/backends-extra
+              readOnly: true
             {{- if $package.pullSecret }}
             - name: registry
               mountPath: /etc/celln-fleet/registry
@@ -304,6 +310,11 @@ spec:
         - name: parent-clients
           configMap:
             name: {{ $fleet.parentClientsConfigMap | quote }}
+        # Backends added through the API after the install; absent until then.
+        - name: backends-extra
+          configMap:
+            name: celln-fleet-backends-extra
+            optional: true
         {{- if $package.pullSecret }}
         - name: registry
           secret:

@@ -437,6 +437,32 @@ the rest. The one-liner journey (run 3, Kind `oneliner`) checked that the
 `sympozium.ai/collector=energy` label Sympozium discovers, then went on to
 label the nodes, offer the Celln parent plane and answer a one-shot as before.
 
+## A backend added from the API and the UI (no installer, no restart)
+
+Until now a new model backend meant another `sympozium install` with
+`--celln-fleet-backend`. The API server now does the installer's work in
+place: `POST /api/v1/celln-platform/backends` probes the route, publishes the
+key once into the fleet's credential Secret, appends the backend to a
+`celln-fleet-backends-extra` ConfigMap that every node's configure DaemonSet
+merges with the chart's list, rolls only that DaemonSet, and, once the nodes
+have published the backend's configuration, installs its runtime profile,
+policy route and wrappers. The Agent page's Harness tab lists the fleet's
+backends with their state and has an "Add a backend" form over the same
+call. On `fleet-ci` (journey run 17, 32 checks, exit 0):
+
+| Check | Result |
+| --- | --- |
+| Listing | `GET /api/v1/celln-platform/backends` returned the install-time backends (`native`, `messages`) with the profile each binds and state `ready`. |
+| Addition | `POST` with `{name: apiadd, provider: llama-server, model, endpoint, allowInsecure}` was accepted (202); `apiadd` went `pending…` → `configuring…` → `ready` without an installer run. |
+| Owners untouched | The `celln-node` owner pods kept their UIDs across the addition; only the configure DaemonSet rolled. |
+| Offered everywhere | The tenant namespace's profile list gained `<profile>-apiadd`; asking for wrappers there created `celln-apiadd`. |
+| Answered | A one-shot on `apiadd` succeeded: "The Kalahari Desert is a major desert in Botswana." |
+| Everything else | The 31 earlier checks (two backends, 22 tools, restart by hand, drain and continue with memory) passed unchanged. |
+
+A name configured at install, or already added, is refused, and a key
+already published under a name is never replaced: the key travels once, from
+the caller to the Secret, and nothing reads it back out.
+
 ## Environment caveats
 
 - Kind nodes have no kernel in `/boot`; the dispatcher's readiness gate

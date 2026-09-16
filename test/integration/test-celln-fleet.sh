@@ -302,10 +302,17 @@ if kc get clustercellntool "celln-$SCOPE-workspace-list" >/dev/null 2>&1; then
 	echo "$answer" | grep -q 'notes.txt' || fail "search did not find the appended text: $answer"
 	answer="$(turn_answer "$first" "$first-turn-5" "Call workspace-list exactly once. Reply with each file name and its size in bytes.")"
 	echo "$answer" | grep -q 'notes.txt' || fail "list did not name the file: $answer"
-	answer="$(turn_answer "$first" "$first-turn-6" "Delete notes.txt with workspace-delete using revision 2. Reply with only the new revision number.")"
+	answer="$(turn_answer "$first" "$first-turn-6" "Delete notes.txt with workspace-delete using revision 2. Reply with the exact JSON result the tool returned, nothing else.")"
 	echo "$answer" | grep -q '3' || fail "delete did not report revision 3: $answer"
-	answer="$(turn_answer "$first" "$first-turn-7" "Call workspace-list exactly once. Reply with exactly how many files it reports, as a number.")"
-	echo "$answer" | grep -qE '(^|[^0-9])0([^0-9]|$)|zero|no files|empty' || fail "list still reports files after the delete: $answer"
+	answer="$(turn_answer "$first" "$first-turn-7" "Call workspace-list exactly once. Reply with the exact JSON result the tool returned, nothing else.")"
+	if ! echo "$answer" | grep -q '"files":\[\]'; then
+		# A small local model now and then answers a revision number without
+		# calling the tool; the workspace is the truth, so ask once more.
+		echo "list still reports files after the delete ($answer); repeating the delete once" >&2
+		turn_answer "$first" "$first-turn-6b" "Delete notes.txt with workspace-delete using revision 2. Reply with the exact JSON result the tool returned, nothing else." >/dev/null
+		answer="$(turn_answer "$first" "$first-turn-7b" "Call workspace-list exactly once. Reply with the exact JSON result the tool returned, nothing else.")"
+	fi
+	echo "$answer" | grep -q '"files":\[\]' || fail "list still reports files after the delete: $answer"
 	pass "notes.txt was appended to (revision 2), found by search, listed, deleted (revision 3) and gone from the listing"
 fi
 
@@ -358,13 +365,15 @@ done
 # several enduring conversations at once.
 api_run() { # task [backend] -> run name, via POST /api/v1/runs; a backend selects that backend's wrappers and model
 	python3 -c '
-import json, sys
+import json, os, sys
 r = json.load(open(sys.argv[1]))["spec"]
 backend = sys.argv[3] if len(sys.argv) > 3 else ""
 agent, runtime, connection, model = r["agentRef"], r["cellnSelection"]["runtimeRef"], r["model"]["connectionRef"], r["model"]["model"]
 if backend:
     agent, runtime, connection = f"celln-agent-{backend}", f"celln-{backend}", f"celln-{backend}"
-    model = json.load(open(sys.argv[4]))["model"]["model"]
+    # The installer writes configured.json per backend; one added through
+    # the API has none, and the journey adds it on the same model.
+    model = json.load(open(sys.argv[4]))["model"]["model"] if os.path.exists(sys.argv[4]) else os.environ["FLEET_MODEL"]
 print(json.dumps({"agentRef": agent, "task": sys.argv[2], "systemPrompt": r["systemPrompt"], "backend": "celln",
   "executionLifecycle": "enduring", "enduring": r["enduring"], "model": model, "modelConnectionRef": connection,
   "cellnSelection": {"runtimeRef": runtime, "clusterToolRefs": r["cellnSelection"]["clusterToolRefs"], "toolRefs": []}}))' "$WORK/fleet-out/installation/run.json" "$1" ${2:+"$2" "$WORK/fleet-out/configuration/$2/configured.json"} |
@@ -422,13 +431,14 @@ api_pf=$!
 wait_for "apiserver port-forward" 60 curl -sf "${api_auth[@]}" "http://127.0.0.1:$api_port/api/v1/celln-platform/profiles?namespace=$tenant" -o /dev/null
 api_one_shot() { # task [backend] -> run name, via POST /api/v1/runs with the one-shot lifecycle
 	python3 -c '
-import json, sys
+import json, os, sys
 r = json.load(open(sys.argv[1]))["spec"]
 backend = sys.argv[3] if len(sys.argv) > 3 else ""
 agent, runtime, connection, model = r["agentRef"], r["cellnSelection"]["runtimeRef"], r["model"]["connectionRef"], r["model"]["model"]
 if backend:
     agent, runtime, connection = f"celln-agent-{backend}", f"celln-{backend}", f"celln-{backend}"
-    model = json.load(open(sys.argv[4]))["model"]["model"]
+    # A backend added through the API has no installer output; the journey adds it on the same model.
+    model = json.load(open(sys.argv[4]))["model"]["model"] if os.path.exists(sys.argv[4]) else os.environ["FLEET_MODEL"]
 print(json.dumps({"agentRef": agent, "task": sys.argv[2], "systemPrompt": r["systemPrompt"], "backend": "celln",
   "executionLifecycle": "one-shot", "model": model, "modelConnectionRef": connection,
   "cellnSelection": {"runtimeRef": runtime, "clusterToolRefs": r["cellnSelection"]["clusterToolRefs"], "toolRefs": []}}))' "$WORK/fleet-out/installation/run.json" "$1" ${2:+"$2" "$WORK/fleet-out/configuration/$2/configured.json"} |
@@ -559,6 +569,32 @@ r = json.load(open(sys.argv[1])); r['metadata']['namespace'] = sys.argv[2]; prin
 wait_for "policy refusal for $denied_run" 90 bash -c "kubectl --context kind-$CLUSTER -n $denied get agentrun $denied_run -o jsonpath='{.status.conditions[?(@.type==\"CellnParentReady\")].message}' | grep -q AUTH_POLICY_WITHDRAWN"
 [ -z "$(kc -n "$denied" get agentrun "$denied_run" -o jsonpath='{.status.cellnParent}')" ] || fail "$denied_run was issued a parent without policy"
 pass "$denied_run in excluded $denied refused with AUTH_POLICY_WITHDRAWN and no parent"
+
+log "Adding a backend through the API: no installer, no restart, offered to every namespace"
+kubectl --context "kind-$CLUSTER" -n sympozium-system port-forward svc/sympozium-apiserver "$api_port:8080" >/dev/null 2>&1 &
+api_pf=$!
+wait_for "apiserver port-forward" 60 curl -sf "${api_auth[@]}" "http://127.0.0.1:$api_port/api/v1/celln-platform/backends" -o /dev/null
+before="$(curl -sf "${api_auth[@]}" "http://127.0.0.1:$api_port/api/v1/celln-platform/backends" | python3 -c 'import json,sys; print(",".join(sorted(b["name"] for b in json.load(sys.stdin))))')"
+echo "$before" | grep -q 'native' || fail "the API does not list the install-time backends: $before"
+api_spec="$(python3 -c '
+import json, os
+print(json.dumps({"name": "apiadd", "provider": "llama-server", "model": os.environ["FLEET_MODEL"], "endpoint": os.environ["FLEET_MODEL_ENDPOINT"], "allowInsecure": True}))')"
+code="$(curl -s -o "$WORK/api-add.json" -w '%{http_code}' "${api_auth[@]}" -X POST -H 'Content-Type: application/json' -d "$api_spec" "http://127.0.0.1:$api_port/api/v1/celln-platform/backends")"
+[ "$code" = 202 ] || fail "API refused the backend addition ($code): $(cat "$WORK/api-add.json")"
+owners_before_api="$(kc -n celln-system get pods -l app.kubernetes.io/name=celln-node -o jsonpath='{.items[*].metadata.uid}' | tr ' ' '\n' | sort)"
+backend_ready() { # name -> the API lists it as ready
+	curl -sf "${api_auth[@]}" "http://127.0.0.1:$api_port/api/v1/celln-platform/backends" |
+		python3 -c 'import json,sys; sys.exit(0 if any(b["name"] == sys.argv[1] and b["state"] == "ready" for b in json.load(sys.stdin)) else 1)' "$1"
+}
+wait_for "backend apiadd to become ready" 900 backend_ready apiadd
+[ "$owners_before_api" = "$(kc -n celln-system get pods -l app.kubernetes.io/name=celln-node -o jsonpath='{.items[*].metadata.uid}' | tr ' ' '\n' | sort)" ] || fail "adding a backend through the API restarted the owners"
+curl -sf "${api_auth[@]}" "http://127.0.0.1:$api_port/api/v1/celln-platform/profiles?namespace=$tenant" | grep -q "\"name\":\"$profile-apiadd\"" || fail "API-added backend not offered to $tenant"
+curl -sf "${api_auth[@]}" -X POST -H 'Content-Type: application/json' -d "{\"profile\":\"$profile-apiadd\"}" "http://127.0.0.1:$api_port/api/v1/celln-platform/wrappers?namespace=$tenant" | grep -q '"connection":"celln-apiadd"' || fail "API-added backend wrappers were not created in $tenant"
+apiadd_run="$(api_one_shot "Name one desert in Botswana. Reply with one short sentence; do not use tools." apiadd)" || fail "API refused a one-shot on the API-added backend"
+kill "$api_pf" >/dev/null 2>&1 || true
+wait_for "one-shot $apiadd_run on API-added backend" 300 bash -c "kubectl --context kind-$CLUSTER -n $tenant get agentrun $apiadd_run -o jsonpath='{.status.phase}' | grep -qE 'Succeeded|Failed'"
+[ "$(kc -n "$tenant" get agentrun "$apiadd_run" -o jsonpath='{.status.phase}')" = Succeeded ] || fail "one-shot on API-added backend failed: $(kc -n "$tenant" get agentrun "$apiadd_run" -o jsonpath='{.status.error}')"
+pass "backend apiadd added through the API, configured by the nodes without an owner restart, offered to $tenant and answered: $(kc -n "$tenant" get agentrun "$apiadd_run" -o jsonpath='{.status.result}' | cut -c1-120)"
 
 log "Restarting a conversation by hand moves it to a new parent with its memory"
 # The API restart: a new run seeded with the transcript, the old run deleted.

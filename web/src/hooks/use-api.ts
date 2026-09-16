@@ -238,6 +238,29 @@ export function useContinueRun() {
   });
 }
 
+export function useCellnFleetBackends(enabled = true) {
+  return useQuery({
+    queryKey: ["celln-fleet-backends"],
+    queryFn: api.cellnPlatform.backends,
+    enabled,
+    retry: false,
+    refetchInterval: 15000,
+  });
+}
+
+export function useAddCellnFleetBackend() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.cellnPlatform.addBackend,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["celln-fleet-backends"] });
+      qc.invalidateQueries({ queryKey: ["celln-platform-profiles"] });
+      toast.success("Backend recorded; the fleet's nodes are configuring it");
+    },
+    onError: toastError,
+  });
+}
+
 export function useDeleteRun() {
   const qc = useQueryClient();
   return useMutation({
