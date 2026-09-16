@@ -251,6 +251,29 @@ turn of the profile's allowance. Every backend of the scope serves one-shots
 the same way, so an Agent picks its provider per run regardless of
 lifecycle.
 
+### Adding a backend from the API or the UI
+
+A running fleet takes a new backend without the installer:
+
+```sh
+curl -X POST -H 'Content-Type: application/json' -H "Authorization: Bearer $TOKEN" \
+  http://SYMPOZIUM/api/v1/celln-platform/backends \
+  -d '{"name":"claude","provider":"anthropic","model":"claude-sonnet-5","credential":"sk-ant-..."}'
+```
+
+The API probes the endpoint with the key (`skipPreflight: true` when only
+the nodes can reach it), publishes the key as that backend's entry in the
+fleet's credential Secret, appends the backend to the
+`celln-fleet-backends-extra` ConfigMap in `celln-system` and rolls the
+configure DaemonSet. Every node then configures the backend from the same
+admitted package; owners and their conversations are untouched. Once the
+nodes have published its configuration, the API server installs the
+backend's runtime profile, policy route and wrappers, and
+`GET /api/v1/celln-platform/backends` reports it `ready`; until then it
+shows `pending` or `configuring`, or `error: …` with the reason. The Agent
+page's backend picker has the same form. A backend named at install cannot
+be added again, and a key already published for a name is never replaced.
+
 ## The toolbox
 
 Every run on the fleet borrows tools from the scope's package, and the

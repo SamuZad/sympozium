@@ -193,6 +193,8 @@ func (s *Server) buildMux(frontendFS fs.FS, expected *tokenReader) http.Handler 
 	mux.HandleFunc("GET /api/v1/cluster-celln-tools", s.listClusterCellnTools)
 	mux.HandleFunc("GET /api/v1/celln-platform/profiles", s.listCellnPlatformProfiles)
 	mux.HandleFunc("POST /api/v1/celln-platform/wrappers", s.ensureCellnPlatformWrappers)
+	mux.HandleFunc("GET /api/v1/celln-platform/backends", s.listCellnFleetBackends)
+	mux.HandleFunc("POST /api/v1/celln-platform/backends", s.addCellnFleetBackend)
 	mux.HandleFunc("POST /api/v1/celln-selection/preview", s.previewCellnSelection)
 	mux.HandleFunc("POST /api/v1/runtimes/install-defaults", s.installDefaultRuntimes)
 	// Persistent harness sessions. The API server owns the only browser-facing

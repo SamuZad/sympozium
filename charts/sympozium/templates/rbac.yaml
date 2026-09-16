@@ -281,6 +281,18 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps", "services", "namespaces", "serviceaccounts"]
     verbs: ["get", "list", "watch", "create"]
+  # Adding a model backend to a running Celln fleet: the extra-backends
+  # ConfigMap and credential Secret in celln-system, a rollout of the
+  # configure DaemonSet, and the backend's profile, policy route and wrappers.
+  - apiGroups: [""]
+    resources: ["configmaps", "namespaces"]
+    verbs: ["update", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["daemonsets", "deployments"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["sympozium.ai"]
+    resources: ["cellnruntimeprofiles", "cellnexecutionpolicies", "clustercellntools"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
   # Gateway API (apiserver manages gateway config)
   - apiGroups: ["gateway.networking.k8s.io"]
     resources: ["gatewayclasses", "gateways", "httproutes"]

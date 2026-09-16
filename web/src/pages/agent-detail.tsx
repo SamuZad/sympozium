@@ -17,6 +17,7 @@ import { CellnAgentConversation } from "@/components/celln-agent-conversation";
 import { CellnStarterTools } from "@/components/celln-starter-tools";
 import { CellnPermissionPreview } from "@/components/celln-permission-preview";
 import { CellnBackendPicker, backendLabel } from "@/components/celln-backend-picker";
+import { CellnAddBackend } from "@/components/celln-add-backend";
 import { StatusBadge } from "@/components/status-badge";
 import { GithubAuthDialog } from "@/components/github-auth-dialog";
 import {
@@ -634,6 +635,7 @@ function AgentRuntimeCard({ inst, runtimes }: { inst: Agent; runtimes: import("@
         </div>
 
         {backend === "celln" && <CellnBackendPicker agent={inst} runtimes={runtimes} />}
+        {backend === "celln" && <CellnAddBackend />}
 
         {backend === "celln" && (
           <div className="space-y-3 rounded-md border p-3">

@@ -11,6 +11,18 @@ set -euo pipefail
 : "${FLEET_PRINCIPAL:?}" "${FLEET_SCOPE:?}" "${FLEET_BACKENDS:?}" "${FLEET_PARENT_CLIENTS:?}"
 : "${FLEET_CONFIGURATION_CONFIGMAP:?}" "${FLEET_NAMESPACE:?}" "${NODE_NAME:?}"
 
+# Backends added after the install arrive through a ConfigMap the API server
+# writes (the same shape as the install-time list); they join it here so the
+# rest of this script sees one list. A name the chart already carries wins.
+extra=/etc/celln-fleet/backends-extra/backends.json
+if [ -s "$extra" ]; then
+	FLEET_BACKENDS="$(python3 -c 'import json, sys
+base = json.loads(sys.argv[1])
+names = {b["name"] for b in base}
+print(json.dumps(base + [b for b in json.load(open(sys.argv[2])) if b["name"] not in names]))' "$FLEET_BACKENDS" "$extra")"
+	export FLEET_BACKENDS
+fi
+
 celln=/usr/local/bin/celln
 root="$FLEET_STATE/authority"
 hex="${FLEET_PACKAGE_HASH#blake3:}"

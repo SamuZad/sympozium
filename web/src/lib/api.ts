@@ -141,6 +141,30 @@ export interface Agent {
 }
 
 /** A native profile the current namespace's execution policy admits. */
+/** One model backend of the Celln fleet and, for one added through the API, how far it got. */
+export interface CellnFleetBackend {
+  name: string;
+  provider: string;
+  protocol: string;
+  endpoint: string;
+  model: string;
+  allowInsecure: boolean;
+  source: "install" | "added";
+  profile: string;
+  state: string;
+}
+
+export interface AddCellnFleetBackendRequest {
+  name: string;
+  provider: string;
+  model?: string;
+  endpoint?: string;
+  protocol?: string;
+  allowInsecure?: boolean;
+  credential?: string;
+  skipPreflight?: boolean;
+}
+
 export interface CellnPlatformProfile {
   name: string;
   revision: string;
@@ -1533,6 +1557,8 @@ export const api = {
   cellnPlatform: {
     profiles: () => apiFetch<CellnPlatformProfile[]>("/api/v1/celln-platform/profiles"),
     ensureWrappers: (profile: string) => apiFetch<CellnPlatformWrappers>("/api/v1/celln-platform/wrappers", { method: "POST", body: JSON.stringify({ profile }) }),
+    backends: () => apiFetch<CellnFleetBackend[]>("/api/v1/celln-platform/backends", { skipNamespace: true }),
+    addBackend: (body: AddCellnFleetBackendRequest) => apiFetch<CellnFleetBackend>("/api/v1/celln-platform/backends", { method: "POST", body: JSON.stringify(body), skipNamespace: true, retryNetwork: false }),
   },
 
   cellnTools: {
