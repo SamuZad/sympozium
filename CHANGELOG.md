@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.10.77](https://github.com/sympozium-ai/sympozium/compare/v0.10.76...v0.10.77) (2026-09-16)
+
+
+### Bug Fixes
+
+* **install:** say why a fleet wait is empty, and that Kind needs a kernel ([944668e](https://github.com/sympozium-ai/sympozium/commit/944668ef2fae8166489765566e78aa0be34d225b))
+* **install:** say why a fleet wait is empty, and that Kind needs a kernel ([cb70dee](https://github.com/sympozium-ai/sympozium/commit/cb70dee260b25462a4d2800b53d91f7539d7e3a5))
+* **install:** the Kind kernel copy is a Linux-host mitigation; KVM is already there ([1fb7d6c](https://github.com/sympozium-ai/sympozium/commit/1fb7d6c193a24665f39bf7c62b0c6fb8422bec70))
+
 ## [0.10.76](https://github.com/sympozium-ai/sympozium/compare/v0.10.75...v0.10.76) (2026-09-16)
 
 
