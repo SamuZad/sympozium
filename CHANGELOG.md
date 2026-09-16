@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.10.76](https://github.com/sympozium-ai/sympozium/compare/v0.10.75...v0.10.76) (2026-09-16)
+
+
+### Features
+
+* **celln:** add a model backend from the API and UI ([56b604b](https://github.com/sympozium-ai/sympozium/commit/56b604b7a24c9c5cf8a2455bf1ae6f1f84f67be1))
+* **celln:** add a model backend from the API and UI ([ae83b72](https://github.com/sympozium-ai/sympozium/commit/ae83b722639a0e49cce74808cf396d52434fa45c))
+* **install:** ergoz comes with sympozium install ([25a5d20](https://github.com/sympozium-ai/sympozium/commit/25a5d206a735c7e3b8c5137cd0816c53d3c81675))
+* **install:** ergoz comes with sympozium install ([088538c](https://github.com/sympozium-ai/sympozium/commit/088538c32a2b0579c85cf5a170a3c83014bef3d1))
+
 ## [0.10.75](https://github.com/sympozium-ai/sympozium/compare/v0.10.74...v0.10.75) (2026-09-15)
 
 
