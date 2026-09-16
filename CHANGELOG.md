@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.10.78](https://github.com/sympozium-ai/sympozium/compare/v0.10.77...v0.10.78) (2026-09-16)
+
+
+### Features
+
+* **celln:** accept a bare server address and detect its model ([17c358b](https://github.com/sympozium-ai/sympozium/commit/17c358b0c52b40b9fb6e82297e2d4e2ccc158200))
+* **web:** pick a Celln parent's provider like the Kubernetes plane ([7817747](https://github.com/sympozium-ai/sympozium/commit/78177479abb085064a3a213047911401e7c463d5))
+
+
+### Bug Fixes
+
+* **celln:** drop meaningless dispatcher nodeSelector, self-provision state dir ([6efddfb](https://github.com/sympozium-ai/sympozium/commit/6efddfbb224f6ef643f5e6f472a59777531b01f8))
+* **eventbus:** survive NATS being unavailable at startup and consumer reaping ([7b0406b](https://github.com/sympozium-ai/sympozium/commit/7b0406b04a579379476b65d4ea5b45dbe2033594))
+* **web:** Celln tool grid, provider picker and llama-server auto-detect ([fee3d49](https://github.com/sympozium-ai/sympozium/commit/fee3d49678403bc9dd7de10468fdafb60ae45021))
+* **web:** scrollable tool grid and select all compatible Celln tools by default ([8883051](https://github.com/sympozium-ai/sympozium/commit/888305170b49be586ff455874613cb6c2ae54d1d))
+
 ## [0.10.77](https://github.com/sympozium-ai/sympozium/compare/v0.10.76...v0.10.77) (2026-09-16)
 
 
