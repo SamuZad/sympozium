@@ -77,10 +77,27 @@ The same command installs [ergoz](https://github.com/sympozium-ai/ergoz)
 ## Prerequisites
 
 1. Nodes with `/dev/kvm`, a readable kernel under `/boot` with its
-   `/lib/modules` directory (the dispatcher's readiness gate checks for one;
-   Kind nodes ship without a kernel, so copy the host's in for development),
-   and an enforcing CNI if you rely on the rendered NetworkPolicies.
-2. A reviewed starter package, built **once** on any Linux host with the
+   `/lib/modules` directory (the dispatcher's readiness gate checks for one),
+   and an enforcing CNI if you rely on the rendered NetworkPolicies. The node
+   probe labels a node that has both `celln.dev/kvm=true`; the fleet
+   DaemonSets run only there, and the install waits for the first such node.
+2. **Kind is a development environment only.** Each cell is a microVM and
+   the VMM boots it from a kernel image file on the node, matched to
+   `/lib/modules`. On a Linux host, Kind nodes already see `/dev/kvm` and
+   mount the host's `/lib/modules`, but ship no `/boot`, so nothing gets
+   labelled and a plain install waits for a node that never qualifies. The
+   mitigation is to copy the host's **running** kernel (its version matches
+   the mounted modules) into each node, before or during the install; the
+   probe labels the node within seconds:
+
+   ```sh
+   docker cp /boot/vmlinuz-$(uname -r) kind-control-plane:/boot/   # and each worker
+   ```
+
+   Kind on macOS or Windows runs inside a VM without `/dev/kvm` and cannot
+   run the fleet. The installer prints this hint when no node has qualified
+   within the first minute of its wait. Real nodes need nothing of the sort.
+3. A reviewed starter package, built **once** on any Linux host with the
    pinned Celln release (`config/celln/release.json`):
 
    ```sh
@@ -93,7 +110,7 @@ The same command installs [ergoz](https://github.com/sympozium-ai/ergoz)
 
    Record `packageHash` and the bundle `publisher`. Guard the seed; it is
    never copied into the package or the cluster.
-3. The package published as a digest-pinned OCI image whose only content is
+4. The package published as a digest-pinned OCI image whose only content is
    the package directory at `/package`:
 
    ```sh
@@ -106,7 +123,7 @@ The same command installs [ergoz](https://github.com/sympozium-ai/ergoz)
    Use the `repository@sha256:...` form; tags are refused. A private registry
    needs a `.dockerconfigjson` Secret in `celln-system` referenced by
    `celln.fleet.package.pullSecret`.
-4. The model provider credential in a local file (one line, at least 24
+5. The model provider credential in a local file (one line, at least 24
    characters), or an existing entry for the backend in the `celln-fleet-model-credentials` Secret in
    `celln-system`. Keyless backends such as llama-server need neither; see
    [Model backends](#model-backends).
