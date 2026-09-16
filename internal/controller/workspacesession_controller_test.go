@@ -101,7 +101,7 @@ func TestEnsureWorkspaceSession_CreatesAndResyncsMutableFields(t *testing.T) {
 	scheme := cl.Scheme()
 
 	// First call → creates the WorkspaceSession with the Agent's values.
-	pvcName1, wsName1, err := ensureWorkspaceSession(ctx, cl, scheme, agent, "sess-A")
+	pvcName1, wsName1, err := ensureWorkspaceSession(ctx, cl, scheme, agent, agent.Spec.Workspace, "sess-A")
 	if err != nil {
 		t.Fatalf("first ensure: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestEnsureWorkspaceSession_CreatesAndResyncsMutableFields(t *testing.T) {
 	}
 
 	// Second call → re-syncs Size + IdleTTL onto the existing WorkspaceSession.
-	pvcName2, wsName2, err := ensureWorkspaceSession(ctx, cl, scheme, agent, "sess-A")
+	pvcName2, wsName2, err := ensureWorkspaceSession(ctx, cl, scheme, agent, agent.Spec.Workspace, "sess-A")
 	if err != nil {
 		t.Fatalf("second ensure: %v", err)
 	}
@@ -157,6 +157,82 @@ func TestEnsureWorkspaceSession_CreatesAndResyncsMutableFields(t *testing.T) {
 	// StorageClassName must NOT be re-synced (would require new PVC).
 	if ws.Spec.StorageClassName != "fast" {
 		t.Errorf("storage class must remain pinned at creation, got %q", ws.Spec.StorageClassName)
+	}
+}
+
+func TestEnsureWorkspaceSession_HonoursRunLevelWorkspaceOverride(t *testing.T) {
+	agent := &sympoziumv1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "alice", Namespace: "ns1"},
+		Spec: sympoziumv1alpha1.AgentSpec{
+			Workspace: &sympoziumv1alpha1.WorkspaceSpec{PerSessionPVC: true, Size: "1Gi"},
+		},
+	}
+	// An AgentRun (e.g. from Airflow) that asks for a bigger workspace than
+	// the Agent's default for this one session.
+	run := &sympoziumv1alpha1.AgentRun{
+		Spec: sympoziumv1alpha1.AgentRunSpec{
+			SessionKey: "airflow:dag:run:task",
+			Workspace:  &sympoziumv1alpha1.WorkspaceSpec{PerSessionPVC: true, Size: "10Gi"},
+		},
+	}
+
+	_, cl := newWorkspaceSessionTestReconciler(t, agent)
+	ctx := context.Background()
+
+	_, wsName, err := ensureWorkspaceSession(ctx, cl, cl.Scheme(), agent, effectiveWorkspaceSpec(run, agent), run.Spec.SessionKey)
+	if err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	ws := &sympoziumv1alpha1.WorkspaceSession{}
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "ns1", Name: wsName}, ws); err != nil {
+		t.Fatalf("get ws: %v", err)
+	}
+	if ws.Spec.Size != "10Gi" {
+		t.Errorf("run-level size must win: want 10Gi, got %q", ws.Spec.Size)
+	}
+	if ws.Spec.AgentRef != "alice" || len(ws.OwnerReferences) != 1 || ws.OwnerReferences[0].Name != "alice" {
+		t.Errorf("session must still belong to the parent Agent, got ref=%q owners=%+v", ws.Spec.AgentRef, ws.OwnerReferences)
+	}
+
+	// A later run on the same session without its own block falls back to
+	// the Agent's policy and re-syncs the (grow-only, reconciler-enforced)
+	// requested size back to it.
+	plain := &sympoziumv1alpha1.AgentRun{Spec: sympoziumv1alpha1.AgentRunSpec{SessionKey: run.Spec.SessionKey}}
+	if _, _, err := ensureWorkspaceSession(ctx, cl, cl.Scheme(), agent, effectiveWorkspaceSpec(plain, agent), plain.Spec.SessionKey); err != nil {
+		t.Fatalf("second ensure: %v", err)
+	}
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "ns1", Name: wsName}, ws); err != nil {
+		t.Fatalf("re-get ws: %v", err)
+	}
+	if ws.Spec.Size != "1Gi" {
+		t.Errorf("run without override must re-sync to the Agent's size: want 1Gi, got %q", ws.Spec.Size)
+	}
+}
+
+func TestEffectiveWorkspaceSpec(t *testing.T) {
+	agentWS := &sympoziumv1alpha1.WorkspaceSpec{PerSessionPVC: true, Size: "1Gi", StorageClassName: "fast"}
+	runWS := &sympoziumv1alpha1.WorkspaceSpec{PerSessionPVC: true, Size: "10Gi"}
+	agent := &sympoziumv1alpha1.Agent{Spec: sympoziumv1alpha1.AgentSpec{Workspace: agentWS}}
+
+	cases := []struct {
+		name  string
+		run   *sympoziumv1alpha1.AgentRun
+		agent *sympoziumv1alpha1.Agent
+		want  *sympoziumv1alpha1.WorkspaceSpec
+	}{
+		{"run block wins wholesale", &sympoziumv1alpha1.AgentRun{Spec: sympoziumv1alpha1.AgentRunSpec{Workspace: runWS}}, agent, runWS},
+		{"no run block → agent's", &sympoziumv1alpha1.AgentRun{}, agent, agentWS},
+		{"nil run → agent's", nil, agent, agentWS},
+		{"neither", &sympoziumv1alpha1.AgentRun{}, &sympoziumv1alpha1.Agent{}, nil},
+		{"nil agent, run block", &sympoziumv1alpha1.AgentRun{Spec: sympoziumv1alpha1.AgentRunSpec{Workspace: runWS}}, nil, runWS},
+		{"nil both", nil, nil, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := effectiveWorkspaceSpec(tc.run, tc.agent); got != tc.want {
+				t.Errorf("got %+v, want %+v", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -188,6 +264,11 @@ func TestAgentRunQualifiesForSessionPVC(t *testing.T) {
 		{"agent has no workspace", agentNil, sympoziumv1alpha1.AgentRunSpec{SessionKey: "s1"}, false},
 		{"empty session key", agentOn, sympoziumv1alpha1.AgentRunSpec{SessionKey: ""}, false},
 		{"sub-agent (parent set) is excluded", agentOn, sympoziumv1alpha1.AgentRunSpec{SessionKey: "s1", Parent: parentRef}, false},
+		// The run's own workspace block takes precedence over the Agent's.
+		{"run opts in although agent opts out", agentOff, sympoziumv1alpha1.AgentRunSpec{SessionKey: "s1", Workspace: &sympoziumv1alpha1.WorkspaceSpec{PerSessionPVC: true}}, true},
+		{"run opts in although agent has no workspace", agentNil, sympoziumv1alpha1.AgentRunSpec{SessionKey: "s1", Workspace: &sympoziumv1alpha1.WorkspaceSpec{PerSessionPVC: true, Size: "10Gi"}}, true},
+		{"run block without PVC overrides agent opt-in", agentOn, sympoziumv1alpha1.AgentRunSpec{SessionKey: "s1", Workspace: &sympoziumv1alpha1.WorkspaceSpec{Size: "10Gi"}}, false},
+		{"sub-agent stays excluded even with run block", agentOn, sympoziumv1alpha1.AgentRunSpec{SessionKey: "s1", Parent: parentRef, Workspace: &sympoziumv1alpha1.WorkspaceSpec{PerSessionPVC: true}}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

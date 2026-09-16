@@ -482,6 +482,40 @@ func TestBuildVolumes_DefaultVolumes(t *testing.T) {
 	}
 }
 
+func TestBuildVolumes_EmptyDirWorkspaceHonoursRunSize(t *testing.T) {
+	r := &AgentRunReconciler{}
+	workspaceLimit := func(run *sympoziumv1alpha1.AgentRun) string {
+		for _, v := range r.buildVolumes(run, false, nil, nil) {
+			if v.Name == "workspace" {
+				if v.EmptyDir == nil || v.EmptyDir.SizeLimit == nil {
+					t.Fatal("workspace should be an emptyDir with a size limit")
+				}
+				return v.EmptyDir.SizeLimit.String()
+			}
+		}
+		t.Fatal("workspace volume missing")
+		return ""
+	}
+
+	// No workspace policy on the run → historical default.
+	if got := workspaceLimit(newTestRun()); got != "1Gi" {
+		t.Errorf("default workspace limit = %s, want 1Gi", got)
+	}
+
+	// A per-run size is honoured for the ephemeral workspace too.
+	run := newTestRun()
+	run.Spec.Workspace = &sympoziumv1alpha1.WorkspaceSpec{Size: "10Gi"}
+	if got := workspaceLimit(run); got != "10Gi" {
+		t.Errorf("run-level workspace limit = %s, want 10Gi", got)
+	}
+
+	// Garbage falls back to the default rather than failing the run.
+	run.Spec.Workspace = &sympoziumv1alpha1.WorkspaceSpec{Size: "lots"}
+	if got := workspaceLimit(run); got != "1Gi" {
+		t.Errorf("unparseable size should fall back to 1Gi, got %s", got)
+	}
+}
+
 func TestBuildVolumes_IPCUsesMemory(t *testing.T) {
 	r := &AgentRunReconciler{}
 	vols := r.buildVolumes(newTestRun(), false, nil, nil)

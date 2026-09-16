@@ -114,12 +114,16 @@ type AgentRunSpec struct {
 	// +optional
 	VolumeMounts []corev1.VolumeMount `json:"volumeMounts,omitempty"`
 
-	// Workspace records the /workspace volume policy applied to this
-	// run, snapshotted from the parent Agent at AgentRun creation time.
-	// Primarily an audit trail — the WorkspaceSession reconciler is
-	// keyed by (agent, sessionKey) and remains the source of truth for
-	// PVC sizing and idle TTL. May be set directly on an AgentRun for
-	// ad-hoc runs that bypass an Agent.
+	// Workspace is the /workspace volume policy for this run. When set it
+	// takes precedence, as a whole, over the parent Agent's
+	// spec.workspace: it decides whether the run gets a per-session PVC
+	// and the size, storage class and idle TTL requested for it, and it
+	// caps the ephemeral emptyDir when no PVC is used. When unset the
+	// Agent's policy applies. Platform-created runs snapshot the Agent's
+	// block here at creation time; a caller may set a different block for
+	// a per-run override (e.g. a bigger Size for one heavy run). The
+	// WorkspaceSession is still keyed by (agent, sessionKey), so a Size
+	// change on an existing session follows its grow-only rules.
 	// +optional
 	Workspace *WorkspaceSpec `json:"workspace,omitempty"`
 

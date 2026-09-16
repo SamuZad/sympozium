@@ -25,8 +25,8 @@ type WorkspaceSpec struct {
 	PerSessionPVC bool `json:"perSessionPVC,omitempty"`
 
 	// Size requests storage capacity for the per-session PVC
-	// (e.g. "1Gi"). Defaults to "1Gi" (matching the emptyDir size limit
-	// used for ephemeral workspaces).
+	// (e.g. "1Gi"). On an AgentRun it also caps the ephemeral emptyDir
+	// when the run is not backed by a PVC. Defaults to "1Gi".
 	// +optional
 	// +kubebuilder:validation:Pattern=`^[0-9]+([.][0-9]+)?(([KMGTPE]i?)|[a-zA-Z]*)?$`
 	Size string `json:"size,omitempty"`

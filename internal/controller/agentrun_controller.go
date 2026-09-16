@@ -528,7 +528,8 @@ func (r *AgentRunReconciler) reconcilePending(ctx context.Context, log logr.Logg
 		}
 	}
 
-	// Per-session workspace PVC (opt-in via Agent.Spec.Workspace.PerSessionPVC).
+	// Per-session workspace PVC (opt-in via the effective workspace policy:
+	// the run's own spec.workspace when set, else Agent.Spec.Workspace).
 	// When enabled, this AgentRun:
 	//   1. Acquires a session lock — only one AgentRun per (agent, session)
 	//      may be Running/Serving at a time, since RWO PVCs cannot
@@ -595,8 +596,9 @@ func (r *AgentRunReconciler) reconcilePending(ctx context.Context, log logr.Logg
 			}
 		}
 
-		// Ensure the WorkspaceSession + PVC exist.
-		pvcName, wsName, err := ensureWorkspaceSession(ctx, r.Client, r.Scheme, instance, agentRun.Spec.SessionKey)
+		// Ensure the WorkspaceSession + PVC exist, sized by the policy in
+		// force for this run (its own spec.workspace, else the Agent's).
+		pvcName, wsName, err := ensureWorkspaceSession(ctx, r.Client, r.Scheme, instance, effectiveWorkspaceSpec(agentRun, instance), agentRun.Spec.SessionKey)
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("ensuring workspace session: %w", err)
 		}
@@ -2909,17 +2911,32 @@ func (r *AgentRunReconciler) updateTokenBudget(ctx context.Context, log logr.Log
 	return r.Status().Patch(ctx, &pack, patch)
 }
 
+// emptyDirWorkspaceSizeLimit returns the size limit for an ephemeral
+// /workspace emptyDir. A size on the run's workspace policy is honoured when
+// it parses as a positive quantity, so a per-run "bigger workspace" request
+// means the same thing whether or not the run is backed by a PVC. The
+// historical 1Gi default applies otherwise.
+func emptyDirWorkspaceSizeLimit(agentRun *sympoziumv1alpha1.AgentRun) resource.Quantity {
+	if agentRun != nil && agentRun.Spec.Workspace != nil && agentRun.Spec.Workspace.Size != "" {
+		if q, err := resource.ParseQuantity(agentRun.Spec.Workspace.Size); err == nil && q.Sign() > 0 {
+			return q
+		}
+	}
+	return resource.MustParse(defaultWorkspaceSize)
+}
+
 // buildVolumes constructs the volume list for an agent pod.
 func (r *AgentRunReconciler) buildVolumes(agentRun *sympoziumv1alpha1.AgentRun, memoryEnabled bool, sidecars []resolvedSidecar, mcpServers []sympoziumv1alpha1.MCPServerRef) []corev1.Volume {
-	workspaceSizeLimit := resource.MustParse("1Gi")
+	workspaceSizeLimit := emptyDirWorkspaceSizeLimit(agentRun)
 	ipcSizeLimit := resource.MustParse("64Mi")
 	tmpSizeLimit := resource.MustParse("256Mi")
 	memoryMedium := corev1.StorageMediumMemory
 
 	// /workspace selection precedence:
 	//   1. Per-session PVC (annotation set by reconcilePending when the
-	//      parent Agent opts into Workspace.PerSessionPVC). Persists
-	//      across AgentRuns of the same session.
+	//      effective workspace policy — the run's spec.workspace, else the
+	//      parent Agent's — opts into PerSessionPVC). Persists across
+	//      AgentRuns of the same session.
 	//   2. Per-run postRun PVC (legacy: created when lifecycle.postRun
 	//      hooks are defined). Persists across the main + postRun Jobs
 	//      of a single AgentRun.

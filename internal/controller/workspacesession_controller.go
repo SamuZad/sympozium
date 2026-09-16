@@ -464,16 +464,34 @@ func (r *WorkspaceSessionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-// agentWantsPerSessionPVC reports whether the parent Agent has opted into
+// effectiveWorkspaceSpec resolves the /workspace policy that applies to one
+// AgentRun. A workspace block set on the run wins wholesale (the same
+// most-specific-layer-wins rule resolveWorkspaceSpec applies between an
+// Ensemble and its personas); otherwise the parent Agent's policy applies.
+// Platform-created runs snapshot the Agent's block onto the run, so for them
+// both layers agree; a caller that sets a different block (e.g. a bigger
+// Size for one heavy run) gets that block honoured for that run.
+func effectiveWorkspaceSpec(agentRun *sympoziumv1alpha1.AgentRun, agent *sympoziumv1alpha1.Agent) *sympoziumv1alpha1.WorkspaceSpec {
+	if agentRun != nil && agentRun.Spec.Workspace != nil {
+		return agentRun.Spec.Workspace
+	}
+	if agent != nil {
+		return agent.Spec.Workspace
+	}
+	return nil
+}
+
+// wantsPerSessionPVC reports whether a workspace policy opts into
 // per-session workspace PVCs.
-func agentWantsPerSessionPVC(agent *sympoziumv1alpha1.Agent) bool {
-	return agent != nil && agent.Spec.Workspace != nil && agent.Spec.Workspace.PerSessionPVC
+func wantsPerSessionPVC(spec *sympoziumv1alpha1.WorkspaceSpec) bool {
+	return spec != nil && spec.PerSessionPVC
 }
 
 // agentRunQualifiesForSessionPVC reports whether this AgentRun should
 // participate in the per-session PVC / session-lock machinery: it must
 // carry a non-empty SessionKey, must not be a sub-agent (sub-agents stay
-// ephemeral by design), and its parent Agent must opt in.
+// ephemeral by design), and its effective workspace policy (the run's own
+// block, else the parent Agent's) must opt in.
 func agentRunQualifiesForSessionPVC(agentRun *sympoziumv1alpha1.AgentRun, agent *sympoziumv1alpha1.Agent) bool {
 	if agentRun == nil || agentRun.Spec.SessionKey == "" {
 		return false
@@ -481,7 +499,7 @@ func agentRunQualifiesForSessionPVC(agentRun *sympoziumv1alpha1.AgentRun, agent 
 	if agentRun.Spec.Parent != nil {
 		return false
 	}
-	return agentWantsPerSessionPVC(agent)
+	return wantsPerSessionPVC(effectiveWorkspaceSpec(agentRun, agent))
 }
 
 // ensureWorkspaceSession idempotently creates the WorkspaceSession that
@@ -490,20 +508,24 @@ func agentRunQualifiesForSessionPVC(agentRun *sympoziumv1alpha1.AgentRun, agent 
 // The caller is expected to stamp these onto the AgentRun's annotations
 // so the pod builder can mount the PVC.
 //
-// When the WorkspaceSession already exists, mutable fields (Size,
-// IdleTTL) are re-synced from the parent Agent's WorkspaceSpec so edits
-// to the Agent (or to the Ensemble that stamps the Agent) propagate on
-// the next AgentRun. Whether a Size change can actually be applied to
-// the underlying PVC is decided by the WorkspaceSession reconciler:
-// grow-only when the StorageClass allows online expansion; otherwise
-// the request is surfaced as a Condition and the existing PVC is left
-// intact. StorageClassName is captured at creation time and is NOT
-// re-synced — switching storage classes requires a new PVC (PR4b).
+// workspace is the policy in force for the calling run (see
+// effectiveWorkspaceSpec): normally the Agent's, but a run may carry its
+// own block. When the WorkspaceSession already exists, mutable fields
+// (Size, IdleTTL) are re-synced from that policy so edits to the Agent
+// (or to the Ensemble that stamps the Agent), as well as per-run
+// overrides, propagate on the next AgentRun. Whether a Size change can
+// actually be applied to the underlying PVC is decided by the
+// WorkspaceSession reconciler: grow-only when the StorageClass allows
+// online expansion; otherwise the request is surfaced as a Condition and
+// the existing PVC is left intact. StorageClassName is captured at
+// creation time and is NOT re-synced — switching storage classes requires
+// a new PVC (PR4b).
 func ensureWorkspaceSession(
 	ctx context.Context,
 	c client.Client,
 	scheme *runtime.Scheme,
 	agent *sympoziumv1alpha1.Agent,
+	workspace *sympoziumv1alpha1.WorkspaceSpec,
 	sessionKey string,
 ) (pvcName, wsName string, err error) {
 	wsName = workspaceSessionName(agent.Name, sessionKey)
@@ -511,7 +533,7 @@ func ensureWorkspaceSession(
 	getErr := c.Get(ctx, types.NamespacedName{Namespace: agent.Namespace, Name: wsName}, ws)
 	switch {
 	case errors.IsNotFound(getErr):
-		ws = buildWorkspaceSessionFromAgent(agent, wsName, sessionKey)
+		ws = buildWorkspaceSession(agent, workspace, wsName, sessionKey)
 		if err := controllerutil.SetControllerReference(agent, ws, scheme); err != nil {
 			return "", "", fmt.Errorf("setting owner ref on workspacesession: %w", err)
 		}
@@ -524,9 +546,9 @@ func ensureWorkspaceSession(
 	case getErr != nil:
 		return "", "", fmt.Errorf("getting workspacesession: %w", getErr)
 	default:
-		// Re-sync mutable fields from the parent Agent.
-		desiredSize := desiredSize(agent)
-		desiredTTL := desiredIdleTTL(agent)
+		// Re-sync mutable fields from the effective workspace policy.
+		desiredSize := desiredSize(workspace)
+		desiredTTL := desiredIdleTTL(workspace)
 		needsPatch := false
 		patch := client.MergeFrom(ws.DeepCopy())
 		if ws.Spec.Size != desiredSize {
@@ -552,22 +574,22 @@ func ensureWorkspaceSession(
 	return pvcName, wsName, nil
 }
 
-// desiredSize returns the workspace size the parent Agent currently asks
-// for, falling back to the controller default when unspecified.
-func desiredSize(agent *sympoziumv1alpha1.Agent) string {
-	if agent.Spec.Workspace == nil || agent.Spec.Workspace.Size == "" {
+// desiredSize returns the workspace size a workspace policy asks for,
+// falling back to the controller default when unspecified.
+func desiredSize(spec *sympoziumv1alpha1.WorkspaceSpec) string {
+	if spec == nil || spec.Size == "" {
 		return defaultWorkspaceSize
 	}
-	return agent.Spec.Workspace.Size
+	return spec.Size
 }
 
-// desiredIdleTTL returns the IdleTTL the parent Agent currently asks
-// for, or nil to fall back to the controller default.
-func desiredIdleTTL(agent *sympoziumv1alpha1.Agent) *metav1.Duration {
-	if agent.Spec.Workspace == nil {
+// desiredIdleTTL returns the IdleTTL a workspace policy asks for, or nil
+// to fall back to the controller default.
+func desiredIdleTTL(spec *sympoziumv1alpha1.WorkspaceSpec) *metav1.Duration {
+	if spec == nil {
 		return nil
 	}
-	return agent.Spec.Workspace.IdleTTL
+	return spec.IdleTTL
 }
 
 // idleTTLEqual compares two *metav1.Duration values structurally.
@@ -582,21 +604,18 @@ func idleTTLEqual(a, b *metav1.Duration) bool {
 	}
 }
 
-// buildWorkspaceSessionFromAgent constructs a new WorkspaceSession CR
-// from the parent Agent's WorkspaceSpec, applying defaults for any
-// unspecified fields.
-func buildWorkspaceSessionFromAgent(
+// buildWorkspaceSession constructs a new WorkspaceSession CR owned by the
+// parent Agent from the given workspace policy (see effectiveWorkspaceSpec),
+// applying defaults for any unspecified fields.
+func buildWorkspaceSession(
 	agent *sympoziumv1alpha1.Agent,
+	spec *sympoziumv1alpha1.WorkspaceSpec,
 	wsName, sessionKey string,
 ) *sympoziumv1alpha1.WorkspaceSession {
-	spec := agent.Spec.Workspace
-	size := defaultWorkspaceSize
+	size := desiredSize(spec)
 	storageClass := ""
 	var ttl *metav1.Duration
 	if spec != nil {
-		if spec.Size != "" {
-			size = spec.Size
-		}
 		storageClass = spec.StorageClassName
 		ttl = spec.IdleTTL
 	}
