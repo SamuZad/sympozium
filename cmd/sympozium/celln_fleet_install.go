@@ -27,6 +27,10 @@ type cellnFleetFlags struct {
 	wait      time.Duration
 }
 
+// noKVMNodeHintAfter is how long a fleet wait runs before an empty fleet is
+// explained to the operator.
+const noKVMNodeHintAfter = 45 * time.Second
+
 func (f *cellnFleetFlags) register(cmd *cobra.Command) {
 	cmd.Flags().BoolVar(&f.enabled, "celln-fleet", false, "Run the native Celln plane as a per-node fleet: every node labeled celln.dev/kvm=true prepares the reviewed starter package and serves enduring parents (requires the --celln-fleet-* inputs and --celln-native-approve-starter-tools)")
 	cmd.Flags().StringVar(&f.options.Scope, "celln-fleet-scope", "", "Stable installation identity; node state lives at /var/lib/sympozium-celln/<scope> (default starter)")
@@ -147,14 +151,24 @@ func installCellnFleet(ctx context.Context, f cellnFleetFlags, imageTag string, 
 	fmt.Printf("  Waiting up to %s for the first node to admit the package and publish the starter configuration...\n", f.wait)
 	configuration := filepath.Join(f.outputDir, "configuration")
 	deadline := time.Now().Add(f.wait)
+	// An empty fleet is the usual reason a wait stalls (no node with KVM and
+	// a kernel, or a Kind node); say so once, early, instead of at the deadline.
+	emptyFleetCheck := time.Now().Add(noKVMNodeHintAfter)
+	hinted := false
 	wait := func(what string, ready func() (bool, error)) error {
 		for {
 			done, err := ready()
 			if err != nil || done {
 				return err
 			}
+			if !hinted && time.Now().After(emptyFleetCheck) {
+				hinted = true
+				if labelled, unlabelled, err := cellninstall.KVMNodes(ctx, k8sClient); err == nil && len(labelled) == 0 {
+					fmt.Print(cellninstall.NoKVMNodeHint(unlabelled))
+				}
+			}
 			if time.Now().After(deadline) {
-				return fmt.Errorf("%s did not happen within %s; label a KVM node, check the celln-node prepare logs in celln-system, then rerun this command", what, f.wait)
+				return fmt.Errorf("%s did not happen within %s; label a KVM node (or give a Kind node a kernel), check the celln-node-configure logs in celln-system, then rerun this command", what, f.wait)
 			}
 			select {
 			case <-ctx.Done():

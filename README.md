@@ -79,6 +79,14 @@ sympozium                  # launch the TUI — go to Ensembles tab, press Enter
 sympozium serve            # open the web dashboard (port-forwards to the in-cluster UI)
 ```
 
+The Celln fleet runs on nodes that have `/dev/kvm` and a kernel under `/boot`;
+the node probe labels them `celln.dev/kvm=true`. **Kind is a development
+environment only**: its nodes ship without a kernel, so a plain install on Kind
+waits for a node that never qualifies until you copy the host's kernel in
+(`docker cp /boot/vmlinuz-$(uname -r) <kind-node>:/boot/`), after which the
+probe labels the node within seconds. The installer says so if no node has
+qualified within the first minute of its wait.
+
 ### Advanced: Helm Chart
 
 **Prerequisites:** [cert-manager](https://cert-manager.io/) (for webhook TLS):
