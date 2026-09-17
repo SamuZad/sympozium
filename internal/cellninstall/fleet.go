@@ -575,13 +575,15 @@ func publishedKey(backend, file string, data map[string]string) string {
 // published into dir/<backend>/ for every backend, for InstallPlatform. It
 // reports false until a node has published; existing files must be identical.
 func ReadFleetConfiguration(ctx context.Context, store client.Client, dir string) (bool, error) {
-	return ReadFleetConfigurationFor(ctx, store, dir, nil)
+	return ReadFleetConfigurationFor(ctx, store, dir, "", nil)
 }
 
 // ReadFleetConfigurationFor is ReadFleetConfiguration that also waits until
 // every expected backend has been published, so adding a backend to a
-// running scope blocks until a node has configured it.
-func ReadFleetConfigurationFor(ctx context.Context, store client.Client, dir string, expected []string) (bool, error) {
+// running scope blocks until a node has configured it. With packageHash set
+// it also waits until the nodes have published that package, so moving a
+// scope to a new package never reads the previous package's files.
+func ReadFleetConfigurationFor(ctx context.Context, store client.Client, dir, packageHash string, expected []string) (bool, error) {
 	if !filepath.IsAbs(dir) || filepath.Clean(dir) != dir {
 		return false, fmt.Errorf("clean absolute configuration directory required")
 	}
@@ -590,6 +592,9 @@ func ReadFleetConfigurationFor(ctx context.Context, store client.Client, dir str
 		return false, nil
 	} else if err != nil {
 		return false, err
+	}
+	if packageHash != "" && published.Annotations[packageAnnotation] != packageHash {
+		return false, nil
 	}
 	backends, err := PublishedBackends(published.Data)
 	if err != nil {

@@ -234,7 +234,8 @@ define the single backend named `native`.
   its configuration, and the installer adds its profile, route and wrappers.
   The owner DaemonSet is not restarted, so running conversations keep going,
   and namespaces get the new wrapper on first use. A scope holds at most 32
-  backends; changing an existing backend's route needs a new scope.
+  backends; changing an existing backend's route needs a new scope (see
+  **Moving to a new package or scope** below).
 
 ## One-shot runs
 
@@ -354,9 +355,10 @@ No recompilation. On the packaging machine:
    subset). The executable must be a static Linux amd64 binary; a
    dynamically linked one is refused with that reason (lending a whole image
    as a closure is the path for those).
-3. Rebuild the starter package with `--tool-image NAME` and install it as a
-   new scope; the fleet's catalogue, policy and every namespace's wrappers
-   follow from the package.
+3. Rebuild the starter package with `--tool-image NAME` and install it with
+   `--celln-fleet-replace-package` (see **Moving to a new package or scope**);
+   the fleet's catalogue, policy and every namespace's wrappers follow from
+   the package.
 
 ## Conversations survive their node
 
@@ -482,11 +484,52 @@ journey on a three-node Kind cluster, including a node-leave drain.
   re-placed.
 - **Rolling updates** replace one node's dispatcher at a time with the same
   drain semantics. A dispatcher restart loses live parents on that node.
-- **New package:** use a new scope. One scope carries exactly one package
-  hash; nodes refuse to publish a differing configuration.
+- **New package or scope:** see below. One scope carries exactly one package
+  at a time; nodes refuse to publish a differing configuration unless the
+  installer approved the move.
 - **Uninstall** retains `/var/lib/sympozium-celln/<scope>` on each node and the
   journal claim; remove them only after every run has been deleted and
   cleanup confirmed.
+
+## Moving to a new package or scope
+
+Every Sympozium release pins its own starter package (a new package hash and
+publisher key), so upgrading `sympozium` and rerunning `sympozium install`
+moves the fleet to a new package. The same applies to a rebuilt package or a
+changed `--celln-fleet-scope`. Because this ends every live parent on the
+fleet, the installer checks the published configuration before it changes
+anything and refuses unless you approve the move:
+
+```console
+$ sympozium install ...
+Error: the Celln fleet runs package blake3:d365… in scope starter, and this
+install would move it to package blake3:e75a… in scope starter.
+```
+
+Choose one:
+
+- **Move the fleet:** rerun the same command with
+  `--celln-fleet-replace-package`. The installer records the approved package
+  and scope on `celln-fleet-configuration` before upgrading the chart. The
+  node-configure pods admit the new package next to the old one and publish
+  the new configuration: one node replaces the whole configuration with a
+  conditional update, and the others verify it. A node still running the old
+  package never publishes over an approved replacement. The installer then
+  waits for that publication, replaces the scope's runtime profiles and
+  cluster tools (they are immutable, so they are deleted and created again),
+  rewrites the policy, removes tools the new package dropped (and the old
+  policy after a scope change), and points every namespace's platform-managed
+  wrappers at the new profiles. Wrappers a namespace created itself are left
+  alone. The owner DaemonSet rolls because its package changed, so every live
+  parent reports `ContextLost`; conversations continue in new runs.
+- **Keep the installed package:** pin it with `--celln-fleet-package-image`,
+  `--celln-fleet-package-hash` and `--celln-fleet-publisher`, using the values
+  from the `celln-starter.json` asset of the release that installed it.
+
+Each node only trusts the current package's publisher key, so any parent
+still running from the old package fails at its next turn even before its
+owner restarts. Old package files stay in the node's store (they are
+content-addressed and harmless).
 
 ## Capacity
 

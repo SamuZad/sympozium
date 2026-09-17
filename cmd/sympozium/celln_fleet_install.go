@@ -20,8 +20,11 @@ type cellnFleetFlags struct {
 	options       cellninstall.FleetOptions
 	backendSpecs  []string
 	skipPreflight bool
-	outputDir     string
-	authorise     string
+	// replacePackage approves moving an installed scope to another package
+	// or scope, which ends every live parent on the fleet.
+	replacePackage bool
+	outputDir      string
+	authorise      string
 	// defaulted is set when a bare `sympozium install` chose the fleet.
 	defaulted bool
 	wait      time.Duration
@@ -52,6 +55,7 @@ func (f *cellnFleetFlags) register(cmd *cobra.Command) {
 	cmd.Flags().StringArrayVar(&f.backendSpecs, "celln-fleet-backend", nil, "A model backend of this fleet, repeatable: name=NAME,provider=PROVIDER,model=MODEL[,endpoint=URL][,protocol=openai-chat|anthropic-messages][,credential-file=/path][,allow-insecure=true]. Every node configures every backend and a namespace may run parents on any of them side by side. Without this flag the --celln-fleet-model-* flags define the single backend named native")
 	cmd.Flags().StringArrayVar(&f.options.HTTPSHosts, "celln-fleet-https-host", nil, "An exact host the https-fetch and https-post-json starter tools may reach, repeatable (lowercase DNS name; default example.com). Every backend's nodes configure the same list")
 	cmd.Flags().BoolVar(&f.skipPreflight, "celln-fleet-skip-preflight", false, "Skip the one-token chat probe of every backend with its key (use when only the nodes can reach the endpoint)")
+	cmd.Flags().BoolVar(&f.replacePackage, "celln-fleet-replace-package", false, "Approve moving an installed fleet to this package or scope (e.g. after upgrading sympozium, whose release pins a new starter package): nodes publish the new configuration, the scope's catalogue is replaced and every namespace's platform wrappers are rebound. Every live parent on the fleet is lost")
 	cmd.Flags().StringVar(&f.outputDir, "celln-fleet-output-dir", "", "Absolute private directory for the materialized configuration and installation records (default ~/.sympozium/celln-fleet/<scope>)")
 	cmd.Flags().DurationVar(&f.wait, "celln-fleet-wait", 15*time.Minute, "How long to wait for the first labeled node to publish the starter configuration")
 }
@@ -98,6 +102,16 @@ func installCellnFleet(ctx context.Context, f cellnFleetFlags, imageTag string, 
 	if err := initClient(); err != nil {
 		return err
 	}
+	// A scope carries one package at a time. Moving it is an explicit,
+	// disruptive decision, checked before anything in the cluster changes.
+	publication, err := cellninstall.ReadFleetPublication(ctx, k8sClient)
+	if err != nil {
+		return err
+	}
+	replacing := publication.Replaces(f.options.Scope, f.options.PackageHash)
+	if replacing && !f.replacePackage {
+		return publication.ReplacementRefusal(f.options.Scope, f.options.PackageHash)
+	}
 	// Every backend answers a one-token chat request with its key before the
 	// cluster changes, so a dead provider or bad key is reported here rather
 	// than as a lost parent on the first run.
@@ -136,6 +150,12 @@ func installCellnFleet(ctx context.Context, f cellnFleetFlags, imageTag string, 
 			return err
 		}
 	}
+	if replacing {
+		fmt.Printf("  Moving the fleet from package %s to %s in scope %s; every live parent on the fleet is lost.\n", publication.Package, f.options.PackageHash, f.options.Scope)
+		if err := cellninstall.ApproveFleetReplacement(ctx, k8sClient, publication, f.options.Scope, f.options.PackageHash); err != nil {
+			return err
+		}
+	}
 	if err := runInstall(imageTag, values); err != nil {
 		return err
 	}
@@ -149,7 +169,9 @@ func installCellnFleet(ctx context.Context, f cellnFleetFlags, imageTag string, 
 	}
 	fmt.Println("  Fleet plane deployed. Nodes with /dev/kvm and a boot kernel are labelled celln.dev/kvm=true by the node probe; label others by hand.")
 	fmt.Printf("  Waiting up to %s for the first node to admit the package and publish the starter configuration...\n", f.wait)
-	configuration := filepath.Join(f.outputDir, "configuration")
+	// One directory per package: files materialized for an earlier package
+	// must never be compared with, or mistaken for, this one's.
+	configuration := filepath.Join(f.outputDir, "configuration-"+strings.TrimPrefix(f.options.PackageHash, "blake3:")[:16])
 	deadline := time.Now().Add(f.wait)
 	// An empty fleet is the usual reason a wait stalls (no node with KVM and
 	// a kernel, or a Kind node); say so once, early, instead of at the deadline.
@@ -186,7 +208,7 @@ func installCellnFleet(ctx context.Context, f cellnFleetFlags, imageTag string, 
 		return err
 	}
 	if err := wait("publishing the starter configuration for every backend", func() (bool, error) {
-		return cellninstall.ReadFleetConfigurationFor(ctx, k8sClient, configuration, expected)
+		return cellninstall.ReadFleetConfigurationFor(ctx, k8sClient, configuration, f.options.PackageHash, expected)
 	}); err != nil {
 		return err
 	}
@@ -211,6 +233,9 @@ func installCellnFleet(ctx context.Context, f cellnFleetFlags, imageTag string, 
 		return err
 	}
 	platform := cellninstall.PlatformOptions{Namespace: namespace, ConfigurationDir: configuration, OutputDir: filepath.Join(f.outputDir, "installation"), Scope: f.options.Scope, ClusterID: clusterID, PackageHash: f.options.PackageHash, Principal: f.options.Principal, ControllerNamespace: helmNamespace, Authorise: f.authorise}
+	if replacing {
+		platform.Replacing = publication
+	}
 	if err := cellninstall.InstallPlatform(ctx, k8sClient, platform); err != nil {
 		return err
 	}

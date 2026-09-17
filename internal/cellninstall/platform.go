@@ -47,6 +47,11 @@ type PlatformOptions struct {
 	// exclusions and namespaces labeled excluded) or "labeled" (only
 	// namespaces carrying ScopeLabel).
 	Authorise string
+	// Replacing is the publication this installation replaces, when the
+	// operator approved moving the scope to a new package (or scope). Its
+	// catalogue objects are replaced or removed and every namespace's
+	// platform wrappers are rebound; zero means nothing is replaced.
+	Replacing FleetPublication
 }
 
 // PlatformCatalogueNames are the cluster-scoped objects one scope publishes:
@@ -227,15 +232,24 @@ func InstallPlatform(ctx context.Context, store client.Client, o PlatformOptions
 	if err := os.Mkdir(o.OutputDir, 0700); err != nil && !os.IsExist(err) {
 		return err
 	}
+	replacing := o.Replacing.Replaces(o.Scope, first.configured.PackageHash)
 	for _, object := range objects {
-		if err := ensurePlatformObject(ctx, store, object, first.configured.PackageHash); err != nil {
+		if err := ensurePlatformObject(ctx, store, object, first.configured.PackageHash, replacing); err != nil {
 			return err
 		}
 	}
 	// The scope's one policy grows with its backends: a rerun adds the new
 	// backend's profile and route and never removes or rewrites the others.
-	if err := ensurePlatformPolicy(ctx, store, policy, first.configured.PackageHash); err != nil {
+	if err := ensurePlatformPolicy(ctx, store, policy, first.configured.PackageHash, replacing); err != nil {
 		return err
+	}
+	if replacing {
+		if err := retirePlatformCatalogue(ctx, store, o.Replacing, o.Scope, objects, policyName); err != nil {
+			return err
+		}
+		if err := rebindTenantWrappers(ctx, store, profiles, policy); err != nil {
+			return err
+		}
 	}
 	var namespace corev1.Namespace
 	if err := store.Get(ctx, types.NamespacedName{Name: o.Namespace}, &namespace); err != nil {
@@ -265,7 +279,7 @@ func InstallPlatform(ctx context.Context, store client.Client, o PlatformOptions
 			}
 			annotations[packageAnnotation] = first.configured.PackageHash
 			object.SetAnnotations(annotations)
-			if err := ensurePlatformObject(ctx, store, object, first.configured.PackageHash); err != nil {
+			if err := ensurePlatformObject(ctx, store, object, first.configured.PackageHash, replacing); err != nil {
 				return err
 			}
 		}
@@ -342,7 +356,9 @@ func ClusterIdentity(ctx context.Context, store client.Reader) (string, error) {
 // ensurePlatformPolicy creates the scope's policy, or extends an existing one
 // from the same package with any runtime profile or route it lacks. Existing
 // entries, the selector and the ceilings are never rewritten here.
-func ensurePlatformPolicy(ctx context.Context, store client.Client, policy *api.CellnExecutionPolicy, packageHash string) error {
+//
+// With replace, a policy from another package is rewritten to this one.
+func ensurePlatformPolicy(ctx context.Context, store client.Client, policy *api.CellnExecutionPolicy, packageHash string, replace bool) error {
 	err := store.Create(ctx, policy)
 	if err == nil {
 		return nil
@@ -355,7 +371,11 @@ func ensurePlatformPolicy(ctx context.Context, store client.Client, policy *api.
 		return err
 	}
 	if existing.Annotations[packageAnnotation] != packageHash {
-		return fmt.Errorf("%s exists from another package; one scope carries exactly one package", policy.Name)
+		if !replace {
+			return fmt.Errorf("%s exists from another package; one scope carries exactly one package", policy.Name)
+		}
+		policy.ResourceVersion = existing.ResourceVersion
+		return store.Update(ctx, policy)
 	}
 	patch := client.MergeFrom(existing.DeepCopy())
 	changed := false
@@ -378,8 +398,9 @@ func ensurePlatformPolicy(ctx context.Context, store client.Client, policy *api.
 }
 
 // ensurePlatformObject creates the object, or accepts an existing one that was
-// published from the same package. Anything else is a conflict, never replaced.
-func ensurePlatformObject(ctx context.Context, store client.Client, object client.Object, packageHash string) error {
+// published from the same package. Anything else is a conflict, replaced only
+// when the operator approved moving the scope to this package.
+func ensurePlatformObject(ctx context.Context, store client.Client, object client.Object, packageHash string, replace bool) error {
 	err := store.Create(ctx, object)
 	if err == nil {
 		return nil
@@ -392,7 +413,23 @@ func ensurePlatformObject(ctx context.Context, store client.Client, object clien
 		return err
 	}
 	if existing.GetAnnotations()[packageAnnotation] != packageHash {
-		return fmt.Errorf("%s exists from another package; one scope carries exactly one package", object.GetName())
+		if !replace {
+			return fmt.Errorf("%s exists from another package; one scope carries exactly one package", object.GetName())
+		}
+		if object.GetNamespace() != "" {
+			// A namespace's wrappers are rebound in place (rebindTenantWrappers):
+			// deleting its Agent would take the runs that name it with it. Only
+			// the package record moves.
+			patch := client.MergeFrom(existing.DeepCopyObject().(client.Object))
+			annotations := existing.GetAnnotations()
+			if annotations == nil {
+				annotations = map[string]string{}
+			}
+			annotations[packageAnnotation] = packageHash
+			existing.SetAnnotations(annotations)
+			return store.Patch(ctx, existing, patch)
+		}
+		return replacePlatformObject(ctx, store, object, existing)
 	}
 	return nil
 }
