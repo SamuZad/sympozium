@@ -64,3 +64,6 @@ _bmad-output/
 *.mp4
 web/demo.gif
 mcp-bridge
+
+# Fork-only upstreaming tracker — must never ship in an upstream PR
+UPSTREAMING.md
