@@ -678,11 +678,22 @@ export function OnboardingWizard({
   const selectableRuntimes = celln ? nativeRuntimes : persistentRuntimes;
   // When the chosen execution plane has exactly one compatible runtime there is
   // nothing to choose, so select it implicitly and skip the runtime step.
-  const singleRuntimeRef = selectableRuntimes.length === 1 ? selectableRuntimes[0].metadata.name : "";
+  // Every fleet runtime is a wrapper for one model backend, and the Provider
+  // step picks the backend (and with it the wrapper), so a choice here would
+  // only ask the same question twice. Bind the first and skip the step.
+  const fleetWrappersOnly = celln && selectableRuntimes.length > 0 && selectableRuntimes.every((runtime) => !!runtime.spec.cellnProfileRef);
+  const singleRuntimeRef =
+    selectableRuntimes.length === 1 || fleetWrappersOnly ? selectableRuntimes[0]?.metadata.name || "" : "";
   const runtimeImplicit = creationKind === "agent" && !!singleRuntimeRef;
   const steps = stepsForMode(mode, celln, creationKind === "agent", runtimeImplicit);
   useEffect(() => {
-    if (!open || !runtimeImplicit || form.runtimeRef === singleRuntimeRef) return;
+    if (!open || !runtimeImplicit) return;
+    // With several fleet wrappers this only fills in a missing runtime: the
+    // Provider step binds whichever backend the operator chooses.
+    const bound = fleetWrappersOnly
+      ? selectableRuntimes.some((runtime) => runtime.metadata.name === form.runtimeRef)
+      : form.runtimeRef === singleRuntimeRef;
+    if (bound) return;
     const isDefaultCatalog = selectableRuntimes.some(
       (runtime) => runtime.metadata.name === singleRuntimeRef && runtime.metadata.labels?.["sympozium.ai/harness-example"] === "true",
     );
@@ -692,7 +703,7 @@ export function OnboardingWizard({
       skills: current.skills.filter((skill) => !harnessIncompatibleSkills.includes(skill)),
       policyRef: isDefaultCatalog ? "harness-examples" : current.policyRef,
     }));
-  }, [open, runtimeImplicit, singleRuntimeRef, form.runtimeRef, incompatibleSkillsKey]);
+  }, [open, runtimeImplicit, fleetWrappersOnly, singleRuntimeRef, form.runtimeRef, incompatibleSkillsKey]);
   const selectedRuntime = selectableRuntimes.find((runtime) => runtime.metadata.name === form.runtimeRef);
   // A wrapper runtime draws its tools from the shared cluster catalogue and its
   // model route from the namespace's host-profile ModelConnection; nothing is
@@ -1190,7 +1201,7 @@ export function OnboardingWizard({
                 });
               }}
             >
-              <SelectTrigger><SelectValue placeholder={celln ? "Choose native Celln runtime" : "Choose Pi or Hermes"} /></SelectTrigger>
+              <SelectTrigger className="min-w-0"><SelectValue placeholder={celln ? "Choose native Celln runtime" : "Choose Pi or Hermes"} /></SelectTrigger>
               <SelectContent>
                 {selectableRuntimes.map((runtime) => {
                   const profile = runtime.spec.cellnProfileRef ? (platformProfiles.data || []).find((candidate) => candidate.name === runtime.spec.cellnProfileRef?.name) : undefined;
@@ -1212,7 +1223,7 @@ export function OnboardingWizard({
                 {celln ? "Pick a native Celln runtime for the enduring parent. Native runtimes are namespace-scoped: this Agent must live where the runtime is registered. For a single sealed computation, use New Run → Celln cell instead." : "Choose Pi or Hermes to continue. Install the default persistent runtimes if none are listed."}
               </div>
             )}
-            {form.runtimeRef && !availablePolicies.some((policy) => policy.metadata.name === form.policyRef) && (
+            {!celln && form.runtimeRef && !availablePolicies.some((policy) => policy.metadata.name === form.policyRef) && (
               <p className="text-xs text-amber-500">The selected harness needs an approving policy. Install the default harnesses for this namespace, or ask an administrator to provide one.</p>
             )}
 
