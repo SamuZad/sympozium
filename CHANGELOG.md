@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.10.79](https://github.com/sympozium-ai/sympozium/compare/v0.10.78...v0.10.79) (2026-09-17)
+
+
+### Features
+
+* **web:** celln ps per node, cells on the topology and Celln persistent chats ([a20e748](https://github.com/sympozium-ai/sympozium/commit/a20e748649f520094dc13dec4114482151a8b7fb))
+* **web:** celln ps per node, cells on the topology and Celln persistent chats ([984101c](https://github.com/sympozium-ai/sympozium/commit/984101c875f9916760cd418c04706240fc990beb))
+
+
+### Bug Fixes
+
+* **celln:** move an installed fleet to a new starter package ([07ba1b0](https://github.com/sympozium-ai/sympozium/commit/07ba1b04433840f65d56be2d79d1a65a1542a861))
+* **celln:** move an installed fleet to a new starter package ([1e1520a](https://github.com/sympozium-ai/sympozium/commit/1e1520acdb4d4fd6fdf33f0ac7f560d64e6b6d80))
+* **celln:** stop continuing a continuation that is lost again at once ([1894d78](https://github.com/sympozium-ai/sympozium/commit/1894d78017ef7b1339109ef2dbb6af6531a936f5))
+* **celln:** stop continuing a continuation that is lost again at once ([5565633](https://github.com/sympozium-ai/sympozium/commit/55656335e58be44b98c08de0e72ea180c8372091))
+
 ## [0.10.78](https://github.com/sympozium-ai/sympozium/compare/v0.10.77...v0.10.78) (2026-09-16)
 
 
