@@ -155,6 +155,8 @@ metadata:
 data:
   prepare.sh: |
 {{ .Files.Get "files/celln/fleet-prepare.sh" | indent 4 }}
+  fleet-publish.py: |
+{{ .Files.Get "files/celln/fleet-publish.py" | indent 4 }}
 ---
 apiVersion: v1
 kind: Service
@@ -202,6 +204,7 @@ spec:
         app.kubernetes.io/name: celln-node-configure
       annotations:
         celln.sympozium.ai/package: {{ $package.hash | quote }}
+        celln.sympozium.ai/scope: {{ $fleet.scope | quote }}
         celln.sympozium.ai/backends: {{ toJson $backendExport | sha256sum | quote }}
         # The API server bumps this when it adds a backend, rolling the
         # configure pods so they pick up the extra list.
@@ -264,6 +267,10 @@ spec:
             - name: prepare
               mountPath: /etc/celln-fleet/prepare.sh
               subPath: prepare.sh
+              readOnly: true
+            - name: prepare
+              mountPath: /etc/celln-fleet/fleet-publish.py
+              subPath: fleet-publish.py
               readOnly: true
             - name: parent-clients
               mountPath: /etc/celln-fleet/clients

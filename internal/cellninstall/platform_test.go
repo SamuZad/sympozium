@@ -292,3 +292,125 @@ func TestInstallPlatformAddsBackendToRunningScope(t *testing.T) {
 		t.Fatalf("idempotent rerun refused: %v", err)
 	}
 }
+
+// repackage turns a materialized configuration into the one a newer package
+// publishes: another package hash, a new worker revision and its last tool
+// renamed (the old name is dropped, a new one added).
+func repackage(t *testing.T, dir, packageHash string) {
+	t.Helper()
+	backends, err := ConfigurationBackends(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, backend := range backends {
+		sub := filepath.Join(dir, backend)
+		var cat map[string]any
+		raw, _ := os.ReadFile(filepath.Join(sub, "catalogue.json"))
+		if err := json.Unmarshal(raw, &cat); err != nil {
+			t.Fatal(err)
+		}
+		tools := cat["tools"].([]any)
+		last := tools[len(tools)-1].(map[string]any)
+		last["name"] = fmt.Sprint(last["name"]) + "-next"
+		worker := cat["worker"].(map[string]any)
+		worker["revision"] = fmt.Sprint(worker["revision"]) + "-next"
+		raw, _ = json.Marshal(cat)
+		if err := os.WriteFile(filepath.Join(sub, "catalogue.json"), raw, 0600); err != nil {
+			t.Fatal(err)
+		}
+		var configured map[string]any
+		receiptRaw, _ := os.ReadFile(filepath.Join(sub, "configured.json"))
+		if err := json.Unmarshal(receiptRaw, &configured); err != nil {
+			t.Fatal(err)
+		}
+		configured["packageHash"] = packageHash
+		configured["catalogueHash"] = fmt.Sprintf("blake3:%x", blake3.Sum256(raw))
+		receiptRaw, _ = json.Marshal(configured)
+		if err := os.WriteFile(filepath.Join(sub, "configured.json"), receiptRaw, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// Moving a scope to a new package is refused unless approved; approved, the
+// catalogue is replaced, dropped tools are retired and every namespace's
+// platform wrappers follow the new profiles.
+func TestInstallPlatformReplacesPackageOnlyWhenApproved(t *testing.T) {
+	ctx := context.Background()
+	dir, oldPackage, principal := starterConfiguration(t)
+	store := platformInstallStore(t)
+	o := PlatformOptions{Namespace: "tenant-a", ConfigurationDir: dir, OutputDir: filepath.Join(t.TempDir(), "out"), Scope: "trial", ClusterID: "cluster-uid", PackageHash: oldPackage, Principal: principal, ControllerNamespace: "sympozium-system"}
+	if err := InstallPlatform(ctx, store, o); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cellnplatform.EnsureWrappers(ctx, store, "tenant-b", PlatformProfileName("trial", "claude")); err != nil {
+		t.Fatalf("on-demand wrappers: %v", err)
+	}
+	var oldCat catalogue
+	if _, err := read(filepath.Join(dir, "native", "catalogue.json"), &oldCat); err != nil {
+		t.Fatal(err)
+	}
+	_, policyName, toolName := PlatformCatalogueNames("trial")
+	dropped := toolName(oldCat.Tools[len(oldCat.Tools)-1].Name)
+
+	newPackage := "blake3:" + strings.Repeat("b", 64)
+	repackage(t, dir, newPackage)
+	o.PackageHash = newPackage
+	if err := InstallPlatform(ctx, store, o); err == nil || !strings.Contains(err.Error(), "another package") {
+		t.Fatalf("unapproved package change accepted: %v", err)
+	}
+	o.Replacing = FleetPublication{Exists: true, Package: oldPackage, Scope: "trial"}
+	if err := InstallPlatform(ctx, store, o); err != nil {
+		t.Fatalf("approved replacement refused: %v", err)
+	}
+
+	var profile api.CellnRuntimeProfile
+	if err := store.Get(ctx, types.NamespacedName{Name: PlatformProfileName("trial", "claude")}, &profile); err != nil || profile.Annotations[packageAnnotation] != newPackage || !strings.HasSuffix(profile.Spec.Revision, "-next") {
+		t.Fatalf("profile not replaced: %v %+v", err, profile.ObjectMeta)
+	}
+	var tool api.ClusterCellnTool
+	if err := store.Get(ctx, types.NamespacedName{Name: dropped}, &tool); err == nil {
+		t.Fatalf("tool %s dropped by the new package was kept", dropped)
+	}
+	var policy api.CellnExecutionPolicy
+	if err := store.Get(ctx, types.NamespacedName{Name: policyName}, &policy); err != nil || policy.Annotations[packageAnnotation] != newPackage || len(policy.Spec.Tools) != len(oldCat.Tools) || !slices.ContainsFunc(policy.Spec.Tools, func(t api.CellnExecutionPolicyTool) bool { return t.Ref.Name == dropped+"-next" }) {
+		t.Fatalf("policy not replaced: %v %+v", err, policy.Spec.Tools)
+	}
+	for _, ref := range policy.Spec.RuntimeProfiles {
+		if !strings.HasSuffix(ref.Ref.Revision, "-next") {
+			t.Fatalf("policy still names the old profile revision: %+v", ref)
+		}
+	}
+	for _, key := range []types.NamespacedName{{Namespace: "tenant-a", Name: "celln-claude"}, {Namespace: "tenant-b", Name: "celln-claude"}} {
+		var runtime api.AgentRuntime
+		if err := store.Get(ctx, key, &runtime); err != nil || runtime.Spec.CellnProfileRef.Revision != profile.Spec.Revision {
+			t.Fatalf("%s wrapper not rebound: %v %+v", key, err, runtime.Spec.CellnProfileRef)
+		}
+	}
+	// A rerun of the new package is an ordinary idempotent install.
+	o.Replacing = FleetPublication{}
+	if err := InstallPlatform(ctx, store, o); err != nil {
+		t.Fatalf("rerun after replacement refused: %v", err)
+	}
+}
+
+func TestFleetPublicationReplaces(t *testing.T) {
+	p := FleetPublication{Exists: true, Package: "blake3:a", Scope: "starter"}
+	for _, c := range []struct {
+		scope, pkg string
+		want       bool
+	}{{"starter", "blake3:a", false}, {"starter", "blake3:b", true}, {"other", "blake3:a", true}} {
+		if got := p.Replaces(c.scope, c.pkg); got != c.want {
+			t.Fatalf("%+v: got %v", c, got)
+		}
+	}
+	if (FleetPublication{}).Replaces("starter", "blake3:b") {
+		t.Fatal("a fresh cluster replaces nothing")
+	}
+	if (FleetPublication{Exists: true, Package: "blake3:a"}).Replaces("other", "blake3:a") {
+		t.Fatal("an unrecorded scope with the same package is not a replacement")
+	}
+	if err := p.ReplacementRefusal("starter", "blake3:b"); !strings.Contains(err.Error(), "--celln-fleet-replace-package") {
+		t.Fatalf("refusal does not name the approval flag: %v", err)
+	}
+}

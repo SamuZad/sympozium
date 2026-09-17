@@ -215,7 +215,7 @@ func (s *Server) completeCellnFleetBackend(name string, facts cellninstall.Fleet
 		}
 	}
 	record("configuring: nodes published it; installing its profile and wrappers")
-	if ok, err := cellninstall.ReadFleetConfigurationFor(ctx, s.client, configuration, expected); err != nil || !ok {
+	if ok, err := cellninstall.ReadFleetConfigurationFor(ctx, s.client, configuration, facts.PackageHash, expected); err != nil || !ok {
 		if err == nil {
 			err = fmt.Errorf("published configuration incomplete")
 		}
