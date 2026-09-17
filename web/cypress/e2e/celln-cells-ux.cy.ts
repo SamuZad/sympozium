@@ -157,3 +157,55 @@ describe("Celln cells in the console", () => {
     cy.contains("No persistent agents").should("not.exist");
   });
 });
+
+// Two fleet backends: the Provider step picks the backend, so the wizard must
+// not also ask which wrapper runtime to use, and a fleet runtime must not be
+// asked for a Kubernetes harness policy. Intercepted; no cluster needed.
+describe("Create Agent on a fleet with several backends", () => {
+  const profile = (backend: string, model: string) => ({
+    name: `celln-native-starter${backend === "native" ? "" : "-" + backend}`,
+    revision: "v1", policy: "celln-fleet-starter", model, provider: backend === "native" ? "deepseek" : backend,
+    endpoint: backend === "native" ? "https://api.deepseek.com/chat/completions" : "http://framework:8080/v1/chat/completions",
+    credentialProfile: `starter${backend === "native" ? "" : "-" + backend}`, systemPrompt: "Keep replies brief.",
+    backend, wrapper: backend === "native" ? "celln-native" : `celln-${backend}`, agent: "celln-agent",
+    tools: [{ name: "celln-starter-workspace-read", revision: "v1" }, { name: "celln-starter-grep", revision: "v1" }],
+    ceilings: { leaseSeconds: 86400, maxTurns: 256, maxModelRequests: 768, maxOutputTokens: 393216 },
+    sessionDefaults: { leaseSeconds: 14400, maxTurns: 64, maxModelRequests: 192, maxOutputTokens: 98304 },
+  });
+  const profiles = [profile("native", "deepseek-chat"), profile("llama-server", "Qwen3.8-27B-UD-Q4_K_XL.gguf")];
+  const runtimeFor = (p: (typeof profiles)[number]) => ({
+    metadata: { name: p.wrapper, namespace: "default", labels: { "sympozium.ai/managed-by": "celln-platform" } },
+    spec: { cellnProfileRef: { name: p.name, revision: p.revision }, supportOwner: "celln-platform" },
+  });
+
+  beforeEach(() => {
+    cy.intercept("GET", "**/api/v1/**", { body: [] });
+    cy.intercept("GET", "**/api/v1/celln-platform/profiles*", { body: profiles }).as("profiles");
+    cy.intercept("GET", "**/api/v1/runtimes*", { body: profiles.map(runtimeFor) });
+    cy.intercept("GET", "**/api/v1/cluster-celln-tools*", {
+      body: profiles[0].tools.map((tool) => ({
+        metadata: { name: tool.name, uid: tool.name }, spec: { revision: tool.revision, invocationABI: "celln.json-stdio/v1", lane: "tool", description: tool.name, limits: { timeoutMillis: 30000, memoryBytes: 1, workspace: "none", effects: "none" }, supportOwner: "op", publisherKey: "k" },
+      })),
+    });
+    cy.intercept("GET", "**/api/v1/capabilities*", { body: { celln: { available: true, state: "ready", reason: "fleet ready" } } });
+    cy.intercept("GET", "**/api/v1/model-connections*", { body: [] });
+  });
+
+  it("skips the runtime step and never asks a fleet runtime for a harness policy", () => {
+    cy.visit("/agents?create=1&kind=agent#token=test-token");
+    cy.get('[role="dialog"]').within(() => {
+      cy.get('input[placeholder="my-agent"]').type(`fleet-${Date.now().toString(36)}`);
+      cy.contains("button", "Next").click();
+      cy.get('[data-testid="create-agent-execution-environment"]').contains("button", "Celln").click();
+      cy.contains("button", "Next").click();
+      // Straight to tools: no "Choose a native Celln runtime" step in between.
+      cy.get('[data-testid="create-agent-borrowed-tools"]').should("be.visible");
+      cy.contains("Choose a native Celln runtime").should("not.exist");
+      cy.contains("needs an approving policy").should("not.exist");
+      cy.contains("button", "Next").click();
+      // The Provider step is where the backend is chosen.
+      cy.get('[data-testid="platform-model-route"]').should("be.visible").and("contain", "DeepSeek");
+      cy.contains("button", "Next").should("be.visible").and("be.enabled");
+    });
+  });
+});
