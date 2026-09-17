@@ -13,7 +13,9 @@ import {
 } from "@/hooks/use-api";
 import { useWebSocket, type StreamEvent } from "@/hooks/use-websocket";
 import { HarnessSessionChatDialog } from "@/components/harness-session-dialog";
-import type { Agent, AgentRuntime, HarnessSession } from "@/lib/api";
+import { CellnAgentConversation } from "@/components/celln-agent-conversation";
+import { isCellnEnduringAgent } from "@/lib/persistent-harness";
+import type { Agent, AgentRun, AgentRuntime, HarnessSession } from "@/lib/api";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -85,6 +87,19 @@ export function FeedPane({
   const setHarnessSessionState = useSetHarnessSessionState();
 
   const [mode, setMode] = useState<FeedMode>("runs");
+  // The Celln agent whose conversations are open in the Persistent tab.
+  const [openCellnAgent, setOpenCellnAgent] = useState<string | null>(null);
+  const cellnConversations = useMemo(() => {
+    const byAgent = new Map<string, AgentRun[]>();
+    for (const run of runs || []) {
+      if (run.spec.executionLifecycle !== "enduring" || run.metadata.deletionTimestamp) continue;
+      byAgent.set(run.spec.agentRef, [...(byAgent.get(run.spec.agentRef) || []), run]);
+    }
+    for (const list of byAgent.values()) {
+      list.sort((a, b) => (b.metadata.creationTimestamp || "").localeCompare(a.metadata.creationTimestamp || ""));
+    }
+    return byAgent;
+  }, [runs]);
   const [activeTab, setActiveTab] = useState<string>("");
   const [message, setMessage] = useState("");
   const [chattingSession, setChattingSession] = useState<HarnessSession | null>(null);
@@ -94,9 +109,16 @@ export function FeedPane({
     runtimes?.find((runtime) => runtime.metadata.name === inst.spec.runtimeRef);
 
   // Split agents by execution mode. Session-only (v1alpha2 openai-chat) harnesses
-  // run as a persistent HarnessSession; everything else dispatches a one-shot AgentRun.
+  // run as a persistent HarnessSession and enduring native Celln agents hold
+  // parent conversations; everything else dispatches a one-shot AgentRun.
+  const cellnAgents = useMemo(
+    () => (instances || []).filter((inst) => isCellnEnduringAgent(inst, runtimeFor(inst))),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [instances, runtimes],
+  );
+  const openCellnInstance = cellnAgents.find((agent) => agent.metadata.name === openCellnAgent);
   const oneShotInstances = useMemo(
-    () => (instances || []).filter((inst) => !isPersistentRuntime(runtimeFor(inst))),
+    () => (instances || []).filter((inst) => !isPersistentRuntime(runtimeFor(inst)) && !isCellnEnduringAgent(inst, runtimeFor(inst))),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [instances, runtimes],
   );
@@ -355,20 +377,42 @@ export function FeedPane({
       </div>
 
       {mode === "persistent" ? (
-        persistentAgents.length === 0 ? (
+        openCellnInstance ? (
+          <div className="flex min-h-0 flex-1 flex-col" data-testid="feed-celln-conversation">
+            <div className="flex items-center gap-2 border-b border-border/50 px-3 py-2">
+              <Button size="sm" variant="ghost" className="h-7 px-2 text-xs" onClick={() => setOpenCellnAgent(null)}>
+                <ChevronLeft className="mr-1 h-3 w-3" /> Back
+              </Button>
+              <span className="truncate font-mono text-xs">{openCellnInstance.metadata.name}</span>
+            </div>
+            <ScrollArea className="flex-1">
+              <div className="p-3">
+                <CellnAgentConversation agent={openCellnInstance} parents={cellnConversations.get(openCellnInstance.metadata.name) || []} />
+              </div>
+            </ScrollArea>
+          </div>
+        ) : persistentAgents.length === 0 && cellnAgents.length === 0 ? (
           <div className="flex flex-1 flex-col items-center justify-center p-6 text-center">
             <Bot className="h-10 w-10 text-muted-foreground/40 mb-3" />
             <p className="text-sm font-medium text-muted-foreground">
               No persistent agents
             </p>
             <p className="text-xs text-muted-foreground/70 mt-1">
-              Agents backed by a v1alpha2 openai-chat harness appear here as
-              durable conversations.
+              Agents backed by a v1alpha2 openai-chat harness, and enduring
+              Celln agents, appear here as durable conversations.
             </p>
           </div>
         ) : (
           <ScrollArea className="flex-1">
             <div className="space-y-2 p-3">
+              {cellnAgents.map((agent) => (
+                <CellnAgentItem
+                  key={`celln-${agent.metadata.name}`}
+                  agent={agent}
+                  conversations={cellnConversations.get(agent.metadata.name) || []}
+                  onOpen={() => setOpenCellnAgent(agent.metadata.name)}
+                />
+              ))}
               {persistentAgents.map((agent) => {
                 const runtime = runtimeFor(agent)!;
                 const session = sessionFor(
@@ -515,6 +559,46 @@ export function FeedPane({
 }
 
 // ── Persistent agent item ────────────────────────────────────────────────────
+
+function CellnAgentItem({
+  agent,
+  conversations,
+  onOpen,
+}: {
+  agent: Agent;
+  conversations: AgentRun[];
+  onOpen: () => void;
+}) {
+  const live = conversations.filter((run) => {
+    const phase = run.status?.phase;
+    return phase !== "Succeeded" && phase !== "Failed";
+  }).length;
+  const execution = agent.spec.execution;
+  return (
+    <div className="rounded-lg border p-3 text-sm" data-testid={`feed-celln-agent-${agent.metadata.name}`}>
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0">
+          <p className="truncate font-mono text-xs">{agent.metadata.name}</p>
+          <p className="truncate text-[10px] text-muted-foreground">
+            Celln · {agent.spec.runtimeRef || execution?.cellnSelection?.runtimeRef}{execution?.model ? ` · ${execution.model}` : ""}
+          </p>
+        </div>
+        <Badge variant={live > 0 ? "default" : "outline"} className="shrink-0">
+          {live > 0 ? `${live} live` : conversations.length > 0 ? "Idle" : "New"}
+        </Badge>
+      </div>
+      <div className="mt-2 flex flex-wrap gap-1.5">
+        <Button size="sm" onClick={onOpen} className="h-7 text-xs">
+          <MessageSquare className="mr-1 h-3 w-3" />
+          {conversations.length > 0 ? "Open" : "Start"}
+        </Button>
+        <Link to={`/agents/${agent.metadata.name}`} className="inline-flex h-7 items-center px-2 text-xs text-muted-foreground hover:text-foreground">
+          Agent
+        </Link>
+      </div>
+    </div>
+  );
+}
 
 function PersistentAgentItem({
   agent,

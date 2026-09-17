@@ -573,6 +573,9 @@ celln:
     parentClientsConfigMap: ""
     # -- ConfigMap in celln-system the nodes publish the starter configuration to.
     configurationConfigMap: celln-fleet-configuration
+    # -- ConfigMap in celln-system each node reports its Celln cells and parents to
+    # (what `celln ps -a` shows), under data.<node>; the console reads it.
+    cellsConfigMap: celln-fleet-cells
     # -- The scope's model backends. Every node configures every backend;
     # each backend becomes a runtime profile and an AgentRuntime wrapper
     # (`celln-<name>`, the one named `native` keeps `celln-native`) so one

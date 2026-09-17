@@ -248,6 +248,17 @@ export function useCellnFleetBackends(enabled = true) {
   });
 }
 
+/** Every fleet node's Celln cells (`celln ps -a`), refreshed while shown. */
+export function useCellnFleetCells(enabled = true) {
+  return useQuery({
+    queryKey: ["celln-fleet-cells"],
+    queryFn: api.cellnPlatform.cells,
+    enabled,
+    retry: false,
+    refetchInterval: 2000,
+  });
+}
+
 export function useAddCellnFleetBackend() {
   const qc = useQueryClient();
   return useMutation({

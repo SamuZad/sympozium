@@ -8,6 +8,7 @@ import { ShieldCheck, ShieldX, ExternalLink, Download, MessageSquare, Square } f
 import { Button } from "@/components/ui/button";
 import { HarnessSessionChatDialog, StartHarnessSessionDialog } from "@/components/harness-session-dialog";
 import { kubernetesHarnesses } from "@/lib/persistent-harness";
+import { CellnNodeCellsCard } from "@/components/celln-node-cells";
 
 function ready(runtime: import("@/lib/api").AgentRuntime) {
   return runtime.status?.conditions?.some(
@@ -126,6 +127,8 @@ export function HarnessesPage() {
           })}
         </div>
       )}
+
+      <CellnNodeCellsCard />
 
       {startingRuntime && <StartHarnessSessionDialog open={true} onOpenChange={(open) => { if (!open) setStartingRuntime(null); }} runtime={startingRuntime} agents={agents || []} />}
       {chattingSession && <HarnessSessionChatDialog open={true} onOpenChange={(open) => { if (!open) setChattingSession(null); }} session={chattingSession} />}
