@@ -205,5 +205,12 @@ func telemetryEnv(lookup func(string) string) map[string]string {
 		// the last data points are not lost at exit.
 		"OTEL_METRIC_EXPORT_INTERVAL": "10000",
 		"OTEL_LOGS_EXPORT_INTERVAL":   "5000",
+		// Claude Code stamps session.id and user.account_uuid on every
+		// metric by default — one series per pod, which is a cardinality
+		// explosion for a fleet of ephemeral runs. Sympozium's own
+		// identifiers (instance, agent run id) arrive via
+		// OTEL_RESOURCE_ATTRIBUTES instead.
+		"OTEL_METRICS_INCLUDE_SESSION_ID":   "false",
+		"OTEL_METRICS_INCLUDE_ACCOUNT_UUID": "false",
 	}
 }

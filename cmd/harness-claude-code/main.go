@@ -205,6 +205,12 @@ func run(ctx context.Context) error {
 			res.Metrics.InputTokens, res.Metrics.OutputTokens, result.Final.TotalCostUSD)
 	}
 	o.RecordRun(ctx, status, instance, model, namespace, duration)
+	// Canonical token / tool metrics from Claude Code's own event stream, so
+	// they exist regardless of Claude Code's native telemetry export.
+	o.RecordTokenUsage(ctx, model, result.Usage())
+	for _, ti := range result.SortedToolInvocations() {
+		o.RecordToolInvocation(ctx, ti.Key.Name, ti.Key.Status, int64(ti.Count))
+	}
 
 	if err := harness.WriteResult(res); err != nil {
 		harness.Logf(harnessName, "failed to write result.json: %v", err)

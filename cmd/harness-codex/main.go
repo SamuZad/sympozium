@@ -116,11 +116,14 @@ func run(ctx context.Context) error {
 	}
 
 	started := time.Now()
-	response, runErr := runCodex(ctx, o)
+	response, codexRun, runErr := runCodex(ctx, o)
 	duration := time.Since(started).Milliseconds()
 
 	res := ipc.AgentResult{}
 	res.Metrics.DurationMs = duration
+	res.Metrics.InputTokens = int(codexRun.Usage.PromptTotal())
+	res.Metrics.OutputTokens = int(codexRun.Usage.Output)
+	res.Metrics.ToolCalls = codexRun.ToolCalls()
 	status := "success"
 	if runErr != nil {
 		status = "error"
@@ -133,7 +136,15 @@ func run(ctx context.Context) error {
 		res.Response = response
 		res.Attachments = harness.BuildResponseAttachments(ctx, harnessName, response, workspace)
 	}
+	harness.Logf(harnessName, "run finished: status=%s turns=%d tools=%d in=%d out=%d",
+		status, codexRun.Turns, res.Metrics.ToolCalls, res.Metrics.InputTokens, res.Metrics.OutputTokens)
 	o.RecordRun(ctx, status, instance, model, namespace, duration)
+	// Canonical token / tool metrics from codex's own event stream, so they
+	// exist regardless of codex's native metrics exporter.
+	o.RecordTokenUsage(ctx, model, codexRun.Usage)
+	for _, ti := range codexRun.SortedToolInvocations() {
+		o.RecordToolInvocation(ctx, ti.Key.Name, ti.Key.Status, int64(ti.Count))
+	}
 
 	if err := harness.WriteResult(res); err != nil {
 		harness.Logf(harnessName, "failed to write result.json: %v", err)
@@ -240,10 +251,12 @@ func writeConfigTOML(codexHome string) error {
 	sb.WriteString("[analytics]\nenabled = false\n\n")
 
 	// Native codex OTel export. Codex emits a rich set of metrics out of
-	// the box (turn.token_usage by token_type, codex.tool.call, per-API
-	// timing, etc.) — see https://developers.openai.com/codex/config-advanced#observability-and-telemetry
-	// We point codex at the same OTLP endpoint the controller injects for
-	// the agent-runner so dashboards stay unified across harnesses.
+	// the box (codex.turn.token_usage histogram by token_type,
+	// codex.tool.call, per-API timing, etc.) under its own names; the
+	// canonical gen_ai.client.token.usage / sympozium.tool.invocations
+	// series are emitted by this shim from the --json event stream. Note
+	// codex's metrics_exporter defaults to "statsig" (OpenAI's sink) — it
+	// must be pointed at our collector explicitly or set to "none".
 	writeCodexOTelBlock(&sb)
 
 	rendered := sb.String()
@@ -328,10 +341,19 @@ func writeCodexOTelBlock(sb *strings.Builder) {
 	fmt.Fprintf(sb, "[otel.trace_exporter.otlp-http]\nendpoint = %q\nprotocol = \"binary\"\n\n", base+"/v1/traces")
 }
 
-func runCodex(ctx context.Context, o *harness.Observability) (string, error) {
+// runCodex executes `codex exec --json`, tees the JSONL event stream to the pod
+// log while folding it into a codexRun (token usage, tool invocations, last
+// agent message, failure), and returns the final answer.
+//
+// The answer is read from --output-last-message first; when codex leaves that
+// empty — typically because the model ended its turn on a tool call with no
+// closing message — the last agent_message item from the stream is used, so a
+// successful run never reports an empty result while the stream held one.
+func runCodex(ctx context.Context, o *harness.Observability) (string, *codexRun, error) {
+	run := &codexRun{}
 	task := os.Getenv("TASK")
 	if task == "" {
-		return "", fmt.Errorf("TASK env var is empty")
+		return "", run, fmt.Errorf("TASK env var is empty")
 	}
 	workspace := harness.EnvOr("WORKSPACE_DIR", "/workspace")
 	lastMessagePath := filepath.Join(os.TempDir(), "codex-last.txt")
@@ -345,28 +367,46 @@ func runCodex(ctx context.Context, o *harness.Observability) (string, error) {
 
 	args := []string{
 		"exec",
+		"--json",
 		"--skip-git-repo-check",
 		"--cd", workspace,
 		"--output-last-message", lastMessagePath,
 		task,
 	}
 	cmd := exec.CommandContext(ctx, "codex", args...)
-	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = nil
-	runErr := cmd.Run()
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", run, fmt.Errorf("stdout pipe: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		harness.MarkSpanError(span, err)
+		return "", run, fmt.Errorf("start codex: %w", err)
+	}
+	run.consume(stdout, os.Stdout)
+	runErr := cmd.Wait()
 	if runErr != nil {
+		harness.MarkSpanError(span, runErr)
+		if run.FailureMessage != "" {
+			runErr = fmt.Errorf("codex exec failed: %s: %w", run.FailureMessage, runErr)
+		} else {
+			runErr = fmt.Errorf("codex exec failed: %w", runErr)
+		}
+	} else if run.FailureMessage != "" {
+		// codex exited 0 but the stream reported a fatal error.
+		runErr = fmt.Errorf("codex reported: %s", run.FailureMessage)
 		harness.MarkSpanError(span, runErr)
 	}
 
-	// Prefer the dedicated last-message file; fall back to empty string.
+	response := ""
 	if data, err := os.ReadFile(lastMessagePath); err == nil {
-		return strings.TrimSpace(string(data)), runErr
+		response = strings.TrimSpace(string(data))
 	}
-	if runErr != nil {
-		return "", fmt.Errorf("codex exec failed: %w", runErr)
+	if response == "" {
+		response = strings.TrimSpace(run.LastAgentMessage)
 	}
-	return "", nil
+	return response, run, runErr
 }
 
 // providerEnvKey maps a Sympozium provider id to the env var that holds the

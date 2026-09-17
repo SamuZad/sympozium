@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -141,7 +142,17 @@ type streamEvent struct {
 type contentBlock struct {
 	Type string `json:"type"`
 	Text string `json:"text"`
+	// tool_use blocks
+	ID   string `json:"id"`
 	Name string `json:"name"`
+	// tool_result blocks
+	ToolUseID string `json:"tool_use_id"`
+	IsError   bool   `json:"is_error"`
+}
+
+// toolKey identifies a tool-invocation series (tool_name, status).
+type toolKey struct {
+	Name, Status string
 }
 
 // streamResult accumulates what the shim learns from a stream-json run.
@@ -151,6 +162,11 @@ type streamResult struct {
 	Final *streamEvent
 	// ToolCalls counts tool_use blocks across assistant turns.
 	ToolCalls int
+	// ToolInvocations counts tool calls by (name, status), where status is
+	// resolved from the matching tool_result block ("success"/"error").
+	ToolInvocations map[toolKey]int
+	// pendingTools maps tool_use ids to tool names until their result arrives.
+	pendingTools map[string]string
 	// LastAssistantText is the most recent assistant text block, used as a
 	// partial answer when no result event arrived.
 	LastAssistantText string
@@ -196,6 +212,12 @@ func (s *streamResult) consumeLine(line []byte) {
 			switch b.Type {
 			case "tool_use":
 				s.ToolCalls++
+				if s.pendingTools == nil {
+					s.pendingTools = map[string]string{}
+				}
+				if b.ID != "" {
+					s.pendingTools[b.ID] = b.Name
+				}
 				harness.Logf(harnessName, "tool_use %s", b.Name)
 			case "text":
 				if strings.TrimSpace(b.Text) != "" {
@@ -203,10 +225,87 @@ func (s *streamResult) consumeLine(line []byte) {
 				}
 			}
 		}
+	case "user":
+		// Tool results come back as user-role messages; resolve each
+		// pending tool_use to a success/error outcome.
+		if ev.Message == nil || len(ev.Message.Content) == 0 {
+			return
+		}
+		var blocks []contentBlock
+		if err := json.Unmarshal(ev.Message.Content, &blocks); err != nil {
+			return
+		}
+		for _, b := range blocks {
+			if b.Type != "tool_result" || b.ToolUseID == "" {
+				continue
+			}
+			name, ok := s.pendingTools[b.ToolUseID]
+			if !ok {
+				continue
+			}
+			delete(s.pendingTools, b.ToolUseID)
+			status := "success"
+			if b.IsError {
+				status = "error"
+			}
+			if s.ToolInvocations == nil {
+				s.ToolInvocations = map[toolKey]int{}
+			}
+			s.ToolInvocations[toolKey{Name: name, Status: status}]++
+		}
 	case "result":
 		ev := ev
 		s.Final = &ev
 	}
+}
+
+// Usage returns the run's token usage in disjoint buckets, or zero when no
+// result event arrived. Claude Code's input_tokens already excludes cache
+// traffic, so the buckets map one-to-one.
+func (s *streamResult) Usage() harness.TokenUsage {
+	if s.Final == nil || s.Final.Usage == nil {
+		return harness.TokenUsage{}
+	}
+	u := s.Final.Usage
+	return harness.TokenUsage{
+		Input:      int64(u.InputTokens),
+		Output:     int64(u.OutputTokens),
+		CacheRead:  int64(u.CacheReadInputTokens),
+		CacheWrite: int64(u.CacheCreationInputTokens),
+	}
+}
+
+// SortedToolInvocations returns (name, status, count) triples in a stable
+// order. Tool calls whose result never arrived (run killed mid-tool) are
+// reported with status "unknown".
+func (s *streamResult) SortedToolInvocations() []struct {
+	Key   toolKey
+	Count int
+} {
+	merged := map[toolKey]int{}
+	for k, v := range s.ToolInvocations {
+		merged[k] += v
+	}
+	for _, name := range s.pendingTools {
+		merged[toolKey{Name: name, Status: "unknown"}]++
+	}
+	out := make([]struct {
+		Key   toolKey
+		Count int
+	}, 0, len(merged))
+	for k, v := range merged {
+		out = append(out, struct {
+			Key   toolKey
+			Count int
+		}{k, v})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Key.Name != out[j].Key.Name {
+			return out[i].Key.Name < out[j].Key.Name
+		}
+		return out[i].Key.Status < out[j].Key.Status
+	})
+	return out
 }
 
 // Response returns the final answer: the result event's text when present,

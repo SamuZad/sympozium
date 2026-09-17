@@ -89,13 +89,24 @@ built on `internal/harness`. On start they:
    to the relayed reply — uploaded to the artifact-server when
    `ARTIFACT_SERVER_URL` is set, inline base64 otherwise. See
    [Writing Tools](writing-tools.md#large-files-the-artifact-server-reference-by-id).
-6. **Emit telemetry** tagged `harness=<name>`: the shim reports
-   `sympozium.agent.runs` / `sympozium.agent.run.duration` and a
-   `sympozium.harness.<name>.exec` span, and enables the CLI's *native* OTel
-   export against the same collector. The collector's `transform` processor
-   renames codex's `turn.token_usage` and Claude Code's
-   `claude_code.token.usage` to `gen_ai.client.token.usage`, so one dashboard
-   covers all harnesses.
+6. **Emit telemetry** tagged `harness=<name>`. The shim parses the CLI's own
+   event stream (`codex exec --json`, `claude -p --output-format stream-json`)
+   and emits the same canonical series the agent-runner does, with the same
+   instrument types and attributes: `gen_ai.client.token.usage` (histogram;
+   `gen_ai.token.type` = `input` | `output` | `cache_read` | `cache_write`,
+   disjoint buckets that sum to the billed total), `sympozium.tool.invocations`
+   (counter; `tool_name`, `status`), `sympozium.agent.runs`,
+   `sympozium.agent.run.duration`, and a `sympozium.harness.<name>.exec` span.
+   One PromQL query therefore covers every harness — for example
+   `sum by (harness, gen_ai_token_type) (rate(gen_ai_client_token_usage_sum[5m]))`.
+   The shim also enables the CLI's *native* OTel export against the same
+   collector; those metrics (`codex.turn.token_usage`, `claude_code.token.usage`,
+   `claude_code.cost.usage`, …) keep their own names and semantics as optional
+   detail and are not renamed, because they differ in instrument type and
+   bucket vocabulary. Codex's `metrics_exporter` defaults to OpenAI's Statsig
+   sink; the shim points it at the collector or sets it to `none`. Claude Code's
+   per-session and per-account metric attributes are disabled by the shim to
+   keep Prometheus cardinality bounded.
 
 The agent container keeps the standard hardening — read-only root filesystem,
 all capabilities dropped, non-root UID 65532, NetworkPolicy. That pod boundary

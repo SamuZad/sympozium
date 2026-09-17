@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+
+	"github.com/sympozium-ai/sympozium/internal/harness"
 )
 
 func TestClaudeArgs(t *testing.T) {
@@ -51,6 +53,7 @@ const sampleStream = `{"type":"system","subtype":"init","session_id":"abc","mode
 {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Let me look."},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]},"session_id":"abc"}
 {"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"a.txt"}]},"session_id":"abc"}
 {"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t2","name":"Read","input":{"file_path":"a.txt"}}]},"session_id":"abc"}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2","content":"no such file","is_error":true}]},"session_id":"abc"}
 this line is not json and must be ignored
 {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Done: see [report](/workspace/report.md)."}]},"session_id":"abc"}
 {"type":"result","subtype":"success","is_error":false,"duration_ms":4200,"num_turns":3,"result":"Done: see [report](/workspace/report.md).","session_id":"abc","total_cost_usd":0.0123,"usage":{"input_tokens":100,"cache_creation_input_tokens":20,"cache_read_input_tokens":300,"output_tokens":45}}
@@ -81,6 +84,28 @@ func TestStreamResult_ParsesSuccess(t *testing.T) {
 	}
 	if err := s.Err(); err != nil {
 		t.Errorf("Err = %v, want nil", err)
+	}
+
+	// Token buckets map one-to-one onto Claude Code's usage fields.
+	if got := s.Usage(); got != (harness.TokenUsage{Input: 100, Output: 45, CacheRead: 300, CacheWrite: 20}) {
+		t.Errorf("Usage = %+v", got)
+	}
+	// Tool outcomes are resolved from the matching tool_result blocks.
+	inv := s.SortedToolInvocations()
+	if len(inv) != 2 || inv[0].Key != (toolKey{"Bash", "success"}) || inv[1].Key != (toolKey{"Read", "error"}) {
+		t.Errorf("tool invocations = %+v", inv)
+	}
+}
+
+func TestStreamResult_UnresolvedToolIsUnknown(t *testing.T) {
+	s := &streamResult{}
+	s.consume(strings.NewReader(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t9","name":"Bash","input":{}}]}}`+"\n"), nil)
+	inv := s.SortedToolInvocations()
+	if len(inv) != 1 || inv[0].Key != (toolKey{"Bash", "unknown"}) || inv[0].Count != 1 {
+		t.Fatalf("tool without result should be reported unknown: %+v", inv)
+	}
+	if s.Usage() != (harness.TokenUsage{}) {
+		t.Fatal("no result event → zero usage")
 	}
 }
 

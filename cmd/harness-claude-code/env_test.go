@@ -163,6 +163,9 @@ func TestTelemetryEnv(t *testing.T) {
 	if got["OTEL_EXPORTER_OTLP_PROTOCOL"] != "grpc" || got["OTEL_EXPORTER_OTLP_ENDPOINT"] != "http://sympozium-otel-collector.sympozium-system.svc:4317" {
 		t.Fatalf("unexpected grpc mapping: %v", got)
 	}
+	if got["OTEL_METRICS_INCLUDE_SESSION_ID"] != "false" || got["OTEL_METRICS_INCLUDE_ACCOUNT_UUID"] != "false" {
+		t.Fatalf("per-session/account metric attributes must be disabled to bound cardinality: %v", got)
+	}
 
 	// http endpoint → http/protobuf.
 	got = telemetryEnv(lookupFrom(map[string]string{

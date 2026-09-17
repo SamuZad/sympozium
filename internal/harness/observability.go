@@ -29,8 +29,58 @@ type Observability struct {
 	tracer   trace.Tracer
 	shutdown func(context.Context) error
 
-	agentRuns     metric.Int64Counter
-	agentRunDurMs metric.Float64Histogram
+	agentRuns       metric.Int64Counter
+	agentRunDurMs   metric.Float64Histogram
+	tokenUsage      metric.Int64Histogram
+	toolInvocations metric.Int64Counter
+}
+
+// TokenUsage is a run's token consumption split into disjoint buckets, so
+// summing all four gives the total billed tokens. Each CLI reports these
+// differently (Claude Code: cache_read/cache_creation; Codex: cached_input as
+// a subset of input, plus cache_write); shims normalise into this shape.
+type TokenUsage struct {
+	// Input is uncached prompt tokens.
+	Input int64
+	// Output is completion tokens (reasoning included where the API folds
+	// it into output).
+	Output int64
+	// CacheRead is prompt tokens served from the provider's prompt cache.
+	CacheRead int64
+	// CacheWrite is prompt tokens written into the provider's prompt cache.
+	CacheWrite int64
+}
+
+// Total returns the sum of every bucket.
+func (u TokenUsage) Total() int64 { return u.Input + u.Output + u.CacheRead + u.CacheWrite }
+
+// PromptTotal returns everything the model read: uncached input plus cache
+// traffic. This is what the IPC result's inputTokens metric represents.
+func (u TokenUsage) PromptTotal() int64 { return u.Input + u.CacheRead + u.CacheWrite }
+
+// tokenSeries maps a TokenUsage onto (gen_ai.token.type, count) pairs,
+// skipping empty buckets. "input" and "output" follow the OTel GenAI
+// semconv; the cache buckets are Sympozium extensions.
+func tokenSeries(u TokenUsage) []struct {
+	Type  string
+	Count int64
+} {
+	all := []struct {
+		Type  string
+		Count int64
+	}{
+		{"input", u.Input},
+		{"output", u.Output},
+		{"cache_read", u.CacheRead},
+		{"cache_write", u.CacheWrite},
+	}
+	out := all[:0]
+	for _, s := range all {
+		if s.Count > 0 {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // InitObservability bootstraps OTel via pkg/telemetry using the same
@@ -99,7 +149,60 @@ func InitObservability(ctx context.Context, name string) *Observability {
 	} else {
 		log.Printf("harness-%s: failed creating metric sympozium.agent.run.duration: %v", name, err)
 	}
+	// Same instrument, name and attribute set as the agent-runner, so one
+	// query covers every harness. The wrapped CLIs' native token metrics
+	// (codex.turn.token_usage, claude_code.token.usage) keep their own names
+	// and instrument types; this is the canonical one.
+	if h, err := meter.Int64Histogram(
+		"gen_ai.client.token.usage",
+		metric.WithUnit("{token}"),
+		metric.WithDescription("Number of input and output tokens used"),
+	); err == nil {
+		o.tokenUsage = h
+	} else {
+		log.Printf("harness-%s: failed creating metric gen_ai.client.token.usage: %v", name, err)
+	}
+	if c, err := meter.Int64Counter(
+		"sympozium.tool.invocations",
+		metric.WithUnit("{invocation}"),
+		metric.WithDescription("Tool invocations by the agent"),
+	); err == nil {
+		o.toolInvocations = c
+	} else {
+		log.Printf("harness-%s: failed creating metric sympozium.tool.invocations: %v", name, err)
+	}
 	return o
+}
+
+// RecordTokenUsage records one histogram sample per non-empty token bucket,
+// attributed like the agent-runner's samples (model, gen_ai.token.type) plus
+// harness. Shims call it once per run with the totals they parsed from the
+// CLI's own output, so the metric exists even when the CLI's native
+// telemetry is off.
+func (o *Observability) RecordTokenUsage(ctx context.Context, model string, u TokenUsage) {
+	if o == nil || !o.enabled || o.tokenUsage == nil {
+		return
+	}
+	for _, s := range tokenSeries(u) {
+		o.tokenUsage.Record(ctx, s.Count, metric.WithAttributes(
+			attribute.String("model", model),
+			attribute.String("gen_ai.token.type", s.Type),
+			attribute.String("harness", o.name),
+		))
+	}
+}
+
+// RecordToolInvocation counts one tool call with the agent-runner's
+// attribute set (tool_name, status) plus harness.
+func (o *Observability) RecordToolInvocation(ctx context.Context, toolName, status string, count int64) {
+	if o == nil || !o.enabled || o.toolInvocations == nil || count <= 0 {
+		return
+	}
+	o.toolInvocations.Add(ctx, count, metric.WithAttributes(
+		attribute.String("tool_name", toolName),
+		attribute.String("status", status),
+		attribute.String("harness", o.name),
+	))
 }
 
 // Shutdown flushes and tears down the OTel providers (no-op when disabled).
