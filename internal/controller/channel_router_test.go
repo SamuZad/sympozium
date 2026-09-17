@@ -36,6 +36,13 @@ func TestHandleCompleted_Routing(t *testing.T) {
 			result:        agentResult{Status: "success", Response: "here you go"},
 			wantPublished: 1,
 		},
+		{
+			// The runner's fatal() writes an error result and exits 1, so the
+			// Job also fails and handleFailed replies with better advice.
+			name:          "error result stays silent — handleFailed owns failure replies",
+			result:        agentResult{Status: ipc.ResultStatusError, Error: "LLM completion failed: 429 rate limit"},
+			wantPublished: 0,
+		},
 	}
 
 	scheme := runtime.NewScheme()
@@ -192,6 +199,60 @@ func TestHandleFailed_Routing(t *testing.T) {
 				t.Fatalf("reply text %q does not mention %q", out.Text, tt.wantContains)
 			}
 		})
+	}
+}
+
+// TestFailedRun_ExactlyOneReply pins the double-reply fix. When the runner
+// fails internally it writes result.json with status "error" and exits 1: the
+// IPC bridge publishes that result as agent.run.completed, then the Job fails
+// and failRun publishes agent.run.failed. The channel must see one reply — the
+// failure handler's, which carries the classified advice.
+func TestFailedRun_ExactlyOneReply(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := sympoziumv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add sympozium scheme: %v", err)
+	}
+	run := &sympoziumv1alpha1.AgentRun{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "chan-run",
+			Namespace: "default",
+			Labels:    map[string]string{"sympozium.ai/source": "channel"},
+			Annotations: map[string]string{
+				"sympozium.ai/reply-channel": "slack",
+				"sympozium.ai/reply-chat-id": "C123",
+			},
+		},
+	}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(run).Build()
+	bus := &recordingEventBus{}
+	cr := &ChannelRouter{Client: cl, EventBus: bus, Log: logr.Discard()}
+
+	const errText = "LLM completion failed: 429 rate limit"
+	completed, err := eventbus.NewEvent(eventbus.TopicAgentRunCompleted, map[string]string{
+		"agentRunID": "chan-run", "instanceName": "demo",
+	}, agentResult{Status: ipc.ResultStatusError, Error: errText})
+	if err != nil {
+		t.Fatalf("build completed event: %v", err)
+	}
+	failed, err := eventbus.NewEvent(eventbus.TopicAgentRunFailed, map[string]string{
+		"agentRunID": "chan-run", "instanceName": "demo", "reason": "llm_error",
+	}, map[string]string{"error": errText})
+	if err != nil {
+		t.Fatalf("build failed event: %v", err)
+	}
+
+	cr.handleCompleted(context.Background(), completed)
+	cr.handleFailed(context.Background(), failed)
+
+	if len(bus.published) != 1 {
+		t.Fatalf("published %d replies for one failed run, want exactly 1 (from handleFailed)", len(bus.published))
+	}
+	var out channel.OutboundMessage
+	if err := json.Unmarshal(bus.published[0].Event.Data, &out); err != nil {
+		t.Fatalf("decode outbound message: %v", err)
+	}
+	if !strings.Contains(out.Text, "The agent run failed") || !strings.Contains(out.Text, errText) {
+		t.Fatalf("the single reply should be handleFailed's, got %q", out.Text)
 	}
 }
 

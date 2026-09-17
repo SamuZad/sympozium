@@ -434,6 +434,15 @@ func (cr *ChannelRouter) handleCompleted(ctx context.Context, event *eventbus.Ev
 		return
 	}
 
+	// An error result means the runner failed internally (fatal() writes it
+	// and exits 1). The Job then fails and failRun publishes agent.run.failed,
+	// so handleFailed replies with the classified advice — replying here too
+	// would post two messages to the thread for one failure.
+	if result.Status == ipc.ResultStatusError {
+		cr.Log.Info("Error result — failure reply is routed by handleFailed", "run", run.Name)
+		return
+	}
+
 	responseText := result.Response
 	if responseText == "" && result.Error != "" {
 		responseText = fmt.Sprintf("Error: %s", result.Error)
