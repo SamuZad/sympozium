@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.10.80](https://github.com/sympozium-ai/sympozium/compare/v0.10.79...v0.10.80) (2026-09-17)
+
+
+### Bug Fixes
+
+* **web:** choose a fleet backend once, and keep the wizard inside its dialog ([fe215a7](https://github.com/sympozium-ai/sympozium/commit/fe215a72eceadc4a04f6849ce44cb5c31bce34d9))
+* **web:** choose a fleet backend once, and keep the wizard inside its dialog ([aa550a4](https://github.com/sympozium-ai/sympozium/commit/aa550a4532b543ea6598c4aedabee60e5c40e39a))
+
 ## [0.10.79](https://github.com/sympozium-ai/sympozium/compare/v0.10.78...v0.10.79) (2026-09-17)
 
 
