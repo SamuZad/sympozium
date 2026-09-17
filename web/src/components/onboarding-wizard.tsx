@@ -700,7 +700,23 @@ export function OnboardingWizard({
   const wrapperRuntime = celln && !!selectedRuntime?.spec.cellnProfileRef;
   const namespacedCatalogue = useCellnTools();
   const clusterCatalogue = useClusterCellnTools();
-  const catalogue = wrapperRuntime ? clusterCatalogue : namespacedCatalogue;
+  const platformProfile = wrapperRuntime ? (platformProfiles.data || []).find((profile) => profile.name === selectedRuntime?.spec.cellnProfileRef?.name) : undefined;
+  // A platform run may borrow only what the policy lends to its profile; the
+  // cluster may hold other shared tools (another scope's, a review's) that
+  // admission would refuse as unknown.
+  const lentTools = useMemo(() => new Set((platformProfile?.tools || []).map((tool) => `${tool.name}@${tool.revision}`)), [platformProfile]);
+  const lentCatalogue = useMemo(
+    () => (clusterCatalogue.data && platformProfile ? clusterCatalogue.data.filter((tool) => lentTools.has(`${tool.metadata.name}@${tool.spec.revision}`)) : undefined),
+    [clusterCatalogue.data, platformProfile, lentTools],
+  );
+  const catalogue: { data?: CellnTool[]; isLoading: boolean; isError: boolean; refetch: () => unknown } = wrapperRuntime
+    ? {
+        data: lentCatalogue,
+        isLoading: clusterCatalogue.isLoading || platformProfiles.isLoading,
+        isError: clusterCatalogue.isError || platformProfiles.isError || (!platformProfiles.isLoading && !platformProfile),
+        refetch: () => { clusterCatalogue.refetch(); platformProfiles.refetch(); },
+      }
+    : namespacedCatalogue;
   const connections = useModelConnections();
   const hostConnections = useMemo(() => (connections.data || []).filter((connection) => !!connection.spec.credentialProfile && !connection.spec.disabled), [connections.data]);
   // The shared catalogue (wrapper runtimes) also admits argv tools and lends
@@ -714,13 +730,13 @@ export function OnboardingWizard({
   // between the namespaced and shared catalogue re-selects every compatible tool.
   const toolsInitialized = useRef<string | null>(defaults?.borrowedTools !== undefined ? "defaults" : null);
   useEffect(() => {
-    const source = wrapperRuntime ? "cluster" : "namespace";
+    // Each fleet backend's policy may lend different tools.
+    const source = wrapperRuntime ? `cluster:${platformProfile?.name || ""}` : "namespace";
     if (!celln || toolsInitialized.current === "defaults" || toolsInitialized.current === source || !catalogue.data) return;
     toolsInitialized.current = source;
     const borrowedTools = catalogue.data.filter(toolSupported).slice(0, maxTools).map((tool) => ({ name: tool.metadata.name, revision: tool.spec.revision }));
     setForm((current) => ({ ...current, borrowedTools }));
-  }, [celln, wrapperRuntime, catalogue.data, toolSupported, maxTools]);
-  const platformProfile = wrapperRuntime ? (platformProfiles.data || []).find((profile) => profile.name === selectedRuntime?.spec.cellnProfileRef?.name) : undefined;
+  }, [celln, wrapperRuntime, platformProfile?.name, catalogue.data, toolSupported, maxTools]);
   // Binds the Agent to one fleet backend: its wrapper runtime and, when this
   // namespace already has it, the host-profile connection for that backend
   // (otherwise the wrappers are created on completion).
@@ -1265,7 +1281,7 @@ export function OnboardingWizard({
           {catalogue.isLoading && <p>Loading tool catalogue…</p>}
           {catalogue.isError && <p role="alert">Cannot load the tool catalogue. Retry before creating this Agent.</p>}
           {catalogue.isError && <Button type="button" onClick={() => catalogue.refetch()}>Retry catalogue</Button>}
-          {!catalogue.isLoading && !catalogue.isError && catalogue.data?.length === 0 && <p>{wrapperRuntime ? "The platform catalogue has no shared tools." : "No tools installed in this namespace."} An empty selection lends no tools.</p>}
+          {!catalogue.isLoading && !catalogue.isError && catalogue.data?.length === 0 && <p>{wrapperRuntime ? "The platform policy lends this backend no shared tools." : "No tools installed in this namespace."} An empty selection lends no tools.</p>}
           {!!catalogue.data?.length && (() => {
             const selectedTools = form.borrowedTools || [];
             const supportedTools = catalogue.data.filter(toolSupported);

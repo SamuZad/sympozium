@@ -39,6 +39,7 @@ import {
   useGatewayConfig,
   useDensityNodes,
   useDraNodes,
+  useCellnFleetCells,
   useRuntimes,
 } from "@/hooks/use-api";
 import { StimulusDialogProvider, StimulusDialogCtx } from "@/components/canvas-primitives";
@@ -80,11 +81,13 @@ import type {
   DensityNodeSummary,
   DraNodeSummary,
   DraDevice,
+  CellnNodeCells,
 } from "@/lib/api";
 import { taskText } from "@/lib/utils";
 import { Link } from "react-router-dom";
 import { useArrowKeyPan, KeyboardGuide } from "@/hooks/use-arrow-key-pan";
 import { applyDagreLayout } from "@/lib/topology-layout";
+import { shortTurn } from "@/components/celln-node-cells";
 export { NODE_SIZES, applyDagreLayout } from "@/lib/topology-layout";
 
 // ── Custom node components ────────────────────────────────────────────────────
@@ -359,6 +362,37 @@ interface HarnessNodeData {
   [key: string]: unknown;
 }
 
+interface CellnCellNodeData {
+  kind: "parent" | "worker";
+  label: string;
+  node: string;
+  status: string;
+  runName?: string;
+  detail: string;
+  [key: string]: unknown;
+}
+
+/** A Celln parent (a conversation's context) or a worker cell (one turn) on a fleet node. */
+function CellnCellNode({ data }: NodeProps<Node<CellnCellNodeData>>) {
+  const parent = data.kind === "parent";
+  return (
+    <div className={`border px-2 py-1.5 shadow-sm w-[200px] ${parent ? "border-violet-500/50 bg-violet-500/5" : "border-blue-500/50 bg-blue-500/5"}`}>
+      <Handle type="target" position={Position.Top} className="!bg-violet-400 !w-1.5 !h-1.5" />
+      <Handle type="source" position={Position.Bottom} className="!bg-violet-400 !w-1.5 !h-1.5" />
+      <div className="flex items-center gap-1.5">
+        <Cpu className={`h-3 w-3 shrink-0 ${parent ? "text-violet-400" : "text-blue-400"}`} />
+        <span className="text-[10px] font-medium">{parent ? "Celln parent" : "Celln cell"}</span>
+        <span className="text-[9px] font-mono text-muted-foreground truncate" title={data.label}>{data.label}</span>
+        <span className={`ml-auto h-1.5 w-1.5 rounded-full shrink-0 ${parent ? "bg-violet-500" : "bg-blue-500 animate-pulse"}`} />
+      </div>
+      <p className="mt-0.5 text-[9px] text-muted-foreground truncate" title={data.detail}>
+        {data.runName ? <Link to={`/runs/${data.runName}`} className="hover:underline">{data.runName}</Link> : data.node}
+        {data.detail ? ` · ${data.detail}` : ""}
+      </p>
+    </div>
+  );
+}
+
 function HarnessNode({ data }: NodeProps<Node<HarnessNodeData>>) {
   return (
     <div className="border border-amber-500/40 bg-amber-500/5 px-3 py-2 shadow-sm w-[260px]">
@@ -551,6 +585,7 @@ export const nodeTypes = {
   agent: StandaloneAgentNode,
   agentRun: AgentRunNode,
   harness: HarnessNode,
+  cellnCell: CellnCellNode,
   cloudProvider: CloudProviderNode,
   gateway: GatewayNode,
 };
@@ -580,8 +615,21 @@ function entityFingerprint(
   return parts.join("|");
 }
 
+/** The Celln nodes, live parents and running cells drawn, for relayout. */
+function cellnFingerprint(cellnNodes?: CellnNodeCells[]): string {
+  return (cellnNodes || []).map((n) => [
+    n.node,
+    ...n.parents.filter((p) => p.run?.live).map((p) => p.incarnation),
+    ...n.cells.filter((c) => c.status === "running").map((c) => c.id),
+  ].join(",")).sort().join(";");
+}
+
 interface RunPhaseMap {
   [agentName: string]: string; // latest run phase per stamped agent name
+}
+
+function cellnParentNodeId(incarnation: string) {
+  return `cellnp-${incarnation.slice(7, 23)}`;
 }
 
 function buildTopology(
@@ -597,6 +645,7 @@ function buildTopology(
   activeRuns: AgentRun[],
   densityNodes?: DensityNodeSummary[],
   draNodes?: DraNodeSummary[],
+  cellnNodes?: CellnNodeCells[],
 ): { nodes: Node[]; edges: Edge[] } {
   const nodes: Node[] = [];
   const edges: Edge[] = [];
@@ -776,6 +825,47 @@ function buildTopology(
         fitness: undefined,
       },
     });
+  }
+
+  // ── Celln fleet: live parents and running worker cells per node ───────
+  const k8sNodeIds = new Set(nodes.filter((n) => n.type === "k8sNode").map((n) => n.id));
+  for (const report of cellnNodes || []) {
+    const nodeId = `node-${report.node}`;
+    if (!k8sNodeIds.has(nodeId)) {
+      k8sNodeIds.add(nodeId);
+      nodes.push({ id: nodeId, type: "k8sNode", position: P, data: { name: report.node, ip: "", providers: [], accelerators: undefined, fitness: undefined } });
+    }
+    const parentIds = new Map<string, string>();
+    for (const parent of report.parents) {
+      if (!parent.run?.live) continue;
+      const id = cellnParentNodeId(parent.incarnation);
+      parentIds.set(parent.incarnation, id);
+      const last = parent.turns[parent.turns.length - 1];
+      nodes.push({
+        id,
+        type: "cellnCell",
+        position: P,
+        data: {
+          kind: "parent", label: parent.incarnation.slice(7, 15), node: report.node, status: parent.run.phase,
+          runName: parent.run.name,
+          detail: `${parent.turns.length} turn${parent.turns.length === 1 ? "" : "s"}${last ? `, ${last.stage}` : ""}`,
+        },
+      });
+      edges.push({ id: `e-${nodeId}-${id}`, source: nodeId, target: id, style: { stroke: "#8b5cf680", strokeWidth: 1, strokeDasharray: "4 2" } });
+      edges.push({ id: `e-run-${parent.run.name}-${id}`, source: `run-${parent.run.name}`, target: id, style: { stroke: "#8b5cf6", strokeWidth: 1.5 }, markerEnd: { type: MarkerType.ArrowClosed, color: "#8b5cf6" } });
+    }
+    for (const cell of report.cells) {
+      if (cell.status !== "running") continue;
+      const id = `cellnc-${report.node}-${cell.id}`;
+      const parentId = cell.parent ? parentIds.get(cell.parent) : undefined;
+      nodes.push({
+        id,
+        type: "cellnCell",
+        position: P,
+        data: { kind: "worker", label: cell.id, node: report.node, status: cell.status, runName: cell.run?.name, detail: cell.turn ? `turn ${shortTurn(cell.turn)}` : cell.tools.join(", ") },
+      });
+      edges.push({ id: `e-${parentId || nodeId}-${id}`, source: parentId || nodeId, target: id, animated: true, style: { stroke: "#3b82f6", strokeWidth: 1.5 } });
+    }
   }
 
   // ── Providers ──────────────────────────────────────────────────────────
@@ -1205,7 +1295,9 @@ function buildTopology(
   // ── Apply dagre layout ─────────────────────────────────────────────────
   applyDagreLayout(nodes, edges);
 
-  return { nodes, edges };
+  // A Celln parent links to its run only when the run is drawn.
+  const ids = new Set(nodes.map((n) => n.id));
+  return { nodes, edges: edges.filter((e) => ids.has(e.source) && ids.has(e.target)) };
 }
 
 // ── Inner component (needs ReactFlowProvider above it) ────────────────────────
@@ -1242,6 +1334,7 @@ function TopologyCanvas() {
   const { data: gateway } = useGatewayConfig();
   const { data: densityData } = useDensityNodes();
   const { data: draData } = useDraNodes();
+  const { data: cellnData } = useCellnFleetCells();
   const { fitView } = useReactFlow();
   useArrowKeyPan();
 
@@ -1359,7 +1452,7 @@ function TopologyCanvas() {
       runtimes || [],
       !!gateway,
       draData?.nodes,
-    ) + "|runs:" + activeRunFingerprint;
+    ) + "|runs:" + activeRunFingerprint + "|celln:" + cellnFingerprint(cellnData);
 
     const entitiesChanged = fp !== prevFingerprintRef.current;
     prevFingerprintRef.current = fp;
@@ -1378,6 +1471,7 @@ function TopologyCanvas() {
         activeRuns,
         densityData?.nodes,
         draData?.nodes,
+        cellnData,
       );
 
       // Apply saved positions if available.
@@ -1415,6 +1509,7 @@ function TopologyCanvas() {
           activeRuns,
           densityData?.nodes,
           draData?.nodes,
+          cellnData,
         );
         const freshMap = new Map(freshNodes.map((n) => [n.id, n]));
         return prev.map((n) => {
@@ -1439,11 +1534,12 @@ function TopologyCanvas() {
           activeRuns,
           densityData?.nodes,
           draData?.nodes,
+          cellnData,
         );
         return freshEdges;
       });
     }
-  }, [providerNodes, models, ensembles, agents, runtimes, gateway, runningByEnsemble, webEndpointAgents, runPhases, activeRuns, activeRunFingerprint, densityData, draData]);
+  }, [providerNodes, models, ensembles, agents, runtimes, gateway, runningByEnsemble, webEndpointAgents, runPhases, activeRuns, activeRunFingerprint, densityData, draData, cellnData]);
 
   // Save positions to localStorage after any node drag ends.
   const handleNodesChange = useCallback(

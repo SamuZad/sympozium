@@ -31,6 +31,8 @@ const (
 	FleetParentTokenSecret      = "celln-router-parent"
 	FleetParentClientsConfigMap = "celln-fleet-parent-clients"
 	FleetConfigurationConfigMap = "celln-fleet-configuration"
+	// FleetCellsConfigMap is where every node reports its Celln cells.
+	FleetCellsConfigMap = "celln-fleet-cells"
 	// FleetModelCredentialSecret holds every backend's provider key under the
 	// backend's name; every dispatcher mounts it once at FleetCredentialDir, so
 	// a backend added later reaches running owners without a restart.
@@ -339,6 +341,7 @@ func FleetValues(o FleetOptions) ([]string, error) {
 		"celln.fleet.principal="+o.Principal,
 		"celln.fleet.parentClientsConfigMap="+FleetParentClientsConfigMap,
 		"celln.fleet.configurationConfigMap="+FleetConfigurationConfigMap,
+		"celln.fleet.cellsConfigMap="+FleetCellsConfigMap,
 	), nil
 }
 

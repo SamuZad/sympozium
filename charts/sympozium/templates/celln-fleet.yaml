@@ -126,7 +126,7 @@ rules:
     verbs: [create]
   - apiGroups: [""]
     resources: [configmaps]
-    resourceNames: [{{ $fleet.configurationConfigMap | quote }}]
+    resourceNames: [{{ $fleet.configurationConfigMap | quote }}, {{ $fleet.cellsConfigMap | default "celln-fleet-cells" | quote }}]
     verbs: [get, patch]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -157,6 +157,10 @@ data:
 {{ .Files.Get "files/celln/fleet-prepare.sh" | indent 4 }}
   fleet-publish.py: |
 {{ .Files.Get "files/celln/fleet-publish.py" | indent 4 }}
+  fleet-cells.sh: |
+{{ .Files.Get "files/celln/fleet-cells.sh" | indent 4 }}
+  fleet-cells.py: |
+{{ .Files.Get "files/celln/fleet-cells.py" | indent 4 }}
 ---
 apiVersion: v1
 kind: Service
@@ -223,7 +227,8 @@ spec:
         - name: configure
           image: {{ $image | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["/bin/bash", "-ec", "/bin/bash /etc/celln-fleet/prepare.sh && exec sleep infinity"]
+          # Prepare the node once, then keep reporting its cells for the console.
+          command: ["/bin/bash", "-ec", "/bin/bash /etc/celln-fleet/prepare.sh && exec /bin/bash /etc/celln-fleet/fleet-cells.sh"]
           env:
             - name: NODE_NAME
               valueFrom:
@@ -259,6 +264,8 @@ spec:
               value: /etc/celln-fleet/clients/trusted-parent-clients.json
             - name: FLEET_CONFIGURATION_CONFIGMAP
               value: {{ $fleet.configurationConfigMap | quote }}
+            - name: FLEET_CELLS_CONFIGMAP
+              value: {{ $fleet.cellsConfigMap | default "celln-fleet-cells" | quote }}
             - name: FLEET_NAMESPACE
               value: celln-system
           securityContext:
@@ -271,6 +278,14 @@ spec:
             - name: prepare
               mountPath: /etc/celln-fleet/fleet-publish.py
               subPath: fleet-publish.py
+              readOnly: true
+            - name: prepare
+              mountPath: /etc/celln-fleet/fleet-cells.sh
+              subPath: fleet-cells.sh
+              readOnly: true
+            - name: prepare
+              mountPath: /etc/celln-fleet/fleet-cells.py
+              subPath: fleet-cells.py
               readOnly: true
             - name: parent-clients
               mountPath: /etc/celln-fleet/clients

@@ -14,6 +14,7 @@ import {
 } from "@/hooks/use-api";
 import { HarnessSessionChatDialog } from "@/components/harness-session-dialog";
 import { CellnAgentConversation } from "@/components/celln-agent-conversation";
+import { isCellnEnduringAgent } from "@/lib/persistent-harness";
 import { CellnStarterTools } from "@/components/celln-starter-tools";
 import { CellnPermissionPreview } from "@/components/celln-permission-preview";
 import { CellnBackendPicker, backendLabel } from "@/components/celln-backend-picker";
@@ -147,10 +148,7 @@ export function AgentDetailPage() {
   const agentName = inst.metadata.name;
   const persistentHarness = selectedRuntime?.spec.contractVersion === "v1alpha2" && selectedRuntime.spec.session?.protocol === "openai-chat";
   // Native Celln conversations are enduring AgentRuns, not HarnessSessions.
-  const nativeCellnEnduring =
-    (selectedRuntime?.spec.celln?.contractVersion === "celln.json-tools/v1" || Boolean(selectedRuntime?.spec.cellnProfileRef)) &&
-    inst.spec.execution?.backend === "celln" &&
-    inst.spec.execution?.executionLifecycle === "enduring";
+  const nativeCellnEnduring = isCellnEnduringAgent(inst, selectedRuntime);
   // Every enduring run of this Agent is its own conversation (own parent, own
   // context); the page lists them all, newest first.
   const enduringParents = (allRuns || [])

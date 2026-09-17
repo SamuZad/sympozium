@@ -154,6 +154,49 @@ export interface CellnFleetBackend {
   state: string;
 }
 
+/** One cell as `celln ps -a` reports it on a fleet node, joined to its run. */
+export interface CellnCell {
+  id: string;
+  description: string;
+  /** running, dissolved, refused, failed (or died). */
+  status: string;
+  backend: string;
+  started_ms: number;
+  finished_ms: number | null;
+  duration_ms: number | null;
+  error: string | null;
+  tools: string[];
+  run?: CellnRunRef;
+  parent?: string;
+  turn?: string;
+}
+
+export interface CellnRunRef {
+  namespace: string;
+  name: string;
+  agent: string;
+  phase: string;
+  /** The run is unfinished, so its parent should still hold a context. */
+  live: boolean;
+}
+
+export interface CellnNodeParent {
+  incarnation: string;
+  updatedMs: number;
+  turns: { turnId: string; stage: string; child?: string; succeeded?: boolean; timeoutMs?: number }[];
+  run?: CellnRunRef;
+}
+
+/** One fleet node's cells and parents, as its configure pod last reported them. */
+export interface CellnNodeCells {
+  node: string;
+  reportedMs: number;
+  stale: boolean;
+  error?: string;
+  cells: CellnCell[];
+  parents: CellnNodeParent[];
+}
+
 export interface AddCellnFleetBackendRequest {
   name: string;
   provider: string;
@@ -1558,6 +1601,7 @@ export const api = {
     profiles: () => apiFetch<CellnPlatformProfile[]>("/api/v1/celln-platform/profiles"),
     ensureWrappers: (profile: string) => apiFetch<CellnPlatformWrappers>("/api/v1/celln-platform/wrappers", { method: "POST", body: JSON.stringify({ profile }) }),
     backends: () => apiFetch<CellnFleetBackend[]>("/api/v1/celln-platform/backends", { skipNamespace: true }),
+    cells: () => apiFetch<CellnNodeCells[]>("/api/v1/celln-platform/cells", { skipNamespace: true }),
     addBackend: (body: AddCellnFleetBackendRequest) => apiFetch<CellnFleetBackend>("/api/v1/celln-platform/backends", { method: "POST", body: JSON.stringify(body), skipNamespace: true, retryNetwork: false }),
   },
 

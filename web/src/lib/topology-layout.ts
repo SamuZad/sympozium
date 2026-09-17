@@ -13,6 +13,7 @@ export const NODE_SIZES: Record<string, [number, number]> = {
   agent:         [240, 56],
   agentRun:      [140, 40],
   harness:       [260, 56],
+  cellnCell:     [200, 48],
 };
 
 /** Run dagre layout on nodes and edges, positioning top-to-bottom. */
@@ -46,12 +47,14 @@ export function applyDagreLayout(nodes: Node[], edges: Edge[]): void {
   // Use Dagre for horizontal ordering, then pack consistent semantic rows.
   const levels: Record<string, number> = {
     gateway: 0, k8sNode: 1, model: 2, cloudProvider: 2, harness: 2,
-    ensemble: 3, stimulus: 4, agent: 5, persona: 5, agentRun: 6,
+    ensemble: 3, stimulus: 4, agent: 5, persona: 5, agentRun: 6, cellnCell: 7,
   };
   const topLevel = nodes.filter((node) => !node.parentId);
   const byId = new Map(topLevel.map((node) => [node.id, node]));
   function level(node: Node, visited = new Set<string>()): number {
     const base = levels[node.type || ""] ?? 5;
+    // A worker cell sits under the parent whose turn it runs.
+    if (node.type === "cellnCell" && (node.data as { kind?: string })?.kind === "worker") return base + 1;
     if (node.type !== "agentRun" || visited.has(node.id)) return base;
     const next = new Set(visited).add(node.id);
     const parents = edges.filter((edge) => edge.target === node.id)
