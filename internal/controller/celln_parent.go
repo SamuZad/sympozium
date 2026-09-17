@@ -125,8 +125,32 @@ func (r *AgentRunReconciler) reconcileCellnParent(ctx context.Context, run *api.
 			// owner draining (its node leaving the fleet) and a lease that ran
 			// out; the new run gets its own lease under policy. An uncertain
 			// teardown is not continued: the old parent may still be live.
+			//
+			// An automatic continuation that lost its parent before accepting
+			// or committing any follow-up turn is not continued again: that is
+			// the signature of a loop (each copy only repeats the resume turn),
+			// so it fails with a stable message instead. A continuation that
+			// carried the conversation on may be continued; explicit API
+			// restarts are unaffected (cellnparent.AutomaticContinuationStalled).
 			continued := ""
 			if (observed.Owner.Status == "ContextLost" || observed.Owner.Status == "Stopped") && fresh.Spec.ContinuesOnLoss() && fresh.Status.CellnParent != nil && fresh.Status.CellnParent.ContinuedBy == "" {
+				stalled, err := cellnparent.AutomaticContinuationStalled(ctx, r.parentReader(), &fresh)
+				if err != nil {
+					// Turn history unknown: keep the owner observation and
+					// decide on a later reconciliation rather than guess.
+					if statusErr := r.Status().Update(ctx, &fresh); statusErr != nil {
+						return ctrl.Result{}, statusErr
+					}
+					return ctrl.Result{RequeueAfter: 5 * time.Second}, fmt.Errorf("continuation decision needs turn history: %w", err)
+				}
+				if stalled {
+					meta.SetStatusCondition(&fresh.Status.Conditions, metav1.Condition{Type: "CellnContinuation", Status: metav1.ConditionFalse, Reason: "LostBeforeFollowUp", Message: cellnparent.StalledContinuationMessage, ObservedGeneration: fresh.Generation})
+					slog.WarnContext(ctx, "celln.parent.continuation-withheld", "agent_run", fresh.Name, "continuesFrom", fresh.Spec.Conversation.ContinuesFrom, "depth", fresh.Spec.Conversation.Depth)
+					if err := r.Status().Update(ctx, &fresh); err != nil {
+						return ctrl.Result{}, err
+					}
+					return ctrl.Result{}, r.failRun(ctx, &fresh, cellnparent.StalledContinuationMessage+": "+outcome)
+				}
 				name, err := r.continueConversation(ctx, &fresh)
 				if err != nil {
 					slog.WarnContext(ctx, "celln.parent.continuation-failed", "agent_run", fresh.Name, "error", err)
@@ -190,7 +214,7 @@ func (r *AgentRunReconciler) continueConversation(ctx context.Context, lost *api
 	if err != nil {
 		return "", err
 	}
-	next, err := cellnparent.Continuation(lost, seed)
+	next, err := cellnparent.Continuation(lost, seed, cellnparent.ContinuationOriginAutomatic)
 	if err != nil {
 		return "", err
 	}

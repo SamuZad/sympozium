@@ -25,6 +25,20 @@ const ResumeMessage = "This conversation continues on a new node. In one short s
 // ContinuedFromAnnotation marks a run created to continue another.
 const ContinuedFromAnnotation = "sympozium.ai/continued-from"
 
+// ContinuationOriginAnnotation records who created a continuation: the
+// controller after a lost parent (automatic) or a user through the API
+// (requested). Only the controller's own continuations are held to the
+// no-progress rule in AutomaticContinuationStalled.
+const (
+	ContinuationOriginAnnotation = "sympozium.ai/continuation-origin"
+	ContinuationOriginAutomatic  = "automatic"
+	ContinuationOriginRequested  = "requested"
+)
+
+// StalledContinuationMessage is the stable failure for an automatic
+// continuation whose parent was lost before it did any work of its own.
+const StalledContinuationMessage = "Celln parent lost again on its continuation; not continuing automatically — start a new conversation"
+
 // The parent carries history and the next message inside one bounded turn
 // (2048 bytes); a seed must leave room for that message. These mirror the
 // host's own bounds so a plan the controller builds is never refused there.
@@ -91,10 +105,57 @@ func SeedFits(exchanges []api.ConversationExchange) bool {
 	return err == nil && len(raw) <= maxSeedBytes
 }
 
+// IsAutomaticContinuation reports whether run was created by the controller
+// to continue a lost conversation. A continuation without a recorded origin
+// (created before the origin annotation existed) counts as automatic, so a
+// loop already running stops on upgrade; only an explicit API restart is
+// exempt.
+func IsAutomaticContinuation(run *api.AgentRun) bool {
+	if run.Spec.Conversation == nil || run.Spec.Conversation.ContinuesFrom == "" {
+		return false
+	}
+	return run.Annotations[ContinuationOriginAnnotation] != ContinuationOriginRequested
+}
+
+// AutomaticContinuationStalled reports whether a lost run must not be
+// continued automatically again.
+//
+// Rule: an automatic continuation is itself continued only if it made
+// progress of its own, i.e. accepted or committed at least one follow-up
+// turn beyond its seeded resume turn. One lost before that would otherwise be
+// re-created forever, each copy only repeating the resume message and
+// burning model requests without adding to the conversation. A continuation
+// that did carry the conversation on may be continued again (still bounded by
+// MaxContinuationDepth). Original runs and user-requested restarts are never
+// withheld here.
+func AutomaticContinuationStalled(ctx context.Context, reader client.Reader, run *api.AgentRun) (bool, error) {
+	if !IsAutomaticContinuation(run) {
+		return false, nil
+	}
+	if run.Status.CellnParent != nil && run.Status.CellnParent.AcceptedTurns > 0 {
+		return false, nil
+	}
+	var list api.AgentRunTurnList
+	if err := reader.List(ctx, &list, client.InNamespace(run.Namespace)); err != nil {
+		return false, err
+	}
+	for _, turn := range list.Items {
+		if turn.Spec.RunName == run.Name && turn.Spec.RunUID == string(run.UID) && turn.Status.Execution != nil && turn.Status.Execution.Result != nil {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 // Continuation builds the run that carries a conversation on from previous:
 // the same Agent, model, selection and limits, the resume message as its
-// initial turn, and the transcript as its seed. It is not created here.
-func Continuation(previous *api.AgentRun, seed []api.ConversationExchange) (*api.AgentRun, error) {
+// initial turn, and the transcript as its seed. origin (automatic or
+// requested) is recorded in ContinuationOriginAnnotation. It is not created
+// here.
+func Continuation(previous *api.AgentRun, seed []api.ConversationExchange, origin string) (*api.AgentRun, error) {
+	if origin != ContinuationOriginAutomatic && origin != ContinuationOriginRequested {
+		return nil, fmt.Errorf("unknown continuation origin %q", origin)
+	}
 	if previous.Spec.ExecutionLifecycle != "enduring" || previous.Spec.Enduring == nil {
 		return nil, fmt.Errorf("only an enduring run can be continued")
 	}
@@ -119,7 +180,7 @@ func Continuation(previous *api.AgentRun, seed []api.ConversationExchange) (*api
 	for key, value := range previous.Labels {
 		labels[key] = value
 	}
-	annotations := map[string]string{ContinuedFromAnnotation: previous.Name}
+	annotations := map[string]string{ContinuedFromAnnotation: previous.Name, ContinuationOriginAnnotation: origin}
 	return &api.AgentRun{
 		ObjectMeta: metav1.ObjectMeta{GenerateName: previous.Spec.AgentRef + "-", Namespace: previous.Namespace, Labels: labels, Annotations: annotations},
 		Spec:       *spec,

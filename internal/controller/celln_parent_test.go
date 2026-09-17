@@ -247,14 +247,125 @@ func proveCellnParentController(t *testing.T, loseReply bool) {
 // is ever observed, with no turn submitted. The run must fail without replay
 // and freeze the observable failure signature on the status.
 func TestCellnParentWarmPrepLossRecordsOwnerOutcome(t *testing.T) {
-	ctx := context.Background()
 	id := "blake3:" + strings.Repeat("b", 64)
-	run := newTestCellnRun(t, "warm-prep-loss", "warm-prep-uid")
+	run := newLosableEnduringRun(t, "warm-prep-loss", "warm-prep-uid")
+	_, current, creates := reconcileUntilParentLost(t, run, id)
+	if creates != 1 {
+		t.Fatalf("lost parent was replayed: creates=%d", creates)
+	}
+	ready := meta.FindStatusCondition(current.Status.Conditions, "CellnParentReady")
+	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "ContextLost" {
+		t.Fatalf("loss condition missing: %+v", current.Status.Conditions)
+	}
+	outcome := current.Status.CellnParent.OwnerOutcome
+	if outcome == nil || outcome.Status != "ContextLost" || outcome.ReachedReady || outcome.ObservedAt.IsZero() {
+		t.Fatalf("owner outcome not frozen: %+v", current.Status.CellnParent)
+	}
+	for _, text := range []string{ready.Message, current.Status.Error} {
+		if !strings.Contains(text, "reachedReady=false") || !strings.Contains(text, id) {
+			t.Fatalf("failure signature missing from %q", text)
+		}
+	}
+}
+
+// TestCellnParentLostContinuationIsNotContinuedAgain reproduces the observed
+// loop: an automatic continuation whose parent is lost before any follow-up
+// turn was continued again every reconcile cycle. It must now fail with a
+// stable message, while an original run, a continuation that made progress
+// and a user-requested restart are still continued.
+func TestCellnParentLostContinuationIsNotContinuedAgain(t *testing.T) {
+	seed := []api.ConversationExchange{{User: "Remember the word saffron.", Assistant: "Noted: saffron."}}
+	asContinuation := func(t *testing.T, run *api.AgentRun, origin string) *api.AgentRun {
+		t.Helper()
+		next, err := cellnparent.Continuation(run, seed, origin)
+		if err != nil {
+			t.Fatal(err)
+		}
+		run.Spec = next.Spec
+		run.Annotations = next.Annotations
+		return run
+	}
+	cases := []struct {
+		name      string
+		build     func(t *testing.T) (*api.AgentRun, []client.Object)
+		continued bool
+	}{
+		{name: "original run", continued: true, build: func(t *testing.T) (*api.AgentRun, []client.Object) {
+			return newLosableEnduringRun(t, "lost-original", "lost-original-uid"), nil
+		}},
+		{name: "automatic continuation without follow-up", continued: false, build: func(t *testing.T) (*api.AgentRun, []client.Object) {
+			return asContinuation(t, newLosableEnduringRun(t, "lost-again", "lost-again-uid"), cellnparent.ContinuationOriginAutomatic), nil
+		}},
+		{name: "automatic continuation with a committed follow-up", continued: true, build: func(t *testing.T) (*api.AgentRun, []client.Object) {
+			run := asContinuation(t, newLosableEnduringRun(t, "lost-after-work", "lost-after-work-uid"), cellnparent.ContinuationOriginAutomatic)
+			turn := &api.AgentRunTurn{ObjectMeta: metav1.ObjectMeta{Name: "lost-after-work-t1", Namespace: run.Namespace}, Spec: api.AgentRunTurnSpec{RunName: run.Name, RunUID: string(run.UID), Message: "and seven"},
+				Status: api.AgentRunTurnStatus{Execution: &api.CellnParentTurnStatus{Attempted: true, Result: &api.CellnParentTurnResult{Succeeded: true, Answer: "Seven, noted."}}}}
+			return run, []client.Object{turn}
+		}},
+		{name: "requested restart", continued: true, build: func(t *testing.T) (*api.AgentRun, []client.Object) {
+			return asContinuation(t, newLosableEnduringRun(t, "lost-restart", "lost-restart-uid"), cellnparent.ContinuationOriginRequested), nil
+		}},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			run, objects := tc.build(t)
+			id := "blake3:" + strings.Repeat(fmt.Sprint(i), 64)
+			r, current, creates := reconcileUntilParentLost(t, run, id, objects...)
+			if creates != 1 {
+				t.Fatalf("lost parent was replayed: creates=%d", creates)
+			}
+			var runs api.AgentRunList
+			if err := r.List(ctx, &runs, client.InNamespace(run.Namespace)); err != nil {
+				t.Fatal(err)
+			}
+			if !tc.continued {
+				if len(runs.Items) != 1 || current.Status.CellnParent.ContinuedBy != "" {
+					t.Fatalf("stalled continuation was continued: runs=%d continuedBy=%q", len(runs.Items), current.Status.CellnParent.ContinuedBy)
+				}
+				if !strings.HasPrefix(current.Status.Error, cellnparent.StalledContinuationMessage) {
+					t.Fatalf("unstable failure message: %q", current.Status.Error)
+				}
+				condition := meta.FindStatusCondition(current.Status.Conditions, "CellnContinuation")
+				if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != "LostBeforeFollowUp" || condition.Message != cellnparent.StalledContinuationMessage {
+					t.Fatalf("continuation condition missing: %+v", current.Status.Conditions)
+				}
+				if outcome := current.Status.CellnParent.OwnerOutcome; outcome == nil || outcome.Status != "ContextLost" {
+					t.Fatalf("owner outcome must still be recorded: %+v", current.Status.CellnParent)
+				}
+				return
+			}
+			if len(runs.Items) != 2 || current.Status.CellnParent.ContinuedBy == "" || !strings.Contains(current.Status.Error, "continued as "+current.Status.CellnParent.ContinuedBy) {
+				t.Fatalf("lost run was not continued: runs=%d status=%+v", len(runs.Items), current.Status)
+			}
+			var next api.AgentRun
+			if err := r.Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: current.Status.CellnParent.ContinuedBy}, &next); err != nil {
+				t.Fatal(err)
+			}
+			if next.Annotations[cellnparent.ContinuationOriginAnnotation] != cellnparent.ContinuationOriginAutomatic || next.Spec.Conversation.ContinuesFrom != run.Name {
+				t.Fatalf("controller continuation not marked automatic: %+v", next.ObjectMeta)
+			}
+		})
+	}
+}
+
+func newLosableEnduringRun(t *testing.T, name string, uid types.UID) *api.AgentRun {
+	t.Helper()
+	run := newTestCellnRun(t, name, uid)
 	run.Spec.Celln = nil
 	run.Spec.CellnSelection = &api.CellnCatalogueSelection{}
 	run.Spec.ExecutionLifecycle = "enduring"
 	run.Spec.Enduring = &api.EnduringRunSpec{LeaseSeconds: 60, MaxTurns: 2, MaxModelRequests: 2, MaxOutputTokens: 1024}
 	run.Finalizers = []string{agentRunFinalizer}
+	return run
+}
+
+// reconcileUntilParentLost admits run against a fake owner that reports
+// Initializing twice, then ContextLost, and reconciles until the run fails.
+// It returns the reconciler, the failed run and the number of parent creates.
+func reconcileUntilParentLost(t *testing.T, run *api.AgentRun, id string, objects ...client.Object) (*AgentRunReconciler, api.AgentRun, int32) {
+	t.Helper()
+	ctx := context.Background()
 	var creates, polls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.URL.Path == "/v1/parents" {
@@ -289,7 +400,7 @@ func TestCellnParentWarmPrepLossRecordsOwnerOutcome(t *testing.T) {
 	if err := os.WriteFile(path, raw, 0600); err != nil {
 		t.Fatal(err)
 	}
-	r := newAgentRunTestReconciler(t, run)
+	r := newAgentRunTestReconciler(t, append([]client.Object{run}, objects...)...)
 	r.ParentConfigPath = path
 	admissions := 0
 	r.ParentAdmission = parentAdmissionFunc(func(context.Context, types.NamespacedName) error {
@@ -315,24 +426,9 @@ func TestCellnParentWarmPrepLossRecordsOwnerOutcome(t *testing.T) {
 		t.Fatal(err)
 	}
 	if current.Status.Phase != api.AgentRunPhaseFailed {
-		t.Fatalf("warm-prep loss did not fail the run: %+v", current.Status)
+		t.Fatalf("parent loss did not fail the run: %+v", current.Status)
 	}
-	if creates.Load() != 1 {
-		t.Fatalf("lost parent was replayed: creates=%d", creates.Load())
-	}
-	ready := meta.FindStatusCondition(current.Status.Conditions, "CellnParentReady")
-	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "ContextLost" {
-		t.Fatalf("loss condition missing: %+v", current.Status.Conditions)
-	}
-	outcome := current.Status.CellnParent.OwnerOutcome
-	if outcome == nil || outcome.Status != "ContextLost" || outcome.ReachedReady || outcome.ObservedAt.IsZero() {
-		t.Fatalf("owner outcome not frozen: %+v", current.Status.CellnParent)
-	}
-	for _, text := range []string{ready.Message, current.Status.Error} {
-		if !strings.Contains(text, "reachedReady=false") || !strings.Contains(text, id) {
-			t.Fatalf("failure signature missing from %q", text)
-		}
-	}
+	return r, current, creates.Load()
 }
 
 type platformAdmissionFunc func(context.Context, types.NamespacedName) error

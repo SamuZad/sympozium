@@ -238,7 +238,7 @@ func (s *Server) continueRun(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "turn history unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	next, err := cellnparent.Continuation(run, seed)
+	next, err := cellnparent.Continuation(run, seed, cellnparent.ContinuationOriginRequested)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return

@@ -78,7 +78,7 @@ func TestTrimSeedKeepsTheNewestThatFit(t *testing.T) {
 func TestContinuationCarriesSpecSeedAndDepth(t *testing.T) {
 	previous := enduringRun()
 	seed := []api.ConversationExchange{{User: "Remember the word saffron.", Assistant: "Noted: saffron."}}
-	next, err := Continuation(previous, seed)
+	next, err := Continuation(previous, seed, ContinuationOriginAutomatic)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func TestContinuationCarriesSpecSeedAndDepth(t *testing.T) {
 	// Depth accumulates and is bounded; a run told not to continue stays so.
 	next.Name = "celln-agent-def"
 	next.Spec.Conversation.Depth = api.MaxContinuationDepth
-	if _, err := Continuation(next, seed); err == nil {
+	if _, err := Continuation(next, seed, ContinuationOriginAutomatic); err == nil {
 		t.Fatal("depth bound must stop the chain")
 	}
 	previous.Spec.Conversation = &api.ConversationSpec{Continuation: "none"}
@@ -103,10 +103,104 @@ func TestContinuationCarriesSpecSeedAndDepth(t *testing.T) {
 	}
 	oneShot := enduringRun()
 	oneShot.Spec.ExecutionLifecycle = "one-shot"
-	if _, err := Continuation(oneShot, nil); err == nil {
+	if _, err := Continuation(oneShot, nil, ContinuationOriginAutomatic); err == nil {
 		t.Fatal("only enduring runs continue")
 	}
-	if _, err := Continuation(enduringRun(), []api.ConversationExchange{{User: strings.Repeat("u", 2000), Assistant: strings.Repeat("a", 2000)}}); err == nil {
+	if _, err := Continuation(enduringRun(), []api.ConversationExchange{{User: strings.Repeat("u", 2000), Assistant: strings.Repeat("a", 2000)}}, ContinuationOriginAutomatic); err == nil {
 		t.Fatal("an oversized seed is refused, not trimmed silently here")
+	}
+	if _, err := Continuation(enduringRun(), seed, ""); err == nil {
+		t.Fatal("a continuation must name its origin")
+	}
+}
+
+func TestContinuationRecordsOrigin(t *testing.T) {
+	seed := []api.ConversationExchange{{User: "Remember the word saffron.", Assistant: "Noted: saffron."}}
+	automatic, err := Continuation(enduringRun(), seed, ContinuationOriginAutomatic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requested, err := Continuation(enduringRun(), seed, ContinuationOriginRequested)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if automatic.Annotations[ContinuationOriginAnnotation] != ContinuationOriginAutomatic || !IsAutomaticContinuation(automatic) {
+		t.Fatalf("automatic origin: %+v", automatic.Annotations)
+	}
+	if requested.Annotations[ContinuationOriginAnnotation] != ContinuationOriginRequested || IsAutomaticContinuation(requested) {
+		t.Fatalf("requested origin: %+v", requested.Annotations)
+	}
+	if IsAutomaticContinuation(enduringRun()) {
+		t.Fatal("an original run is not a continuation")
+	}
+	// A continuation from before origins were recorded is treated as automatic
+	// so a loop already running stops on upgrade.
+	legacy := automatic.DeepCopy()
+	delete(legacy.Annotations, ContinuationOriginAnnotation)
+	if !IsAutomaticContinuation(legacy) {
+		t.Fatal("an unmarked continuation must count as automatic")
+	}
+}
+
+func TestAutomaticContinuationStalledOnlyWithoutFollowUp(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = api.AddToScheme(scheme)
+	ctx := context.Background()
+	seed := []api.ConversationExchange{{User: "Remember the word saffron.", Assistant: "Noted: saffron."}}
+	continuation := func(origin string) *api.AgentRun {
+		next, err := Continuation(enduringRun(), seed, origin)
+		if err != nil {
+			t.Fatal(err)
+		}
+		next.Name, next.UID = "celln-agent-cont", types.UID("uid-cont")
+		next.Status.CellnParent = &api.CellnParentStatus{InitialTurn: &api.CellnParentTurnStatus{Attempted: true, Result: &api.CellnParentTurnResult{Succeeded: true, Answer: "We were on saffron."}}}
+		return next
+	}
+	turn := func(name, runName, runUID string, result *api.CellnParentTurnResult) *api.AgentRunTurn {
+		return &api.AgentRunTurn{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "tenant"}, Spec: api.AgentRunTurnSpec{RunName: runName, RunUID: runUID, Message: "next"}, Status: api.AgentRunTurnStatus{Execution: &api.CellnParentTurnStatus{Attempted: result != nil, Result: result}}}
+	}
+	cases := []struct {
+		name    string
+		run     *api.AgentRun
+		objects []*api.AgentRunTurn
+		stalled bool
+	}{
+		{name: "original run is continued", run: enduringRun(), stalled: false},
+		{name: "requested restart is not withheld", run: continuation(ContinuationOriginRequested), stalled: false},
+		{name: "automatic continuation lost before any follow-up", run: continuation(ContinuationOriginAutomatic), stalled: true},
+		{name: "only other runs' turns and uncommitted turns", run: continuation(ContinuationOriginAutomatic), objects: []*api.AgentRunTurn{
+			turn("other", "celln-agent-abc", "uid-1", &api.CellnParentTurnResult{Succeeded: true, Answer: "x"}),
+			turn("reused-name", "celln-agent-cont", "uid-old", &api.CellnParentTurnResult{Succeeded: true, Answer: "x"}),
+			turn("pending", "celln-agent-cont", "uid-cont", nil),
+		}, stalled: true},
+		{name: "committed follow-up allows one more continuation", run: continuation(ContinuationOriginAutomatic), objects: []*api.AgentRunTurn{
+			turn("mine", "celln-agent-cont", "uid-cont", &api.CellnParentTurnResult{Succeeded: true, Answer: "Seven."}),
+		}, stalled: false},
+		{name: "failed follow-up is still progress", run: continuation(ContinuationOriginAutomatic), objects: []*api.AgentRunTurn{
+			turn("mine", "celln-agent-cont", "uid-cont", &api.CellnParentTurnResult{Succeeded: false, Answer: "tool crashed"}),
+		}, stalled: false},
+	}
+	accepted := continuation(ContinuationOriginAutomatic)
+	accepted.Status.CellnParent.AcceptedTurns = 1
+	cases = append(cases, struct {
+		name    string
+		run     *api.AgentRun
+		objects []*api.AgentRunTurn
+		stalled bool
+	}{name: "accepted follow-up allows one more continuation", run: accepted, stalled: false})
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			builder := fake.NewClientBuilder().WithScheme(scheme)
+			for _, object := range tc.objects {
+				builder = builder.WithObjects(object)
+			}
+			got, err := AutomaticContinuationStalled(ctx, builder.Build(), tc.run)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.stalled {
+				t.Fatalf("stalled=%t want %t", got, tc.stalled)
+			}
+		})
 	}
 }

@@ -231,3 +231,35 @@ func TestRunTurnStorageFailureIsNotNotFound(t *testing.T) {
 		t.Fatal("run detail confused unavailable storage with confirmed absence")
 	}
 }
+
+// A user restart is marked as requested so the controller never mistakes it
+// for its own automatic continuation, and it works even on a run that is
+// itself an automatic continuation.
+func TestContinueRunMarksRequestedOrigin(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := api.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	run := &api.AgentRun{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "parent", UID: "parent-uid",
+		Annotations: map[string]string{cellnparent.ContinuationOriginAnnotation: cellnparent.ContinuationOriginAutomatic}},
+		Spec: api.AgentRunSpec{AgentRef: "agent", Backend: "celln", ExecutionLifecycle: "enduring", Task: api.NewStringTask(cellnparent.ResumeMessage), CellnSelection: &api.CellnCatalogueSelection{},
+			Enduring:     &api.EnduringRunSpec{LeaseSeconds: 60, MaxTurns: 3, MaxModelRequests: 6, MaxOutputTokens: 3072},
+			Conversation: &api.ConversationSpec{Continuation: "automatic", ContinuesFrom: "earlier", Depth: 1}}}
+	store := fake.NewClientBuilder().WithScheme(scheme).WithObjects(run).Build()
+	handler := NewServer(store, nil, nil, logr.Discard()).Handler(nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/runs/parent/continue?namespace=default&uid=parent-uid&keep=true", nil))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("%d: %s", rec.Code, rec.Body.String())
+	}
+	var next api.AgentRun
+	if err := json.Unmarshal(rec.Body.Bytes(), &next); err != nil {
+		t.Fatal(err)
+	}
+	if next.Annotations[cellnparent.ContinuationOriginAnnotation] != cellnparent.ContinuationOriginRequested || cellnparent.IsAutomaticContinuation(&next) {
+		t.Fatalf("restart not marked requested: %+v", next.Annotations)
+	}
+	if next.Spec.Conversation == nil || next.Spec.Conversation.ContinuesFrom != "parent" || next.Spec.Conversation.Depth != 2 {
+		t.Fatalf("restart conversation: %+v", next.Spec.Conversation)
+	}
+}
