@@ -92,10 +92,13 @@ func (c *codexRun) consumeLine(line []byte) {
 	case "turn.completed":
 		c.Turns++
 		if u := ev.Usage; u != nil {
-			// codex reports cached tokens as a subset of input_tokens and
-			// reasoning tokens as a subset of output_tokens; keep buckets
-			// disjoint so their sum is the billed total.
-			uncached := u.InputTokens - u.CachedInputTokens
+			// codex passes through the Responses API's usage, where
+			// cached_input_tokens and cache_write_input_tokens are both
+			// breakdowns OF input_tokens (input_tokens + output_tokens ==
+			// total_tokens), and reasoning tokens are a subset of
+			// output_tokens. Carve the two cache buckets out of input so the
+			// four buckets stay disjoint and sum to the billed total.
+			uncached := u.InputTokens - u.CachedInputTokens - u.CacheWriteInputTokens
 			if uncached < 0 {
 				uncached = 0
 			}

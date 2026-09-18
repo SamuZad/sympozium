@@ -37,8 +37,10 @@ type Observability struct {
 
 // TokenUsage is a run's token consumption split into disjoint buckets, so
 // summing all four gives the total billed tokens. Each CLI reports these
-// differently (Claude Code: cache_read/cache_creation; Codex: cached_input as
-// a subset of input, plus cache_write); shims normalise into this shape.
+// differently — Claude Code (Anthropic API) already reports input,
+// cache_read and cache_creation as disjoint figures; Codex (OpenAI Responses
+// API) reports cached and cache-write tokens as breakdowns *of* input_tokens —
+// so shims normalise into this shape before recording.
 type TokenUsage struct {
 	// Input is uncached prompt tokens.
 	Input int64

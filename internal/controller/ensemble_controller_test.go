@@ -151,6 +151,66 @@ func TestBuildInstance_SubagentsNilWhenUnset(t *testing.T) {
 	}
 }
 
+func TestBuildInstance_MemoryFollowsAgentConfig(t *testing.T) {
+	r := &EnsembleReconciler{}
+	pack := &sympoziumv1alpha1.Ensemble{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pack", Namespace: "default"},
+	}
+
+	tests := []struct {
+		name        string
+		memory      *sympoziumv1alpha1.AgentConfigMemory
+		wantEnabled bool
+		wantTTLDays int
+	}{
+		{
+			// Ensembles written before the memory block existed keep the
+			// historical default.
+			name:        "absent block defaults to enabled",
+			memory:      nil,
+			wantEnabled: true,
+		},
+		{
+			// The sympozium-agent chart emits memory.enabled: false to turn
+			// memory off; the Agent must carry that through so the AgentRun
+			// controller stops injecting MEMORY_SERVER_URL.
+			name:        "explicitly disabled",
+			memory:      &sympoziumv1alpha1.AgentConfigMemory{Enabled: false},
+			wantEnabled: false,
+		},
+		{
+			name:        "enabled with ttlDays",
+			memory:      &sympoziumv1alpha1.AgentConfigMemory{Enabled: true, TTLDays: 14},
+			wantEnabled: true,
+			wantTTLDays: 14,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			persona := &sympoziumv1alpha1.AgentConfigSpec{
+				Name:         "lead",
+				SystemPrompt: "You are the lead.",
+				Memory:       tt.memory,
+			}
+			inst := r.buildAgent(pack, persona, "test-pack-lead", "")
+
+			mem := inst.Spec.Memory
+			if mem == nil {
+				t.Fatal("expected spec.memory to be set")
+			}
+			if mem.Enabled != tt.wantEnabled {
+				t.Errorf("spec.memory.enabled = %v, want %v", mem.Enabled, tt.wantEnabled)
+			}
+			if mem.TTLDays != tt.wantTTLDays {
+				t.Errorf("spec.memory.ttlDays = %d, want %d", mem.TTLDays, tt.wantTTLDays)
+			}
+			if mem.SystemPrompt != persona.SystemPrompt {
+				t.Errorf("spec.memory.systemPrompt = %q, want persona system prompt", mem.SystemPrompt)
+			}
+		})
+	}
+}
+
 // ── Relationship graph validation tests ────────────────────────────────────
 
 func testPersonas(names ...string) []sympoziumv1alpha1.AgentConfigSpec {

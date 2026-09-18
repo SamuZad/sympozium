@@ -256,7 +256,9 @@ type AgentConfigSpec struct {
 	// +optional
 	Schedule *AgentConfigSchedule `json:"schedule,omitempty"`
 
-	// Memory defines initial memory seeds for this agent configuration.
+	// Memory toggles persistent memory for this agent configuration and
+	// carries its TTL and initial seeds. Absent, memory is enabled with
+	// cluster defaults.
 	// +optional
 	Memory *AgentConfigMemory `json:"memory,omitempty"`
 
@@ -388,9 +390,19 @@ type AgentConfigSchedule struct {
 
 // AgentConfigMemory defines initial memory configuration for an agent configuration.
 type AgentConfigMemory struct {
-	// Enabled indicates whether persistent memory is active.
+	// Enabled indicates whether persistent memory is active. The ensemble
+	// controller mirrors it onto the generated Agent's spec.memory.enabled,
+	// which is what gates MEMORY_SERVER_URL on agent pods.
 	// +kubebuilder:default=true
 	Enabled bool `json:"enabled"`
+
+	// TTLDays caps how long this agent's PRIVATE memory entries survive
+	// before pruning. Mirrors AgentSpec.memory.ttlDays so the setting is
+	// expressible on the ensemble rather than only by editing a generated
+	// Agent. 0 / unset = cluster default.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	TTLDays int `json:"ttlDays,omitempty"`
 
 	// Seeds is a list of initial memory entries pre-populated in the
 	// central memory server for this agent on creation.

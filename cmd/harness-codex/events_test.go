@@ -31,13 +31,14 @@ func TestCodexRun_ParsesStream(t *testing.T) {
 	if run.Turns != 1 {
 		t.Errorf("Turns = %d, want 1", run.Turns)
 	}
-	// cached is a subset of input; reasoning a subset of output.
-	want := harness.TokenUsage{Input: 200, CacheRead: 800, CacheWrite: 50, Output: 120}
+	// cached and cache-write are both subsets of input; reasoning a subset
+	// of output. PromptTotal must equal the API's input_tokens exactly.
+	want := harness.TokenUsage{Input: 150, CacheRead: 800, CacheWrite: 50, Output: 120}
 	if run.Usage != want {
 		t.Errorf("Usage = %+v, want %+v", run.Usage, want)
 	}
-	if run.Usage.PromptTotal() != 1050 || run.Usage.Total() != 1170 {
-		t.Errorf("totals: prompt=%d total=%d", run.Usage.PromptTotal(), run.Usage.Total())
+	if run.Usage.PromptTotal() != 1000 || run.Usage.Total() != 1120 {
+		t.Errorf("totals: prompt=%d total=%d, want 1000 / 1120", run.Usage.PromptTotal(), run.Usage.Total())
 	}
 	if run.LastAgentMessage != "All done: see /workspace/report.md" {
 		t.Errorf("LastAgentMessage = %q", run.LastAgentMessage)
@@ -89,6 +90,27 @@ func TestCodexRun_CapturesFailures(t *testing.T) {
 	run.consume(strings.NewReader(`{"type":"error","message":"stream closed"}`+"\n"+`{"type":"turn.failed","error":{"message":"second"}}`+"\n"), nil)
 	if run.FailureMessage != "stream closed" {
 		t.Fatalf("first failure should win, got %q", run.FailureMessage)
+	}
+}
+
+// Real turn.completed event from a production codex run (2026-09-17). The
+// prompt total must come out at exactly input_tokens, and the cache hit rate
+// (cache_read / prompt) at ~95%.
+func TestCodexRun_ProductionSampleBuckets(t *testing.T) {
+	line := `{"type":"turn.completed","usage":{"input_tokens":1891853,"cached_input_tokens":1796579,"cache_write_input_tokens":95178,"output_tokens":8728,"reasoning_output_tokens":3276}}` + "\n"
+	run := &codexRun{}
+	run.consume(strings.NewReader(line), nil)
+
+	want := harness.TokenUsage{Input: 96, CacheRead: 1796579, CacheWrite: 95178, Output: 8728}
+	if run.Usage != want {
+		t.Fatalf("Usage = %+v, want %+v", run.Usage, want)
+	}
+	if got := run.Usage.PromptTotal(); got != 1891853 {
+		t.Fatalf("PromptTotal = %d, want input_tokens 1891853 (cache buckets must not be double-counted)", got)
+	}
+	hitRate := float64(run.Usage.CacheRead) / float64(run.Usage.PromptTotal())
+	if hitRate < 0.949 || hitRate > 0.950 {
+		t.Fatalf("cache hit rate = %.4f, want ~0.9496", hitRate)
 	}
 }
 

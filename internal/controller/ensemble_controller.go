@@ -480,6 +480,19 @@ func (r *EnsembleReconciler) buildAgent(
 		labels["sympozium.ai/provider"] = persona.Provider
 	}
 
+	// Memory settings come from the agent config when it declares them. Absent
+	// a memory block the historical defaults apply (enabled, cluster TTL), so
+	// ensembles written before these fields existed render exactly as before.
+	// The AgentRun controller keys MEMORY_SERVER_URL injection on the Agent's
+	// spec.memory.enabled, so this is the switch that actually turns memory off.
+	memoryEnabled, memoryTTLDays := true, 0
+	if persona.Memory != nil {
+		memoryEnabled = persona.Memory.Enabled
+		if persona.Memory.TTLDays > 0 {
+			memoryTTLDays = persona.Memory.TTLDays
+		}
+	}
+
 	inst := &sympoziumv1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      instanceName,
@@ -506,7 +519,8 @@ func (r *EnsembleReconciler) buildAgent(
 			},
 			AuthRefs: authRefs,
 			Memory: &sympoziumv1alpha1.MemorySpec{
-				Enabled:      true,
+				Enabled:      memoryEnabled,
+				TTLDays:      memoryTTLDays,
 				SystemPrompt: persona.SystemPrompt,
 			},
 			Observability: defaultObservabilitySpec(),

@@ -163,15 +163,19 @@ See [Ensembles — Synthetic Membrane](ensembles.md#synthetic-membrane) for the 
 !!! tip "Further Reading"
     The membrane design is based on the [Synthetic Membrane](https://zenodo.org/records/20070699) research paper: *"The Synthetic Membrane: A Shared Permeable Boundary for Multi-Agent AI Systems"* (April 2026).
 
-## Seeding from Ensembles
+## Per-Agent Memory Settings and Seeding
 
-A persona can ship with starter memories:
+Each `agentConfigs[]` entry carries a `memory` block. The controller mirrors `enabled` and `ttlDays` onto the generated Agent's `spec.memory`, and `spec.memory.enabled` is what decides whether agent pods receive `MEMORY_SERVER_URL` at all. Omitting the block keeps the historical default (enabled, cluster TTL); set `enabled: false` explicitly to turn memory off for one agent config.
+
+A persona can also ship with starter memories:
 
 ```yaml
 spec:
   personas:
     - name: sre-watchdog
       memory:
+        enabled: true
+        ttlDays: 30
         seeds:
           - "Track recurring issues for trend analysis"
           - "Note any nodes that frequently report NotReady"
