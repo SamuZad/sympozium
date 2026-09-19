@@ -4,8 +4,8 @@ import { Bot, Check, Loader2 } from "lucide-react";
 import type { CellnPlatformProfile } from "@/lib/api";
 import { useAddCellnFleetBackend, useCellnFleetBackends, useCellnPlatformProfiles } from "@/hooks/use-api";
 import { backendLabel } from "@/components/celln-backend-picker";
-import { CellnModelParametersField, CellnModelParametersSummary } from "@/components/celln-model-parameters";
-import { parseModelParameters } from "@/lib/model-parameters";
+import { CellnBackendWarning, CellnMaxOutputTokensSummary, CellnModelParametersField, CellnModelParametersSummary } from "@/components/celln-model-parameters";
+import { parseMaxOutputTokens, parseModelParameters } from "@/lib/model-parameters";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -113,6 +113,8 @@ export function CellnProviderPicker({
   const [credential, setCredential] = useState("");
   const [skipProbe, setSkipProbe] = useState(false);
   const [parameters, setParameters] = useState("");
+  const [maxOutputTokens, setMaxOutputTokens] = useState("");
+  const [warning, setWarning] = useState("");
   const [error, setError] = useState("");
 
   // A backend the nodes finished configuring gets its profile; refresh so it
@@ -152,6 +154,8 @@ export function CellnProviderPicker({
     setCredential("");
     setSkipProbe(false);
     setParameters("");
+    setMaxOutputTokens("");
+    setWarning("");
     add.reset();
     const served = list.filter((p) => p.provider === value);
     if (served.length > 0) onProfile(served[0]);
@@ -163,6 +167,7 @@ export function CellnProviderPicker({
     const custom = provider === "custom";
     const trimmedEndpoint = endpoint.trim();
     const parsedParameters = parseModelParameters(parameters);
+    const parsedTokens = parseMaxOutputTokens(maxOutputTokens);
     const body = {
       name: name.trim(),
       provider: custom ? customProvider.trim() || "custom" : provider,
@@ -173,21 +178,26 @@ export function CellnProviderPicker({
       credential: credential || undefined,
       skipPreflight: skipProbe || undefined,
       parameters: parsedParameters.parameters,
+      maxOutputTokens: parsedTokens.maxOutputTokens,
     };
-    // The precise rule is shown under the JSON field.
+    // The precise rule is shown under the field.
     if (parsedParameters.error) return setError("Fix the model parameters first.");
+    if (parsedTokens.error) return setError("Fix the max output tokens per request first.");
     if (!/^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/.test(body.name)) return setError("Name the fleet backend with a DNS label, e.g. claude.");
     if (provider !== "llama-server" && !credential) return setError(`${preset?.label || provider} needs an API key.`);
     if ((provider === "llama-server" || custom) && !body.endpoint) return setError("Give the server's address, e.g. http://framework:8080.");
     if (!body.model && (!detectable || skipProbe)) return setError(skipProbe ? "Give the model name when the probe is skipped." : "Give the model name.");
-    add.mutate(body, { onSuccess: () => { setCredential(""); setParameters(""); setAdded((current) => [...current, body.name]); } });
+    setWarning("");
+    add.mutate(body, { onSuccess: (result) => { setCredential(""); setParameters(""); setMaxOutputTokens(""); setWarning(result?.warning || ""); setAdded((current) => [...current, body.name]); } });
   }
 
   const needsEndpoint = provider === "llama-server" || provider === "custom";
   // An OpenAI-compatible server lists its models, so the API can detect one.
   const detectable = provider === "llama-server" || (provider === "custom" && protocol === "openai-chat");
   const current = selected && selected.provider === provider ? selected : undefined;
-  const currentParameters = current ? backendList.find((b) => b.profile === current.name)?.parameters : undefined;
+  const currentBackend = current ? backendList.find((b) => b.profile === current.name) : undefined;
+  const currentParameters = currentBackend?.parameters;
+  const currentMaxOutputTokens = currentBackend?.maxOutputTokens && currentBackend.maxOutputTokens !== 512 ? currentBackend.maxOutputTokens : undefined;
 
   return (
     <div className="space-y-4" data-testid="platform-model-route">
@@ -228,12 +238,15 @@ export function CellnProviderPicker({
         <div className="space-y-1 rounded-md border p-3 text-xs" data-testid="fleet-backend-model">
           <p className="text-sm">Model: <span className="font-mono">{current.model}</span> — fixed by fleet backend <span className="font-medium">{current.backend}</span>
             {currentParameters && <> · <CellnModelParametersSummary parameters={currentParameters} testId="fleet-backend-parameters" /></>}
+            {currentMaxOutputTokens && <> · <CellnMaxOutputTokensSummary maxOutputTokens={currentMaxOutputTokens} testId="fleet-backend-max-output-tokens" /></>}
           </p>
           <p className="text-muted-foreground">
             Served at {current.endpoint} with the key the fleet holds for it. No key or model is entered here; to use another model, add a fleet backend for it. The fleet policy caps the ceilings.
           </p>
         </div>
       )}
+
+      <CellnBackendWarning warning={warning} testId="fleet-backend-warning" />
 
       {provider && pending.length > 0 && (matching.length === 0 || pending.some((b) => added.includes(b.name))) && (
         <div role="status" className="space-y-3 rounded-md border border-amber-500/30 bg-amber-500/5 p-3 text-xs" data-testid="fleet-backend-progress">
@@ -311,7 +324,7 @@ export function CellnProviderPicker({
               <span>Skip the probe from the control plane. Use this when only the fleet nodes can reach the server; the model name is then required.</span>
             </label>
           )}
-          <CellnModelParametersField value={parameters} onChange={setParameters} showThinking={provider === "llama-server" || (provider === "custom" && protocol === "openai-chat")} />
+          <CellnModelParametersField value={parameters} onChange={setParameters} showThinking={provider === "llama-server" || (provider === "custom" && protocol === "openai-chat")} maxOutputTokens={maxOutputTokens} onMaxOutputTokensChange={setMaxOutputTokens} />
           {(error || add.error) && <p role="alert" className="whitespace-pre-wrap break-words text-xs text-red-500">{error || add.error?.message}</p>}
           <Button type="button" size="sm" disabled={add.isPending} onClick={submit}>
             {add.isPending ? "Probing and recording…" : "Add to the fleet"}

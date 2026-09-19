@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useAddCellnFleetBackend, useCellnFleetBackends } from "@/hooks/use-api";
-import { CellnModelParametersField, CellnModelParametersSummary } from "@/components/celln-model-parameters";
-import { parseModelParameters } from "@/lib/model-parameters";
+import { CellnBackendWarning, CellnMaxOutputTokensSummary, CellnModelParametersField, CellnModelParametersSummary } from "@/components/celln-model-parameters";
+import { parseMaxOutputTokens, parseModelParameters } from "@/lib/model-parameters";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -29,6 +29,8 @@ export function CellnAddBackend() {
   const [endpoint, setEndpoint] = useState("");
   const [credential, setCredential] = useState("");
   const [parameters, setParameters] = useState("");
+  const [maxOutputTokens, setMaxOutputTokens] = useState("");
+  const [warning, setWarning] = useState("");
   const [error, setError] = useState("");
   const preset = PROVIDERS.find((p) => p.value === provider)!;
   const list = backends.data || [];
@@ -42,7 +44,9 @@ export function CellnAddBackend() {
 
   function submit() {
     setError("");
+    setWarning("");
     const parsedParameters = parseModelParameters(parameters);
+    const parsedTokens = parseMaxOutputTokens(maxOutputTokens);
     const body = {
       name: name.trim(),
       provider,
@@ -51,13 +55,15 @@ export function CellnAddBackend() {
       allowInsecure: endpoint.trim().toLowerCase().startsWith("http://") || undefined,
       credential: credential || undefined,
       parameters: parsedParameters.parameters,
+      maxOutputTokens: parsedTokens.maxOutputTokens,
     };
-    // The precise rule is shown under the JSON field.
+    // The precise rule is shown under the field.
     if (parsedParameters.error) return setError("Fix the model parameters first.");
+    if (parsedTokens.error) return setError("Fix the max output tokens per request first.");
     if (!body.name) return setError("Give the backend a name (a DNS label, e.g. claude).");
     if (preset.keyed && !credential) return setError(`${preset.label} needs an API key.`);
     if (provider === "llama-server" && !body.endpoint) return setError("llama-server needs its address, e.g. http://framework:8080; the model is detected when left blank.");
-    add.mutate(body, { onSuccess: () => { setOpen(false); setCredential(""); setName(""); setParameters(""); } });
+    add.mutate(body, { onSuccess: (added) => { setOpen(false); setCredential(""); setName(""); setParameters(""); setMaxOutputTokens(""); setWarning(added?.warning || ""); } });
   }
 
   if (backends.isError) return null; // no fleet on this cluster
@@ -76,10 +82,12 @@ export function CellnAddBackend() {
             <li key={b.name} data-testid={`celln-backend-${b.name}`}>
               <span className="font-medium">{b.name}</span> — {b.provider} / {b.model} {b.source === "added" ? "(added)" : ""} · <span className={b.state === "ready" ? "text-green-600" : b.state.startsWith("error") ? "text-red-600" : "text-amber-600"}>{b.state}</span>
               {b.parameters && <> · <CellnModelParametersSummary parameters={b.parameters} testId={`celln-backend-${b.name}-parameters`} /></>}
+              {b.maxOutputTokens && b.maxOutputTokens !== 512 ? <> · <CellnMaxOutputTokensSummary maxOutputTokens={b.maxOutputTokens} testId={`celln-backend-${b.name}-max-output-tokens`} /></> : null}
             </li>
           ))}
         </ul>
       )}
+      <CellnBackendWarning warning={warning} testId="celln-add-backend-warning" />
       {open && (
         <div className="grid gap-2 sm:grid-cols-2">
           <label className="space-y-1 text-sm">
@@ -96,7 +104,7 @@ export function CellnAddBackend() {
           ) : (
             <label className="space-y-1 text-sm"><span>API key</span><Input type="password" value={credential} onChange={(e) => setCredential(e.target.value)} placeholder="published once to the fleet, never shown" /></label>
           )}
-          <CellnModelParametersField value={parameters} onChange={setParameters} showThinking={provider === "llama-server"} />
+          <CellnModelParametersField value={parameters} onChange={setParameters} showThinking={provider === "llama-server"} maxOutputTokens={maxOutputTokens} onMaxOutputTokensChange={setMaxOutputTokens} />
           {error && <p role="alert" className="text-xs text-red-600 sm:col-span-2">{error}</p>}
           <div className="sm:col-span-2">
             <Button type="button" size="sm" disabled={add.isPending} onClick={submit}>{add.isPending ? "Probing and recording…" : "Add to the fleet"}</Button>

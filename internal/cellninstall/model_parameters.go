@@ -236,15 +236,37 @@ func SameModelParameters(a, b map[string]any) bool {
 // PublishedModelParameters reads what the fleet published for every backend:
 // model.parameters of its configured.json (nil when it has none).
 func PublishedModelParameters(data map[string]string) (map[string]map[string]any, error) {
-	backends, err := PublishedBackends(data)
+	settings, err := PublishedModelSettings(data)
 	if err != nil {
 		return nil, err
 	}
 	out := map[string]map[string]any{}
+	for backend, s := range settings {
+		out[backend] = s.Parameters
+	}
+	return out, nil
+}
+
+// PublishedModelSetting is what a published backend was configured with and
+// keeps for good: model.parameters and model.maxOutputTokens of its
+// configured.json (nil and 0 when it has the defaults).
+type PublishedModelSetting struct {
+	Parameters      map[string]any
+	MaxOutputTokens int64
+}
+
+// PublishedModelSettings reads them for every published backend.
+func PublishedModelSettings(data map[string]string) (map[string]PublishedModelSetting, error) {
+	backends, err := PublishedBackends(data)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]PublishedModelSetting{}
 	for _, backend := range backends {
 		var configured struct {
 			Model struct {
-				Parameters map[string]any `json:"parameters"`
+				Parameters      map[string]any `json:"parameters"`
+				MaxOutputTokens int64          `json:"maxOutputTokens"`
 			} `json:"model"`
 		}
 		decoder := json.NewDecoder(strings.NewReader(data[publishedKey(backend, "configured.json", data)]))
@@ -252,13 +274,13 @@ func PublishedModelParameters(data map[string]string) (map[string]map[string]any
 		if err := decoder.Decode(&configured); err != nil {
 			return nil, fmt.Errorf("published configuration of backend %s is unreadable: %w", backend, err)
 		}
-		out[backend] = configured.Model.Parameters
+		out[backend] = PublishedModelSetting{Parameters: configured.Model.Parameters, MaxOutputTokens: NormalModelMaxOutputTokens(configured.Model.MaxOutputTokens)}
 	}
 	return out, nil
 }
 
 // CheckPublishedModelParameters refuses an install whose backend parameters
-// differ from what the fleet already published for that backend in the same
+// or output cap per request differ from what the fleet already published for that backend in the same
 // scope and package. A node never reconfigures a configured backend and a
 // published backend's files are never rewritten, so the change would be
 // silently ignored; the refusal says how to get the parameters instead.
@@ -280,16 +302,21 @@ func CheckPublishedModelParameters(ctx context.Context, store client.Reader, o F
 	if scope := published.Annotations[FleetScopeAnnotation]; scope != "" && scope != o.Scope {
 		return nil
 	}
-	have, err := PublishedModelParameters(published.Data)
+	have, err := PublishedModelSettings(published.Data)
 	if err != nil {
 		return err
 	}
 	for _, b := range backends {
 		current, ok := have[b.Name]
-		if !ok || SameModelParameters(current, b.Model.Parameters) {
+		if !ok {
 			continue
 		}
-		return ModelParametersChangeRefusal(b, current)
+		if !SameModelParameters(current.Parameters, b.Model.Parameters) {
+			return ModelParametersChangeRefusal(b, current.Parameters)
+		}
+		if current.MaxOutputTokens != NormalModelMaxOutputTokens(b.Model.MaxOutputTokens) {
+			return ModelMaxOutputTokensChangeRefusal(b, current.MaxOutputTokens)
+		}
 	}
 	return nil
 }
@@ -303,6 +330,25 @@ func ModelParametersChangeRefusal(b FleetBackend, published map[string]any) erro
 		}
 		return "none"
 	}
+	return publishedBackendChangeRefusal(b, "model parameters", show(published), show(b.Model.Parameters), true)
+}
+
+// ModelMaxOutputTokensChangeRefusal is the same refusal for a backend's output
+// cap per request.
+func ModelMaxOutputTokensChangeRefusal(b FleetBackend, published int64) error {
+	show := func(tokens int64) string {
+		if tokens = NormalModelMaxOutputTokens(tokens); tokens != 0 {
+			return fmt.Sprintf("max output tokens %d", tokens)
+		}
+		return fmt.Sprintf("the default max output tokens (%d)", DefaultModelMaxOutputTokens)
+	}
+	return publishedBackendChangeRefusal(b, "max output tokens per request", show(published), show(b.Model.MaxOutputTokens), len(b.Model.Parameters) != 0)
+}
+
+// publishedBackendChangeRefusal names the three ways to get a setting a
+// published backend cannot take: the same backend under another name through
+// the installer or the API, or a new scope.
+func publishedBackendChangeRefusal(b FleetBackend, what, was, asks string, parametersFile bool) error {
 	spec := fmt.Sprintf("name=%s-2,provider=%s,model=%s,endpoint=%s,protocol=%s", b.Name, b.Model.Provider, b.Model.Name, b.Model.Endpoint, b.Model.Protocol)
 	if b.Model.AllowInsecure {
 		spec += ",allow-insecure=true"
@@ -310,7 +356,15 @@ func ModelParametersChangeRefusal(b FleetBackend, published map[string]any) erro
 	if b.Model.NeedsCredential() {
 		spec += ",credential-file=/abs/path/key"
 	}
-	request := map[string]any{"name": b.Name + "-2", "provider": b.Model.Provider, "model": b.Model.Name, "endpoint": b.Model.Endpoint, "protocol": b.Model.Protocol, "parameters": b.Model.Parameters}
+	request := map[string]any{"name": b.Name + "-2", "provider": b.Model.Provider, "model": b.Model.Name, "endpoint": b.Model.Endpoint, "protocol": b.Model.Protocol}
+	if parametersFile {
+		spec += ",parameters-file=/abs/path/parameters.json"
+		request["parameters"] = b.Model.Parameters
+	}
+	if tokens := NormalModelMaxOutputTokens(b.Model.MaxOutputTokens); tokens != 0 {
+		spec += fmt.Sprintf(",max-output-tokens=%d", tokens)
+		request["maxOutputTokens"] = tokens
+	}
 	if b.Model.AllowInsecure {
 		request["allowInsecure"] = true
 	}
@@ -318,13 +372,13 @@ func ModelParametersChangeRefusal(b FleetBackend, published map[string]any) erro
 		request["credential"] = "<key>"
 	}
 	body, _ := json.Marshal(request)
-	return fmt.Errorf("model parameters of a published backend cannot change: backend %s was published with %s and this install asks for %s.\n"+
+	return fmt.Errorf("%s of a published backend cannot change: backend %s was published with %s and this install asks for %s.\n"+
 		"  The nodes configured it once and its published configuration is never rewritten. Either\n"+
 		"  - keep %s as published and add a backend under another name, then move agents to it:\n"+
-		"      --celln-fleet-backend %s,parameters-file=/abs/path/parameters.json\n"+
+		"      --celln-fleet-backend %s\n"+
 		"    or POST /api/v1/celln-platform/backends %s\n"+
 		"  - or move the fleet to a new scope with --celln-fleet-scope and --celln-fleet-replace-package, which configures every backend afresh and ends every live parent on the fleet",
-		b.Name, show(published), show(b.Model.Parameters), b.Name, spec, body)
+		what, b.Name, was, asks, b.Name, spec, body)
 }
 
 // strvalsEscape makes any text one literal Helm strvals value: a backslash

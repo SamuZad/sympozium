@@ -151,6 +151,10 @@ export interface CellnFleetBackend {
   allowInsecure: boolean;
   /** What the fleet merges into every model request of this backend; absent when none. */
   parameters?: Record<string, unknown>;
+  /** Output tokens one model request may produce; absent when it is the default 512. A turn reserves 6 requests of it. */
+  maxOutputTokens?: number;
+  /** On the answer to an add: the fleet's ceilings pay for fewer turns on this backend than the usual session. */
+  warning?: string;
   source: "install" | "added";
   profile: string;
   state: string;
@@ -220,6 +224,8 @@ export interface AddCellnFleetBackendRequest {
   skipPreflight?: boolean;
   /** A JSON object the fleet merges into every model request (lib/model-parameters.ts has the rules). */
   parameters?: Record<string, unknown>;
+  /** Output tokens one model request may produce, 256–4096; omit for the default 512. */
+  maxOutputTokens?: number;
 }
 
 export interface CellnPlatformProfile {

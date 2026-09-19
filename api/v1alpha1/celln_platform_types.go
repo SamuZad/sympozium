@@ -207,7 +207,7 @@ type CellnExecutionPolicyCeilings struct {
 	// +kubebuilder:validation:Maximum=6144
 	MaxModelRequests int64 `json:"maxModelRequests"`
 	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:validation:Maximum=3145728
+	// +kubebuilder:validation:Maximum=25165824
 	MaxOutputTokens int64 `json:"maxOutputTokens"`
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=86400

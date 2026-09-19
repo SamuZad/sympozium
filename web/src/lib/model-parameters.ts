@@ -96,3 +96,36 @@ export function withThinkingDisabled(parameters: ModelParameters | undefined, di
 export function compactModelParameters(parameters: ModelParameters | undefined): string {
   return parameters && Object.keys(parameters).length ? JSON.stringify(parameters) : "";
 }
+
+// Output tokens one model request of a fleet backend may produce
+// (cellninstall.ValidateModelMaxOutputTokens in Go, which the API applies
+// again). A turn reserves TURN_MODEL_REQUESTS requests of it.
+export const DEFAULT_MAX_OUTPUT_TOKENS = 512;
+export const MIN_MAX_OUTPUT_TOKENS = 256;
+export const MAX_MAX_OUTPUT_TOKENS = 4096;
+const TURN_MODEL_REQUESTS = 6;
+
+/**
+ * Reads the "Max output tokens per request" field. Blank keeps the default;
+ * the default itself is sent as nothing, so the backend is configured exactly
+ * as one that never named it.
+ */
+export function parseMaxOutputTokens(text: string): { maxOutputTokens?: number; error?: string } {
+  const trimmed = text.trim();
+  if (!trimmed) return {};
+  const value = Number(trimmed);
+  if (!/^\d+$/.test(trimmed) || !Number.isInteger(value) || value < MIN_MAX_OUTPUT_TOKENS || value > MAX_MAX_OUTPUT_TOKENS) {
+    return { error: `max output tokens per request must be a whole number from ${MIN_MAX_OUTPUT_TOKENS} to ${MAX_MAX_OUTPUT_TOKENS} (leave it blank for the default ${DEFAULT_MAX_OUTPUT_TOKENS})` };
+  }
+  return value === DEFAULT_MAX_OUTPUT_TOKENS ? {} : { maxOutputTokens: value };
+}
+
+/** What one turn reserves from a conversation's lifetime output tokens. */
+export function turnOutputTokens(maxOutputTokens?: number): number {
+  return TURN_MODEL_REQUESTS * (maxOutputTokens || DEFAULT_MAX_OUTPUT_TOKENS);
+}
+
+/** "one turn reserves N tokens (6 requests)". */
+export function describeTurnReservation(maxOutputTokens?: number): string {
+  return `one turn reserves ${turnOutputTokens(maxOutputTokens)} tokens (${TURN_MODEL_REQUESTS} requests)`;
+}

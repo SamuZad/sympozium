@@ -18,7 +18,9 @@ export interface WizardExecution {
  * What one turn reserves from a parent's lifetime totals with the current
  * Celln starter package (api/v1alpha1 TurnModelRequests, TurnOutputTokens).
  * Totals are sized as turns × allowance; smaller totals end the conversation
- * before its turn count is reached.
+ * before its turn count is reached. A fleet backend that raises its max output
+ * tokens per request (512 by default, up to 4096) reserves 6 × that per turn;
+ * its platform profile's sessionDefaults already account for it.
  */
 export const TURN_MODEL_REQUESTS = 6;
 export const TURN_OUTPUT_TOKENS = 3072;

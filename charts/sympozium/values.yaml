@@ -595,6 +595,14 @@ celln:
     # fields Celln owns (model, messages, max_tokens, tools, ...). It needs a
     # Celln release newer than v0.5.22 on the nodes, and cannot change once
     # the backend is published: add a backend under another name instead.
+    # `maxOutputTokens` (optional, 256-4096, default 512) is the most output
+    # tokens one model request of that backend may produce. 512 suits chat
+    # with thinking disabled; a reasoning model left thinking needs 2048-4096.
+    # A turn reserves 6 requests of it (6 x 512 = 3072 by default), so
+    # `limits.maxOutputTokens` must be at least 6 x the largest value here and
+    # is best sized as turns x that. A non-default value needs a Celln release
+    # newer than v0.5.23 on the nodes and a starter package built by it, and,
+    # like `parameters`, cannot change once the backend is published.
     backends: []
     # - name: native
     #   provider: deepseek
@@ -616,6 +624,13 @@ celln:
     #   parameters:
     #     chat_template_kwargs:
     #       enable_thinking: false
+    # - name: reasoner
+    #   provider: llama-server
+    #   protocol: openai-chat
+    #   endpoint: http://10.0.0.6:8080/v1/chat/completions
+    #   model: qwq.gguf
+    #   allowInsecure: true
+    #   maxOutputTokens: 2048
     # -- Secret in celln-system holding every backend's provider key under the
     # backend's name, mounted read-only into every dispatcher at
     # /etc/celln-native/credentials. Guests and the controller never see it;
@@ -633,9 +648,15 @@ celln:
       name: ""
       # -- Approve a plain-HTTP or private endpoint (e.g. a LAN llama-server).
       allowInsecure: false
+      # -- Output tokens per model request, 256-4096; 0 keeps Celln's 512
+      # (see `backends[].maxOutputTokens` above).
+      maxOutputTokens: 0
     # -- Ceilings for one parent over its whole life; every node configures
     # them and the scope's policy admits runs within them. Zero keeps Celln's
     # reviewed defaults (1 h, 12 turns). The installer sets day-long defaults.
+    # Every turn reserves 6 model requests and 6 x the backend's
+    # maxOutputTokens output tokens (3072 by default) from these totals;
+    # maxOutputTokens here may be up to 25165824 (1024 turns x 6 x 4096).
     limits:
       leaseSeconds: 0
       maxTurns: 0

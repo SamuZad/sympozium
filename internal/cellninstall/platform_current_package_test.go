@@ -92,3 +92,52 @@ func TestInstallPlatformPublishesTheCurrentPackagesBounds(t *testing.T) {
 		t.Fatalf("session defaults: %+v", session)
 	}
 }
+
+// A backend that allows 4096 output tokens per request publishes a per-turn
+// allowance of 24576. The sample run the installer writes asks for the turns
+// the default ceilings pay for at that allowance, not 64 it could never take.
+func TestInstallPlatformSizesTheSampleRunForItsBackendsAllowance(t *testing.T) {
+	ctx := context.Background()
+	dir, packageHash, principal := starterConfiguration(t)
+	currentPackage(t, dir)
+	backends, err := ConfigurationBackends(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, backend := range backends {
+		var native, configured map[string]any
+		path := filepath.Join(dir, backend, "native-template.json")
+		raw, _ := os.ReadFile(path)
+		if err := json.Unmarshal(raw, &native); err != nil {
+			t.Fatal(err)
+		}
+		native["turnOutputTokens"] = api.MaxTurnOutputTokens
+		raw, _ = json.Marshal(native)
+		if err := os.WriteFile(path, raw, 0600); err != nil {
+			t.Fatal(err)
+		}
+		path = filepath.Join(dir, backend, "configured.json")
+		rawConfigured, _ := os.ReadFile(path)
+		if err := json.Unmarshal(rawConfigured, &configured); err != nil {
+			t.Fatal(err)
+		}
+		configured["nativeTemplateHash"] = fmt.Sprintf("blake3:%x", blake3.Sum256(raw))
+		rawConfigured, _ = json.Marshal(configured)
+		if err := os.WriteFile(path, rawConfigured, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out := filepath.Join(t.TempDir(), "out")
+	o := PlatformOptions{Namespace: "tenant-a", ConfigurationDir: dir, OutputDir: out, Scope: "trial", ClusterID: "cluster-uid", PackageHash: packageHash, Principal: principal, ControllerNamespace: "sympozium-system"}
+	if err := InstallPlatform(ctx, platformInstallStore(t), o); err != nil {
+		t.Fatal(err)
+	}
+	var run api.AgentRun
+	raw, err := os.ReadFile(filepath.Join(out, "run.json"))
+	if err != nil || json.Unmarshal(raw, &run) != nil || run.Spec.Enduring == nil {
+		t.Fatalf("sample run: %v %s", err, raw)
+	}
+	if e := run.Spec.Enduring; e.MaxTurns != 32 || e.MaxModelRequests != 192 || e.MaxOutputTokens != 786432 || run.Spec.ValidateLifecycle() != "" {
+		t.Fatalf("sample run budget: %+v", e)
+	}
+}

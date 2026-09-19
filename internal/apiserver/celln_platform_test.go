@@ -26,7 +26,7 @@ func TestCellnPlatformProfilesAndWrappersFollowTheNamespacePolicy(t *testing.T) 
 	profile := &sympoziumv1alpha1.CellnRuntimeProfile{ObjectMeta: metav1.ObjectMeta{Name: "celln-native-trial"}, Spec: sympoziumv1alpha1.CellnRuntimeProfileSpec{Revision: "v1", Native: &sympoziumv1alpha1.CellnNativeProvisioning{CredentialProfile: "trial", SystemPrompt: "host persona", Template: raw(`{"model":"deepseek-chat","url":"https://api.deepseek.com/chat/completions"}`)}}}
 	// A second backend of the same scope: its profile is labeled with the
 	// backend name and gets its own wrapper names.
-	local := &sympoziumv1alpha1.CellnRuntimeProfile{ObjectMeta: metav1.ObjectMeta{Name: "celln-native-trial-local", Labels: map[string]string{cellnplatform.BackendLabel: "local"}}, Spec: sympoziumv1alpha1.CellnRuntimeProfileSpec{Revision: "v1", Native: &sympoziumv1alpha1.CellnNativeProvisioning{CredentialProfile: "trial-local", SystemPrompt: "host persona", Template: raw(`{"model":"qwen.gguf","url":"http://100.81.163.75:8080/v1/chat/completions","allow_insecure":true}`)}}}
+	local := &sympoziumv1alpha1.CellnRuntimeProfile{ObjectMeta: metav1.ObjectMeta{Name: "celln-native-trial-local", Labels: map[string]string{cellnplatform.BackendLabel: "local"}}, Spec: sympoziumv1alpha1.CellnRuntimeProfileSpec{Revision: "v1", Native: &sympoziumv1alpha1.CellnNativeProvisioning{TurnModelRequests: 6, TurnOutputTokens: 24576, CredentialProfile: "trial-local", SystemPrompt: "host persona", Template: raw(`{"model":"qwen.gguf","url":"http://100.81.163.75:8080/v1/chat/completions","allow_insecure":true}`)}}}
 	policy := &sympoziumv1alpha1.CellnExecutionPolicy{ObjectMeta: metav1.ObjectMeta{Name: "celln-fleet-trial"}, Spec: sympoziumv1alpha1.CellnExecutionPolicySpec{
 		NamespaceSelector: cellnplatform.OpenSelector(cellnplatform.SystemNamespaces("sympozium-system")),
 		RuntimeProfiles:   []sympoziumv1alpha1.CellnExecutionPolicyRuntime{{Ref: sympoziumv1alpha1.CellnRuntimeProfileRef{Name: profile.Name, Revision: "v1"}}, {Ref: sympoziumv1alpha1.CellnRuntimeProfileRef{Name: local.Name, Revision: "v1"}}},
@@ -65,6 +65,12 @@ func TestCellnPlatformProfilesAndWrappersFollowTheNamespacePolicy(t *testing.T) 
 	}
 	if p := byName["celln-native-trial-local"]; p.Provider != "llama-server" || p.Model != "qwen.gguf" || p.CredentialProfile != "trial-local" || p.Backend != "local" || p.Wrapper != "celln-local" || p.Agent != "celln-agent-local" {
 		t.Fatalf("second backend must be offered with its own wrapper names: %+v", p)
+	}
+	// The local backend allows 4096 output tokens per request, so its turns
+	// reserve 24576: the shared ceilings pay for 32 of them, and its session
+	// defaults are those 32 turns rather than 64 turns it could never take.
+	if d := byName["celln-native-trial-local"].SessionDefaults; d.MaxTurns != 32 || d.MaxModelRequests != 192 || d.MaxOutputTokens != 786432 || d.LeaseSeconds != 14400 {
+		t.Fatalf("session defaults must follow the profile's own per-turn allowance: %+v", d)
 	}
 	if got := get("sympozium-system"); len(got) != 0 {
 		t.Fatalf("control-plane namespace offered profiles: %+v", got)

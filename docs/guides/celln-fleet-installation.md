@@ -316,6 +316,93 @@ ends every live parent.
 In a values file, `celln.fleet.backends[].parameters` takes the object
 itself.
 
+#### Output tokens per request
+
+Celln lets one model request produce **512 output tokens** by default. That
+suits chat with thinking disabled, and caps an answer near 2 KB. A backend
+may set its own cap, **256–4096**, on all three paths:
+
+```bash
+# the installer, in a backend's spec …
+sympozium install \
+  --celln-fleet-backend name=native,provider=deepseek \
+  --celln-fleet-backend name=thinker,provider=llama-server,model=qwq.gguf,endpoint=http://10.0.0.5:8080,allow-insecure=true,max-output-tokens=2048
+
+# … or for the single --celln-fleet-model-* backend
+sympozium install --celln-fleet-model-provider llama-server … \
+  --celln-fleet-model-max-output-tokens 2048
+```
+
+| Path | Field |
+| --- | --- |
+| Installer | `max-output-tokens=N` in `--celln-fleet-backend`, or `--celln-fleet-model-max-output-tokens N` |
+| Chart values | `celln.fleet.backends[].maxOutputTokens` (or `celln.fleet.model.maxOutputTokens`) |
+| API / console | `maxOutputTokens` in `POST /api/v1/celln-platform/backends`; "Max output tokens per request" under **Advanced** in both add-a-fleet-backend forms |
+
+Absent, `0` and `512` all mean the default, and a default backend carries
+nothing: its values, its entry in `FLEET_BACKENDS` and its
+`starter-configure` plan are byte for byte what they were before the field
+existed, so nodes do not roll and any Celln configures it. A non-default
+value becomes `modelConnection.maxOutputTokens` in the plan and
+`model.maxOutputTokens` in the published `configured.json`.
+
+**Which value.** 512 suits chat with thinking disabled. A reasoning model
+left thinking needs 2048–4096, which costs 4–8× the tokens per turn and may
+exceed the 60-second turn limit on a slow local model. If the model only
+needs to stop thinking, prefer the parameter above; raise the cap when you
+want it to think, or need answers longer than about 2 KB (one committed
+answer is still at most 8192 bytes; a longer one fails the turn with `final
+answer exceeds …`, and the remedy is a shorter answer or a lower cap).
+
+**The 6× rule.** A turn reserves 6 model requests and **6 × the backend's
+cap** in output tokens from its conversation's lifetime totals: 3072 at the
+default, 12288 at 2048, 24576 at 4096. The runtime profile publishes it as
+`spec.native.turnModelRequests` / `turnOutputTokens`. A scope has **one**
+policy with one set of ceilings, while its backends may now differ in what a
+turn costs, so:
+
+- The installer checks `--celln-fleet-max-output-tokens` against the **most
+  expensive** install-time backend: it must be at least 6 × the largest cap,
+  and the refusal names the backend. The maximum is 25165824
+  (1024 turns × 6 × 4096).
+- When you do not pass `--celln-fleet-max-output-tokens`, the installer
+  sizes it so the default 256 turns stay reachable on that backend
+  (256 × 6 × the largest cap: 3145728 at 2048, 6291456 at 4096) and prints
+  one line saying so. Model requests stay 256 × 6.
+- `sessionDefaults`, the sample run and the console's defaults are computed
+  **per profile**: the largest turn count up to 64 whose requests and tokens
+  the ceilings pay for at that profile's own allowance.
+- A backend added later through the API or console, with a higher cap than
+  the ceilings were sized for, still works but buys fewer turns. The API
+  answers with a `warning` when the ceilings pay for fewer than the usual 64
+  turns on it (the console shows it), refuses a cap whose single turn the
+  ceilings cannot pay for, and `sympozium doctor`'s "Fleet turn budget"
+  check reports every profile's allowance and the turns it affords, with
+  the ceilings to install for the costliest one.
+
+**Celln version and package.** A non-default cap needs a Celln release
+**newer than v0.5.23** on the fleet nodes **and a starter package built by
+that Celln** (the guest worker has to send the configured value; Celln
+refuses at configure time otherwise). Sympozium's release builds the package
+from the Celln it pins, so a new install of such a release has both. An
+**existing** fleet keeps the package it was installed with: move it with
+`--celln-fleet-replace-package` (see [Moving to a new package or
+scope](#moving-to-a-new-package-or-scope); live parents are lost) before
+adding a backend with its own cap. On an older Celln the plan is refused,
+the backend is never configured, and the `celln-node-configure` log, the
+installer's wait and the API's `error:` state all name the requirement
+(`… needs a Celln release newer than v0.5.23 …`).
+
+**It cannot be changed in place**, for the same reason as parameters: an
+install that asks for another cap on a published backend (raising, lowering
+or removing it) stops with `max output tokens per request of a published
+backend cannot change` and the same three ways forward: the backend under
+another name through the installer or the API, or a new scope with
+`--celln-fleet-replace-package`.
+
+The one-token preflight probe is unchanged: it always asks for one token,
+whatever the backend's cap.
+
 ## One-shot runs
 
 A run without `executionLifecycle: enduring` is a one-shot: the same
@@ -479,7 +566,7 @@ every run and are configured on every node at install time:
 | `--celln-fleet-max-lease-seconds` | 86400 (24 h) | 60–86400 |
 | `--celln-fleet-max-turns` | 256 | 1–1024 |
 | `--celln-fleet-max-model-requests` | 1536 | 6–6144 |
-| `--celln-fleet-max-output-tokens` | 786432 | 3072–3145728 |
+| `--celln-fleet-max-output-tokens` | 786432 (256 × 6 × the largest backend cap when that is above 512) | 3072–25165824 |
 
 One turn of the current starter package may make 6 model requests (up to 4
 tool calls, then an answer) and produce 3072 output tokens, and **every turn
@@ -487,15 +574,20 @@ reserves that whole allowance** from the parent's lifetime totals whether or
 not it spends it. Size the totals as turns × allowance: the defaults are
 256 × 6 and 256 × 3072, and the minima are one turn's worth. Totals that
 afford fewer turns than `max-turns` end the conversation early, at
-`min(requests / 6, tokens / 3072)` turns.
+`min(requests / 6, tokens / 3072)` turns. A backend that sets its own
+[output tokens per request](#output-tokens-per-request) reserves 6 × that
+instead of 3072, and the ceilings are sized and checked for the most
+expensive backend of the scope.
 
 One message is at most 2048 bytes and one committed answer at most 8192
 bytes (2048 on a fleet still running an older starter package, where a
 longer answer is a failed turn).
 
 A new conversation asks for a working session inside those ceilings by
-default (four hours, 64 turns, 384 requests, 196608 tokens; the API reports
-them per profile as `sessionDefaults`). A run asking for more than a ceiling
+default (four hours, 64 turns, 384 requests, 196608 tokens at the default
+allowance; the API reports them per profile as `sessionDefaults`, with the
+largest turn count up to 64 that the ceilings pay for at that profile's own
+per-turn allowance). A run asking for more than a ceiling
 is refused with `AUTH_LIMIT_RANGE`. When a lease ends no new turn is admitted
 and the parent stops; the conversation view shows the deadline and asks for a
 new conversation. Leases are not extended in place. Every live parent holds
