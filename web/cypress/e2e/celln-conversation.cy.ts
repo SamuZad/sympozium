@@ -141,7 +141,9 @@ describe("Persistent Celln conversation", () => {
     cy.intercept("GET", "/api/v1/runs/conversation/turns*", { body: { runUID: "replacement-uid", items: [], continue: "" } });
     cy.reload();
     cy.contains("Turn history unavailable").should("be.visible");
-    cy.get('[data-testid="celln-turn-message"]').type("What colour?");
+    // Since 4f2d7779 composing itself requires a verified, complete history, so
+    // a mismatched run UID blocks the draft as well as the send.
+    cy.get('[data-testid="celln-turn-message"]').should("be.disabled").and("have.value", "");
     cy.get('[data-testid="celln-turn-send"]').should("be.disabled");
   });
 
