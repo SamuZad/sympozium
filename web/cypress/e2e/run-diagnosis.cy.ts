@@ -8,6 +8,7 @@ const REFUSAL_TAIL = "Ask the operator to authorise this namespace, runtime prof
 const LOST_MESSAGE = "owner=ContextLost reachedReady=true admittedAge=33s incarnation=blake3:1f0c launchProfile=blake3:77ab; parent context unavailable; no automatic reconstruction";
 const BUDGET_ANSWER = 'Turn failed; no result committed: child refused: guest exited with code 1: CELLN_HARNESS_EVENT {"type":"tool_call","name":"web-fetch"} CELLN_HARNESS_ERROR tool call budget exhausted';
 const LENGTH_ANSWER = 'Turn failed; no result committed: child refused: guest exited with code 1: CELLN_HARNESS_EVENT {"type":"final"} CELLN_HARNESS_ERROR final answer is empty or exceeds limit';
+const TOO_LONG_ANSWER = 'Turn failed; no result committed: child refused: guest exited with code 1: CELLN_HARNESS_EVENT {"type":"final"} CELLN_HARNESS_ERROR final answer exceeds limit: 9120 bytes, at most 8192';
 const BUDGET_SPENT_ANSWER = 'Turn failed; no result committed: child refused: guest exited with code 1: CELLN_HARNESS_EVENT {"type":"final"} CELLN_HARNESS_ERROR final answer is empty: the model used its whole output budget (512 tokens) without answering';
 
 function run(status: Record<string, unknown>, spec: Record<string, unknown> = {}): AgentRun {
@@ -127,6 +128,29 @@ describe("diagnoseRun", () => {
       expect(step.detail).to.contain("Disable thinking (reasoning models)").and.contain('{"chat_template_kwargs":{"enable_thinking":false}}').and.contain("JSON parameters");
       expect(step.action).to.deep.include({ kind: "link", to: "/agents/hermes?tab=harness" });
     }
+  });
+
+  it("names both remedies for an empty answer: thinking disabled, or more output tokens per request", () => {
+    for (const answer of [LENGTH_ANSWER, BUDGET_SPENT_ANSWER]) {
+      const failed = { ...turnFailed, status: { ...turnFailed.status, cellnParent: { ...turnFailed.status!.cellnParent!, initialTurn: { ...initialOK, result: { succeeded: false, answer } } } } } as AgentRun;
+      const steps = diagnoseRun(failed)!.nextSteps;
+      const thinking = steps.findIndex((candidate) => candidate.label === "Use a fleet backend with thinking disabled");
+      const raise = steps[thinking + 1];
+      expect(raise.label).to.equal("Or use a fleet backend with more output tokens per request");
+      expect(raise.detail).to.contain("Max output tokens per request").and.contain("2048–4096").and.contain("4–8×").and.contain("60-second turn limit").and.contain("newer than v0.5.23");
+      expect(raise.action).to.deep.include({ kind: "link", to: "/agents/hermes?tab=harness" });
+    }
+  });
+
+  it("diagnoses an over-long answer: ask for less, or lower the backend's output tokens", () => {
+    const failed = { ...turnFailed, status: { ...turnFailed.status, cellnParent: { ...turnFailed.status!.cellnParent!, initialTurn: { ...initialOK, result: { succeeded: false, answer: TOO_LONG_ANSWER } } } } } as AgentRun;
+    const diagnosis = diagnoseRun(failed)!;
+    expect(diagnosis).to.include({ kind: "turn-failed", title: "Turn failed: the answer was too long" });
+    expect(diagnosis.code).to.contain("final answer exceeds limit");
+    expect(diagnosis.cause).to.contain("answer size bound").and.not.contain("thinking");
+    expect(diagnosis.nextSteps.map((step) => step.label)).to.deep.equal(["Ask for a shorter answer", "Or use a fleet backend with fewer output tokens per request"]);
+    expect(diagnosis.nextSteps[1].detail).to.contain("Max output tokens per request").and.contain("lower value");
+    expect(diagnosis.nextSteps[1].action).to.deep.include({ kind: "link", to: "/agents/hermes?tab=harness" });
   });
 
   it("names the refused tool from the condition detail, else from the profile", () => {

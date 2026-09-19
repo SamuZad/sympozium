@@ -321,8 +321,8 @@ func TestFleetLimitsDefaultToLongRunningAndAreBounded(t *testing.T) {
 	if got.MaxTurns != 256 || got.MaxModelRequests != 1536 || got.MaxOutputTokens != 786432 || TurnsAfforded(got.MaxModelRequests, got.MaxOutputTokens, api.TurnModelRequests, api.TurnOutputTokens) != got.MaxTurns {
 		t.Fatalf("defaults do not afford their turns: %+v", got)
 	}
-	for name, l := range map[string]FleetLimits{"lease too long": {LeaseSeconds: 86401}, "lease too short": {LeaseSeconds: 30}, "no turns": {MaxTurns: -1}, "tokens below one turn": {MaxOutputTokens: 3071}, "requests below one turn": {MaxModelRequests: 5}, "the old one-turn minimum": {MaxModelRequests: 3, MaxOutputTokens: 1536}, "too many requests": {MaxModelRequests: 6145}, "too many tokens": {MaxOutputTokens: 3145729}} {
-		if _, err := l.Resolve(); err == nil || !strings.Contains(err.Error(), "model requests 6–6144, output tokens 3072–3145728") {
+	for name, l := range map[string]FleetLimits{"lease too long": {LeaseSeconds: 86401}, "lease too short": {LeaseSeconds: 30}, "no turns": {MaxTurns: -1}, "tokens below one turn": {MaxOutputTokens: 3071}, "requests below one turn": {MaxModelRequests: 5}, "the old one-turn minimum": {MaxModelRequests: 3, MaxOutputTokens: 1536}, "too many requests": {MaxModelRequests: 6145}, "too many tokens": {MaxOutputTokens: 25165825}} {
+		if _, err := l.Resolve(); err == nil || !strings.Contains(err.Error(), "model requests 6–6144, output tokens 3072–25165824") {
 			t.Fatalf("%s: %v", name, err)
 		}
 	}

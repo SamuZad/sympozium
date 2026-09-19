@@ -78,7 +78,7 @@ type Server struct {
 	cellnCells   cellnCellsSource         // gateway `/v1/cells` client and its "unsupported" verdict
 	// completeCellnBackend finishes an added fleet backend in the background;
 	// nil runs completeCellnFleetBackend (tests replace it).
-	completeCellnBackend func(name string, facts cellninstall.FleetFacts, hasParameters bool)
+	completeCellnBackend func(name string, facts cellninstall.FleetFacts, cellnHint string)
 }
 
 // NewServer creates a new API server.
@@ -593,7 +593,7 @@ func (s *Server) listCellnPlatformProfiles(w http.ResponseWriter, r *http.Reques
 		for _, t := range a.Policy.Spec.Tools {
 			tools = append(tools, t.Ref)
 		}
-		out = append(out, CellnPlatformProfile{Name: a.Profile.Name, Revision: a.Profile.Spec.Revision, Policy: a.Policy.Name, Model: connection.Spec.Models[0], Provider: connection.Spec.Provider, Endpoint: connection.Spec.Endpoint, CredentialProfile: connection.Spec.CredentialProfile, SystemPrompt: a.Profile.Spec.Native.SystemPrompt, Backend: names.Backend, Wrapper: names.Runtime, Agent: names.Agent, Tools: tools, Ceilings: ceilings, SessionDefaults: *cellninstall.SessionDefaults(ceilings)})
+		out = append(out, CellnPlatformProfile{Name: a.Profile.Name, Revision: a.Profile.Spec.Revision, Policy: a.Policy.Name, Model: connection.Spec.Models[0], Provider: connection.Spec.Provider, Endpoint: connection.Spec.Endpoint, CredentialProfile: connection.Spec.CredentialProfile, SystemPrompt: a.Profile.Spec.Native.SystemPrompt, Backend: names.Backend, Wrapper: names.Runtime, Agent: names.Agent, Tools: tools, Ceilings: ceilings, SessionDefaults: *cellninstall.SessionDefaultsFor(ceilings, &a.Profile)})
 	}
 	writeJSON(w, out)
 }

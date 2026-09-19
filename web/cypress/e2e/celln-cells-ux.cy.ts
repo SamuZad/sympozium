@@ -351,6 +351,102 @@ describe("Create Agent on a fleet with several backends", () => {
       .and("have.attr", "title", '{"chat_template_kwargs":{"enable_thinking":false}}');
   });
 
+  // A reasoning model left thinking needs more than Celln's 512 output tokens
+  // per request; the fleet backend may allow up to 4096, at 6× that per turn.
+  it("sends max output tokens per request with a new fleet backend, refuses a value out of range, and shows the API's warning", () => {
+    const added = { ...profile("custom", "qwq"), endpoint: "https://models.example/v1/chat/completions" };
+    const listed = { name: "custom", provider: "custom", protocol: "openai-chat", endpoint: added.endpoint, model: added.model, allowInsecure: false, maxOutputTokens: 4096, source: "added", profile: added.name };
+    const warning = "a turn on backend custom reserves 24576 output tokens (6 requests × 4096), and this fleet's ceilings (1536 model requests, 786432 output tokens per conversation) pay for 32 such turns, fewer than the usual 64.";
+    let posts = 0;
+    cy.intercept("POST", "**/api/v1/celln-platform/backends*", (request) => {
+      posts++;
+      expect(request.body).to.deep.include({ name: "custom", provider: "custom", model: "qwq", protocol: "openai-chat", maxOutputTokens: 4096 });
+      expect(request.body).not.to.have.property("parameters");
+      request.reply({ statusCode: 202, body: { ...listed, warning, state: "pending: waiting for the nodes to configure it" } });
+    }).as("add");
+    cy.intercept("GET", "**/api/v1/celln-platform/backends*", (request) => request.reply({ body: posts ? [{ ...listed, state: "ready" }] : [] }));
+    cy.intercept("GET", "**/api/v1/celln-platform/profiles*", (request) => request.reply({ body: posts ? [...profiles, added] : profiles }));
+
+    openToolsStep();
+    cy.get('[role="dialog"]').contains("button", "Next").click();
+    cy.get('[data-testid="platform-model-route"] button[role=combobox]').first().click();
+    cy.get("[role=option]").contains("Custom").click();
+    cy.get('[data-testid="celln-provider-add-backend"]').within(() => {
+      cy.contains("label", "Model").find("input").type("qwq");
+      cy.contains("label", "Chat endpoint").find("input").type("https://models.example/v1");
+      cy.get("input[type=password]").type("sk-test-credential-000000001");
+      cy.contains("summary", "Advanced: model parameters and output tokens").click();
+      cy.get('[data-testid="celln-max-output-tokens"]').should("have.attr", "placeholder", "512").and("have.attr", "min", "256").and("have.attr", "max", "4096").and("have.value", "");
+      cy.get('[data-testid="celln-max-output-tokens-guidance"]').should("contain", "512 suits chat with thinking disabled.")
+        .and("contain", "A reasoning model left thinking needs 2048–4096, which costs 4–8× the tokens per turn and may exceed the 60-second turn limit on a slow local model.");
+      cy.get('[data-testid="celln-turn-reservation"]').should("have.text", "one turn reserves 3072 tokens (6 requests)");
+
+      // Out of range: the rule inline, no computed line, and nothing is posted.
+      for (const bad of ["255", "4097", "12.5"]) {
+        cy.get('[data-testid="celln-max-output-tokens"]').clear().type(bad);
+        cy.get('[data-testid="celln-max-output-tokens-error"]').should("have.text", "max output tokens per request must be a whole number from 256 to 4096 (leave it blank for the default 512)");
+        cy.get('[data-testid="celln-turn-reservation"]').should("not.exist");
+      }
+      cy.contains("button", "Add to the fleet").click();
+      cy.contains('[role="alert"]', "Fix the max output tokens per request first.").should("be.visible");
+      cy.then(() => expect(posts).to.equal(0));
+
+      cy.get('[data-testid="celln-max-output-tokens"]').clear().type("2048");
+      cy.get('[data-testid="celln-max-output-tokens-error"]').should("not.exist");
+      cy.get('[data-testid="celln-turn-reservation"]').should("have.text", "one turn reserves 12288 tokens (6 requests)");
+      cy.get('[data-testid="celln-max-output-tokens"]').clear().type("4096");
+      cy.get('[data-testid="celln-turn-reservation"]').should("have.text", "one turn reserves 24576 tokens (6 requests)");
+      cy.contains("button", "Add to the fleet").click();
+    });
+    cy.wait("@add").its("request.body.maxOutputTokens").should("equal", 4096);
+    cy.then(() => expect(posts).to.equal(1));
+    cy.get('[data-testid="fleet-backend-warning"]').should("contain", "Added, with a warning").and("contain", "pay for 32 such turns, fewer than the usual 64");
+
+    // Bound once ready; the fixed-model line names the raised cap.
+    cy.get('[data-testid="fleet-backend-model"]', { timeout: 15000 }).should("contain", "Model: qwq — fixed by fleet backend custom");
+    cy.get('[data-testid="fleet-backend-max-output-tokens"]').should("have.text", "up to 4096 output tokens per request")
+      .and("have.attr", "title", "one turn reserves 24576 tokens (6 requests)");
+    cy.get('[data-testid="fleet-backend-parameters"]').should("not.exist");
+  });
+
+  it("lists a fleet backend's max output tokens on the Harness tab only when not the default, and sends nothing for 512", () => {
+    cy.intercept("GET", "**/api/v1/agents/hermes*", { body: hermes });
+    cy.intercept("GET", "**/api/v1/celln-platform/backends*", {
+      body: [
+        { name: "native", provider: "deepseek", protocol: "openai-chat", endpoint: "https://api.deepseek.com/chat/completions", model: "deepseek-chat", allowInsecure: false, source: "install", profile: "celln-native-starter", state: "ready" },
+        { name: "thinker", provider: "llama-server", protocol: "openai-chat", endpoint: "http://framework:8080/v1/chat/completions", model: "qwq.gguf", allowInsecure: true, maxOutputTokens: 2048, source: "added", profile: "celln-native-starter-thinker", state: "ready" },
+      ],
+    });
+    cy.intercept("POST", "**/api/v1/celln-platform/backends*", (request) => {
+      expect(request.body).to.deep.include({ name: "plain", provider: "llama-server", endpoint: "http://framework:8080", allowInsecure: true });
+      expect(request.body).not.to.have.property("maxOutputTokens");
+      request.reply({ statusCode: 202, body: { name: "plain", provider: "llama-server", protocol: "openai-chat", endpoint: "http://framework:8080/v1/chat/completions", model: "qwq.gguf", allowInsecure: true, source: "added", profile: "p", state: "pending: waiting for the nodes to configure it" } });
+    }).as("add");
+    cy.visit("/agents/hermes?tab=harness#token=test-token");
+    cy.get('[data-testid="celln-backend-thinker-max-output-tokens"]').should("have.text", "up to 2048 output tokens per request");
+    cy.get('[data-testid="celln-backend-native"]').should("not.contain", "output tokens per request");
+
+    cy.get('[data-testid="celln-add-backend"]').within(() => {
+      cy.contains("button", "Add a backend").click();
+      cy.get("button[role=combobox]").click();
+    });
+    cy.get("[role=option]").contains("llama-server").click();
+    cy.get('[data-testid="celln-add-backend"]').within(() => {
+      cy.contains("label", "Name").find("input").clear().type("plain");
+      cy.contains("label", "Chat endpoint").find("input").type("http://framework:8080");
+      cy.contains("summary", "Advanced: model parameters and output tokens").click();
+      cy.get('[data-testid="celln-max-output-tokens"]').type("100");
+      cy.contains("button", "Add to the fleet").click();
+      cy.contains('[role="alert"]', "Fix the max output tokens per request first.").scrollIntoView().should("be.visible");
+      // The default, stated, is the same backend as one that never named it.
+      cy.get('[data-testid="celln-max-output-tokens"]').clear().type("512");
+      cy.get('[data-testid="celln-turn-reservation"]').should("have.text", "one turn reserves 3072 tokens (6 requests)");
+      cy.contains("button", "Add to the fleet").click();
+    });
+    cy.wait("@add");
+    cy.get('[data-testid="celln-add-backend-warning"]').should("not.exist");
+  });
+
   it("lists a fleet backend's model parameters on the Agent's Harness tab and offers the thinking switch for llama-server", () => {
     const thinkingOff = { chat_template_kwargs: { enable_thinking: false } };
     cy.intercept("GET", "**/api/v1/agents/hermes*", { body: hermes });

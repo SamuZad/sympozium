@@ -35,6 +35,13 @@ type CellnFleetBackend struct {
 	// Parameters are what the Celln host merges into every provider request
 	// of this backend; absent when it has none.
 	Parameters map[string]any `json:"parameters,omitempty"`
+	// MaxOutputTokens is the backend's output cap per model request; absent
+	// when it is Celln's default (512). A turn reserves 6 requests of it.
+	MaxOutputTokens int64 `json:"maxOutputTokens,omitempty"`
+	// Warning is set on the answer to an add when the new backend's turns
+	// cost more than the scope's ceilings were sized for, so conversations on
+	// it get fewer turns than the usual session.
+	Warning string `json:"warning,omitempty"`
 	// Source is install (the chart's list) or added (through this API).
 	Source string `json:"source"`
 	// Profile is the runtime profile every namespace's wrapper binds to.
@@ -63,6 +70,13 @@ type AddCellnFleetBackendRequest struct {
 	// They need a Celln newer than v0.5.22 on the nodes and cannot change once
 	// the backend exists.
 	Parameters map[string]any `json:"parameters,omitempty"`
+	// MaxOutputTokens is the most output tokens one model request of this
+	// backend may produce (cellninstall.ValidateModelMaxOutputTokens: 256–4096,
+	// absent or 0 for Celln's default 512). A turn reserves 6 requests of it
+	// from the scope's ceilings. A non-default value needs a Celln newer than
+	// v0.5.23 on the nodes and a starter package built by it, and cannot
+	// change once the backend exists.
+	MaxOutputTokens int64 `json:"maxOutputTokens,omitempty"`
 }
 
 const extraBackendCompletionTimeout = 25 * time.Minute
@@ -94,7 +108,7 @@ func (s *Server) listCellnFleetBackends(w http.ResponseWriter, r *http.Request) 
 		if present[profile] {
 			state = "ready"
 		}
-		out = append(out, CellnFleetBackend{Name: b.Name, Provider: b.Provider, Protocol: b.Protocol, Endpoint: b.Endpoint, Model: b.Model, AllowInsecure: b.AllowInsecure, Parameters: b.Parameters, Source: "install", Profile: profile, State: state})
+		out = append(out, CellnFleetBackend{Name: b.Name, Provider: b.Provider, Protocol: b.Protocol, Endpoint: b.Endpoint, Model: b.Model, AllowInsecure: b.AllowInsecure, Parameters: b.Parameters, MaxOutputTokens: b.MaxOutputTokens, Source: "install", Profile: profile, State: state})
 	}
 	for _, b := range extra {
 		profile := cellninstall.PlatformProfileName(facts.Scope, b.Name)
@@ -104,7 +118,7 @@ func (s *Server) listCellnFleetBackends(w http.ResponseWriter, r *http.Request) 
 		} else if state == "" {
 			state = "pending: waiting for the nodes to configure it"
 		}
-		out = append(out, CellnFleetBackend{Name: b.Name, Provider: b.Provider, Protocol: b.Protocol, Endpoint: b.Endpoint, Model: b.Model, AllowInsecure: b.AllowInsecure, Parameters: b.Parameters, Source: "added", Profile: profile, State: state})
+		out = append(out, CellnFleetBackend{Name: b.Name, Provider: b.Provider, Protocol: b.Protocol, Endpoint: b.Endpoint, Model: b.Model, AllowInsecure: b.AllowInsecure, Parameters: b.Parameters, MaxOutputTokens: b.MaxOutputTokens, Source: "added", Profile: profile, State: state})
 	}
 	writeJSON(w, out)
 }
@@ -128,7 +142,22 @@ func (s *Server) addCellnFleetBackend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	model := cellninstall.FleetModel{Provider: strings.TrimSpace(req.Provider), Protocol: req.Protocol, Endpoint: strings.TrimSpace(req.Endpoint), Name: strings.TrimSpace(req.Model), AllowInsecure: req.AllowInsecure, Parameters: req.Parameters}
+	if err := cellninstall.ValidateModelMaxOutputTokens(req.MaxOutputTokens); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	// The scope's one policy was sized at install. A backend whose single
+	// turn it cannot pay for would be refused by every node; one it pays for
+	// fewer turns of than the usual session is added with a warning.
+	warning := ""
+	if ceilings, ok := s.cellnFleetCeilings(r.Context(), facts.Scope); ok {
+		if turn := cellninstall.TurnOutputTokensFor(req.MaxOutputTokens); ceilings.MaxOutputTokens < turn {
+			http.Error(w, fmt.Sprintf("max output tokens %d per request makes one turn reserve %d output tokens (6 requests), more than the %d this fleet allows one conversation; choose at most %d, or raise the fleet's ceilings ('sympozium doctor' shows how)", cellninstall.EffectiveModelMaxOutputTokens(req.MaxOutputTokens), turn, ceilings.MaxOutputTokens, ceilings.MaxOutputTokens/api.TurnModelRequests), http.StatusBadRequest)
+			return
+		}
+		warning = cellninstall.FewerSessionTurnsWarning(req.Name, req.MaxOutputTokens, ceilings)
+	}
+	model := cellninstall.FleetModel{Provider: strings.TrimSpace(req.Provider), Protocol: req.Protocol, Endpoint: strings.TrimSpace(req.Endpoint), Name: strings.TrimSpace(req.Model), AllowInsecure: req.AllowInsecure, Parameters: req.Parameters, MaxOutputTokens: req.MaxOutputTokens}
 	// An OpenAI-compatible server given only by its address names its own
 	// model; a local llama-server serves exactly one.
 	if model.Name == "" && model.Endpoint != "" && (model.Protocol == "" || model.Protocol == "openai-chat") {
@@ -177,15 +206,28 @@ func (s *Server) addCellnFleetBackend(w http.ResponseWriter, r *http.Request) {
 	if complete == nil {
 		complete = s.completeCellnFleetBackend
 	}
-	go complete(req.Name, facts, len(resolved.Parameters) != 0)
+	go complete(req.Name, facts, cellninstall.HintForBackendModel(len(resolved.Parameters) != 0, resolved.MaxOutputTokens))
 	w.WriteHeader(http.StatusAccepted)
-	writeJSON(w, CellnFleetBackend{Name: req.Name, Provider: resolved.Provider, Protocol: resolved.Protocol, Endpoint: resolved.Endpoint, Model: resolved.Name, AllowInsecure: resolved.AllowInsecure, Parameters: resolved.Parameters, Source: "added", Profile: profile, State: "pending: waiting for the nodes to configure it"})
+	writeJSON(w, CellnFleetBackend{Name: req.Name, Provider: resolved.Provider, Protocol: resolved.Protocol, Endpoint: resolved.Endpoint, Model: resolved.Name, AllowInsecure: resolved.AllowInsecure, Parameters: resolved.Parameters, MaxOutputTokens: resolved.MaxOutputTokens, Warning: warning, Source: "added", Profile: profile, State: "pending: waiting for the nodes to configure it"})
+}
+
+// cellnFleetCeilings reads the ceilings of the scope's policy; false when the
+// policy is not there (yet), which leaves the judgement to the nodes.
+func (s *Server) cellnFleetCeilings(ctx context.Context, scope string) (api.CellnExecutionPolicyCeilings, bool) {
+	_, policyName, _ := cellninstall.PlatformCatalogueNames(scope)
+	var policy api.CellnExecutionPolicy
+	if err := s.client.Get(ctx, types.NamespacedName{Name: policyName}, &policy); err != nil {
+		return api.CellnExecutionPolicyCeilings{}, false
+	}
+	return policy.Spec.Ceilings, true
 }
 
 // completeCellnFleetBackend waits for the nodes to publish the added
 // backend's configuration, then installs its profile, route and wrappers
-// the way the installer does, recording progress on the extra list.
-func (s *Server) completeCellnFleetBackend(name string, facts cellninstall.FleetFacts, hasParameters bool) {
+// the way the installer does, recording progress on the extra list. cellnHint
+// is the Celln release the backend's settings need, named if the nodes never
+// publish it.
+func (s *Server) completeCellnFleetBackend(name string, facts cellninstall.FleetFacts, cellnHint string) {
 	ctx, cancel := context.WithTimeout(context.Background(), extraBackendCompletionTimeout)
 	defer cancel()
 	record := func(state string) {
@@ -228,8 +270,8 @@ func (s *Server) completeCellnFleetBackend(name string, facts cellninstall.Fleet
 		select {
 		case <-ctx.Done():
 			hint := ""
-			if hasParameters {
-				hint = "; " + cellninstall.ModelParametersCellnHint
+			if cellnHint != "" {
+				hint = "; " + cellnHint
 			}
 			fail(fmt.Errorf("the nodes did not publish backend %s within %s; check the celln-node-configure logs in celln-system%s", name, extraBackendCompletionTimeout, hint))
 			return

@@ -153,12 +153,13 @@ const defaultFleetTurns = 256
 
 // Bounds of the lifetime totals. The minima are one turn of the starter
 // profile's allowance (Celln refuses less when configuring a node); the
-// maxima are the CRD's.
+// maxima are the CRD's: for output tokens, 1024 turns of the largest per-turn
+// allowance a backend may have (api.MaxLifetimeOutputTokens).
 const (
 	MinFleetModelRequests = api.TurnModelRequests
 	MaxFleetModelRequests = 6144
 	MinFleetOutputTokens  = api.TurnOutputTokens
-	MaxFleetOutputTokens  = 3145728
+	MaxFleetOutputTokens  = api.MaxLifetimeOutputTokens
 )
 
 // DefaultFleetLimits favour long-running agents: a day-long parent with room
@@ -180,7 +181,9 @@ func TurnsAfforded(maxModelRequests, maxOutputTokens, turnRequests, turnTokens i
 	return min(maxModelRequests/turnRequests, maxOutputTokens/turnTokens)
 }
 
-// Resolve fills zero fields from the defaults and applies the CRD bounds.
+// Resolve fills zero fields from the defaults and applies the CRD bounds, for
+// backends with the default per-turn allowance; ResolveFor sizes and checks
+// them for the backends a scope is installed with.
 func (l FleetLimits) Resolve() (FleetLimits, error) {
 	d := DefaultFleetLimits
 	if l.LeaseSeconds == 0 {
@@ -214,6 +217,13 @@ type FleetModel struct {
 	// need a Celln release newer than ModelParametersMinCelln on the nodes and
 	// cannot change once the backend is published.
 	Parameters map[string]any
+	// MaxOutputTokens is the most output tokens one model request of this
+	// backend may produce (ValidateModelMaxOutputTokens); 0 keeps Celln's
+	// default, DefaultModelMaxOutputTokens. A turn reserves
+	// api.TurnModelRequests requests of it. A non-default value needs a Celln
+	// newer than ModelMaxOutputTokensMinCelln on the nodes and a starter
+	// package built by it, and cannot change once the backend is published.
+	MaxOutputTokens int64
 }
 
 // Fleet model provider presets.
@@ -276,6 +286,10 @@ func (m FleetModel) Resolve(scope string) (FleetModel, error) {
 	if len(m.Parameters) == 0 {
 		m.Parameters = nil
 	}
+	if err := ValidateModelMaxOutputTokens(m.MaxOutputTokens); err != nil {
+		return m, err
+	}
+	m.MaxOutputTokens = NormalModelMaxOutputTokens(m.MaxOutputTokens)
 	return m, nil
 }
 
@@ -344,7 +358,7 @@ func FleetValues(o FleetOptions) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	limits, err := o.Limits.Resolve()
+	limits, _, err := o.Limits.ResolveFor(backends)
 	if err != nil {
 		return nil, err
 	}
@@ -368,6 +382,12 @@ func FleetValues(o FleetOptions) ([]string, error) {
 		// the chart decodes it.
 		if parameters := ModelParametersJSON(b.Model.Parameters); parameters != "" {
 			values = append(values, prefix+"parameters="+strvalsEscape(parameters))
+		}
+		// Likewise the output cap: only a backend with a non-default one
+		// carries it (a Celln up to ModelMaxOutputTokensMinCelln refuses the
+		// plan field).
+		if b.Model.MaxOutputTokens != 0 {
+			values = append(values, fmt.Sprintf("%smaxOutputTokens=%d", prefix, b.Model.MaxOutputTokens))
 		}
 	}
 	return append(values,

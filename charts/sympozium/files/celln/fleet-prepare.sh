@@ -103,12 +103,15 @@ for backend in $backend_names; do
 	output="$FLEET_STATE/.configure-$hex-$backend-$$"
 	rm -rf "$output"
 	plan="$(mktemp "$FLEET_STATE/.plan-XXXXXX")"
-	# fleet-plan.py builds the plan; a backend's model parameters join it only
-	# when it has some.
+	# fleet-plan.py builds the plan; a backend's model parameters and its
+	# output cap per request join it only when the backend sets them.
 	python3 /etc/celln-fleet/fleet-plan.py "$package" "$FLEET_PACKAGE_HASH" "$FLEET_PRINCIPAL" "$backend" "$output" >"$plan"
 	if ! "$celln" --root "$root" starter-configure "$plan" --approve-starter-effects; then
 		if python3 /etc/celln-fleet/fleet-plan.py --has-parameters "$backend"; then
 			echo "backend $backend sets model parameters: they need a Celln release newer than v0.5.22 on this node (the celln-node-configure image carries it); an older Celln refuses a plan that names them, and a newer one refuses parameters that break its rules (see its message above)" >&2
+		fi
+		if python3 /etc/celln-fleet/fleet-plan.py --has-max-output-tokens "$backend"; then
+			echo "backend $backend sets max output tokens per request: that needs a Celln release newer than v0.5.23 on this node (the celln-node-configure image carries it) and a starter package built by it; an older Celln refuses a plan that names the field, and a newer one refuses a package built before it or host limits below one turn of 6 requests (see its message above)" >&2
 		fi
 		rm -f "$plan"
 		exit 1

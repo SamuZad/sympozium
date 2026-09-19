@@ -34,13 +34,17 @@
 {{- end }}
 {{- if not $backends }}
 {{- $legacyModel := $fleet.model | default dict }}
-{{- $backends = list (dict "name" "native" "provider" ($legacyModel.provider | default "") "protocol" ($legacyModel.protocol | default "") "endpoint" ($legacyModel.endpoint | default "") "model" ($legacyModel.name | default "") "allowInsecure" ($legacyModel.allowInsecure | default false) "parameters" ($legacyModel.parameters | default dict)) }}
+{{- $backends = list (dict "name" "native" "provider" ($legacyModel.provider | default "") "protocol" ($legacyModel.protocol | default "") "endpoint" ($legacyModel.endpoint | default "") "model" ($legacyModel.name | default "") "allowInsecure" ($legacyModel.allowInsecure | default false) "parameters" ($legacyModel.parameters | default dict) "maxOutputTokens" ($legacyModel.maxOutputTokens | default 0)) }}
 {{- end }}
 {{- if gt (len $backends) 32 }}
 {{- fail "celln.fleet.backends allows at most 32 model backends per scope" }}
 {{- end }}
 {{- $backendNames := dict }}
 {{- $backendExport := list }}
+{{- /* What one turn of the costliest backend reserves: 6 model requests of
+     its output cap (512 unless the backend sets maxOutputTokens). */}}
+{{- $costliestTurn := int64 3072 }}
+{{- $costliestBackend := "" }}
 {{- range $b := $backends }}
 {{- $name := $b.name | default "" }}
 {{- if or (not (regexMatch "^[a-z0-9][a-z0-9-]{0,31}$" $name)) (hasKey $backendNames $name) }}
@@ -80,12 +84,33 @@
 {{- end }}
 {{- $_ := set $export "parameters" $parameters }}
 {{- end }}
+{{- /* Output tokens per model request: exported only when set and not
+     Celln's default of 512, for the same reason. A turn reserves 6 requests
+     of it, so the scope's lifetime ceiling must pay for at least one. */}}
+{{- $maxOutputTokens := int64 ($b.maxOutputTokens | default 0) }}
+{{- if and (ne $maxOutputTokens 0) (ne $maxOutputTokens 512) }}
+{{- if or (lt $maxOutputTokens 256) (gt $maxOutputTokens 4096) }}
+{{- fail (printf "celln.fleet.backends[%s].maxOutputTokens must be 256-4096 (omit it for the default 512)" $name) }}
+{{- end }}
+{{- if not $endpoint }}
+{{- fail (printf "celln.fleet.backends[%s].maxOutputTokens needs the backend's endpoint, provider, model and protocol" $name) }}
+{{- end }}
+{{- $_ := set $export "maxOutputTokens" $maxOutputTokens }}
+{{- if gt (mul 6 $maxOutputTokens) $costliestTurn }}
+{{- $costliestTurn = mul 6 $maxOutputTokens }}
+{{- $costliestBackend = $name }}
+{{- end }}
+{{- end }}
 {{- $backendExport = append $backendExport $export }}
 {{- end }}
 {{- $limits := $fleet.limits | default dict }}
 {{- $lease := int64 ($limits.leaseSeconds | default 0) }}
 {{- if and (ne $lease 0) (or (lt $lease 60) (gt $lease 86400)) }}
 {{- fail "celln.fleet.limits.leaseSeconds must be 60-86400" }}
+{{- end }}
+{{- $lifetimeTokens := int64 ($limits.maxOutputTokens | default 0) }}
+{{- if and $costliestBackend (ne $lifetimeTokens 0) (lt $lifetimeTokens $costliestTurn) }}
+{{- fail (printf "celln.fleet.limits.maxOutputTokens (%d) does not pay for one turn of backend %s, which reserves %d (6 requests x its maxOutputTokens); size it as turns x %d" $lifetimeTokens $costliestBackend $costliestTurn $costliestTurn) }}
 {{- end }}
 {{- $capacity := $fleet.capacity | default "auto" }}
 {{- if not (has $capacity (list "auto" "fixed")) }}

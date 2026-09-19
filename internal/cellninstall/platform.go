@@ -28,14 +28,25 @@ const (
 	sessionTurns        = 64
 )
 
-// SessionDefaults is the budget a new conversation asks for: a working
-// session that stays well inside the scope's ceilings — a four-hour parent
-// with 64 turns and the starter profile's per-turn allowance
-// (api.TurnModelRequests, api.TurnOutputTokens) for each, because every turn
-// reserves that whole allowance from the totals — capped by the ceilings
-// themselves.
+// SessionDefaults is the budget a new conversation asks for on a profile
+// with the current starter package's per-turn allowance
+// (api.TurnModelRequests, api.TurnOutputTokens); SessionDefaultsFor takes the
+// allowance of one runtime profile.
 func SessionDefaults(ceilings api.EnduringRunSpec) *api.EnduringRunSpec {
-	return &api.EnduringRunSpec{LeaseSeconds: min(sessionLeaseSeconds, ceilings.LeaseSeconds), MaxTurns: min(sessionTurns, ceilings.MaxTurns), MaxModelRequests: min(sessionTurns*api.TurnModelRequests, ceilings.MaxModelRequests), MaxOutputTokens: min(sessionTurns*api.TurnOutputTokens, ceilings.MaxOutputTokens)}
+	return SessionDefaultsAt(ceilings, api.TurnModelRequests, api.TurnOutputTokens)
+}
+
+// SessionDefaultsAt is a working session that stays well inside the scope's
+// ceilings: a four-hour parent with the largest turn count up to 64 whose
+// model requests and output tokens the ceilings pay for, because every turn
+// reserves the whole per-turn allowance from the totals. Ceilings that pay for
+// less than one turn yield one turn capped by the ceilings themselves.
+func SessionDefaultsAt(ceilings api.EnduringRunSpec, turnRequests, turnTokens int64) *api.EnduringRunSpec {
+	if turnRequests < 1 || turnTokens < 1 {
+		turnRequests, turnTokens = api.TurnModelRequests, api.TurnOutputTokens
+	}
+	turns := max(1, min(int64(sessionTurns), int64(ceilings.MaxTurns), TurnsAfforded(int64(ceilings.MaxModelRequests), ceilings.MaxOutputTokens, turnRequests, turnTokens)))
+	return &api.EnduringRunSpec{LeaseSeconds: min(sessionLeaseSeconds, ceilings.LeaseSeconds), MaxTurns: int32(turns), MaxModelRequests: int32(min(turns*turnRequests, int64(ceilings.MaxModelRequests))), MaxOutputTokens: min(turns*turnTokens, ceilings.MaxOutputTokens)}
 }
 
 // ScopeLabel opts a namespace into a scope in strict ("labeled") mode; the
@@ -335,7 +346,7 @@ func InstallPlatform(ctx context.Context, store client.Client, o PlatformOptions
 		AgentRef: wrapperNames.Agent, Backend: "celln", ExecutionLifecycle: "enduring", SystemPrompt: sample.cat.SystemPrompt, Cleanup: "delete",
 		Model:          api.ModelSpec{ConnectionRef: wrapperNames.Connection, Model: sample.configured.Model.Model},
 		CellnSelection: &api.CellnCatalogueSelection{RuntimeRef: wrapperNames.Runtime, ToolRefs: []api.CellnCatalogueToolRef{}, ClusterToolRefs: clusterRefs},
-		Enduring:       SessionDefaults(limits),
+		Enduring:       SessionDefaultsFor(limits, profiles[sample.name]),
 		Task:           api.NewStringTask("Write violet to notes.txt using workspace-write with revision 0. Make exactly that one tool call, then reply done."),
 	}}
 	if err := write("run.json", run); err != nil {

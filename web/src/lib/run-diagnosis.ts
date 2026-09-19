@@ -82,6 +82,18 @@ function thinkingOffStep(run: AgentRun): DiagnosisStep {
     "On the Harness tab, add a fleet backend for the same server and tick “Disable thinking (reasoning models)” under “Advanced: model parameters” (it sends {\"chat_template_kwargs\":{\"enable_thinking\":false}} with every request; other providers take their own switch in the JSON parameters). Parameters of an existing fleet backend cannot change, so add it under a new name and move the Agent to it.");
 }
 
+/** The other remedy for a reasoning model that returns nothing: a fleet backend that allows more output tokens per request. */
+function raiseOutputTokensStep(run: AgentRun): DiagnosisStep {
+  return harnessStep(run, "Or use a fleet backend with more output tokens per request",
+    "To keep the model thinking, add a fleet backend for the same server with “Max output tokens per request” raised under “Advanced” (2048–4096 for a reasoning model; the default is 512). A turn reserves 6 requests of it, so it costs 4–8× the tokens per turn, buys fewer turns under the fleet's ceilings, and may exceed the 60-second turn limit on a slow local model. It needs a fleet on a Celln newer than v0.5.23, and an existing fleet backend cannot change, so add it under a new name and move the Agent to it.");
+}
+
+/** The remedy for an answer longer than the answer size bound when the backend's output cap was raised. */
+function lowerOutputTokensStep(run: AgentRun): DiagnosisStep {
+  return harnessStep(run, "Or use a fleet backend with fewer output tokens per request",
+    "A fleet backend whose “Max output tokens per request” was raised lets the model write more than an answer may hold. On the Harness tab, add a fleet backend for the same server with a lower value (the default 512 always fits) and move the Agent to it; an existing fleet backend cannot change.");
+}
+
 const replaceRunStep: DiagnosisStep = {
   label: "Delete this run, then start a new one",
   detail: "A run keeps the selection it was created with, so the fix only reaches a new run. Delete this pending one first so two runs never compete for the same admission.",
@@ -394,7 +406,18 @@ export const HARNESS_ERRORS: HarnessEntry[] = [
     cause: "The model used the whole output budget of a request without writing an answer, so no result was committed. Celln allows 512 output tokens per model request; a reasoning model (Qwen, DeepSeek-R1 and the like) can spend them all thinking and return nothing.",
     steps: (run, initial) => [
       thinkingOffStep(run),
+      raiseOutputTokensStep(run),
       retryStep(run, initial, "Then send the message again", "Nothing was committed, so the turn is not replayed automatically. Rephrasing alone rarely helps while the model still thinks first."),
+    ],
+  },
+  {
+    // A Celln newer than v0.5.23 names the over-long answer on its own.
+    match: /final answer exceeds/i,
+    title: "Turn failed: the answer was too long",
+    cause: "The agent's final answer exceeded the turn's answer size bound, so no result was committed. A fleet backend that allows many output tokens per request lets the model write more than an answer may hold.",
+    steps: (run, initial) => [
+      retryStep(run, initial, "Ask for a shorter answer", "Ask for a summary, a fixed number of bullet points, or one part at a time."),
+      lowerOutputTokensStep(run),
     ],
   },
   {
@@ -404,6 +427,7 @@ export const HARNESS_ERRORS: HarnessEntry[] = [
     steps: (run, initial) => [
       retryStep(run, initial, "Ask for a shorter answer", "Ask for a summary, a fixed number of bullet points, or one part at a time."),
       thinkingOffStep(run),
+      raiseOutputTokensStep(run),
       { label: "If answers are routinely cut", detail: "The answer size bound is fixed by the fleet's Celln starter package, not by this conversation's budget. A fleet still on an older package has a smaller bound until its operator moves it to a current one." },
     ],
   },

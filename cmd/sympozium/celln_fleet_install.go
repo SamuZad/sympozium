@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,6 +24,12 @@ type cellnFleetFlags struct {
 	skipPreflight bool
 	// modelParametersFile is the single-backend form of parameters-file=.
 	modelParametersFile string
+	// modelMaxOutputTokens is the single-backend form of max-output-tokens=.
+	modelMaxOutputTokens int64
+	// outputTokensCeilingSet reports whether the operator passed
+	// --celln-fleet-max-output-tokens; unset, the ceiling is sized for the
+	// most expensive backend. Nil (tests) treats a non-zero limit as given.
+	outputTokensCeilingSet func() bool
 	// replacePackage approves moving an installed scope to another package
 	// or scope, which ends every live parent on the fleet.
 	replacePackage bool
@@ -52,11 +59,13 @@ func (f *cellnFleetFlags) register(cmd *cobra.Command) {
 	cmd.Flags().Int64Var(&f.options.Limits.LeaseSeconds, "celln-fleet-max-lease-seconds", cellninstall.DefaultFleetLimits.LeaseSeconds, "Longest a parent may live (60–86400); the policy ceiling every run in the scope is admitted under")
 	cmd.Flags().Int64Var(&f.options.Limits.MaxTurns, "celln-fleet-max-turns", cellninstall.DefaultFleetLimits.MaxTurns, "Most turns one parent may take (1–1024)")
 	cmd.Flags().Int64Var(&f.options.Limits.MaxModelRequests, "celln-fleet-max-model-requests", cellninstall.DefaultFleetLimits.MaxModelRequests, fmt.Sprintf("Most model requests one parent may make over its life (%d–%d); every turn reserves %d, so size it as turns × %d", cellninstall.MinFleetModelRequests, cellninstall.MaxFleetModelRequests, sympoziumv1alpha1.TurnModelRequests, sympoziumv1alpha1.TurnModelRequests))
-	cmd.Flags().Int64Var(&f.options.Limits.MaxOutputTokens, "celln-fleet-max-output-tokens", cellninstall.DefaultFleetLimits.MaxOutputTokens, fmt.Sprintf("Most model output tokens one parent may consume over its life (%d–%d); every turn reserves %d, so size it as turns × %d", cellninstall.MinFleetOutputTokens, cellninstall.MaxFleetOutputTokens, sympoziumv1alpha1.TurnOutputTokens, sympoziumv1alpha1.TurnOutputTokens))
+	cmd.Flags().Int64Var(&f.options.Limits.MaxOutputTokens, "celln-fleet-max-output-tokens", cellninstall.DefaultFleetLimits.MaxOutputTokens, fmt.Sprintf("Most model output tokens one parent may consume over its life (%d–%d); every turn reserves %d requests × the backend's max output tokens per request (%d by default, up to %d), so size it as turns × that for the most expensive backend. Left unset it is %d turns × the most expensive backend's turn", cellninstall.MinFleetOutputTokens, cellninstall.MaxFleetOutputTokens, sympoziumv1alpha1.TurnModelRequests, sympoziumv1alpha1.TurnOutputTokens, sympoziumv1alpha1.MaxTurnOutputTokens, cellninstall.DefaultFleetLimits.MaxTurns))
+	f.outputTokensCeilingSet = func() bool { return cmd.Flags().Changed("celln-fleet-max-output-tokens") }
+	cmd.Flags().Int64Var(&f.modelMaxOutputTokens, "celln-fleet-model-max-output-tokens", 0, fmt.Sprintf("Most output tokens one model request of the default backend may produce (%d–%d; default %d). %d suits chat with thinking disabled; a reasoning model left thinking needs 2048–4096, which costs 4–8× the tokens per turn. Needs a Celln newer than %s on the nodes and a starter package built by it; cannot change once the backend is published", cellninstall.MinModelMaxOutputTokens, cellninstall.MaxModelMaxOutputTokens, cellninstall.DefaultModelMaxOutputTokens, cellninstall.DefaultModelMaxOutputTokens, cellninstall.ModelMaxOutputTokensMinCelln))
 	cmd.Flags().StringVar(&f.authorise, "celln-fleet-authorise", "all", "Which namespaces may run on the fleet: 'all' (every namespace except kube-*, cert-manager, the control-plane namespaces and namespaces labeled celln.sympozium.ai/excluded) or 'labeled' (only namespaces labeled celln.sympozium.ai/scope=<scope>)")
 	cmd.Flags().StringVar(&f.options.ModelCredentialFile, "celln-fleet-model-credential-file", "", "Local file holding the default backend's provider credential to publish once as a Secret in celln-system (omit to keep an existing Secret; not needed for llama-server)")
 	cmd.Flags().StringVar(&f.modelParametersFile, "celln-fleet-model-parameters-file", "", "Absolute path of a JSON object the Celln host merges into every provider request of the default backend, e.g. {\"chat_template_kwargs\":{\"enable_thinking\":false}} for a reasoning model on llama-server (needs a Celln newer than "+cellninstall.ModelParametersMinCelln+" on the nodes; cannot change once the backend is published)")
-	cmd.Flags().StringArrayVar(&f.backendSpecs, "celln-fleet-backend", nil, "A model backend of this fleet, repeatable: name=NAME,provider=PROVIDER,model=MODEL[,endpoint=URL][,protocol=openai-chat|anthropic-messages][,credential-file=/path][,allow-insecure=true][,parameters-file=/abs/path.json] (parameters-file: a JSON object the Celln host merges into every provider request of the backend). Every node configures every backend and a namespace may run parents on any of them side by side. Without this flag the --celln-fleet-model-* flags define the single backend named native")
+	cmd.Flags().StringArrayVar(&f.backendSpecs, "celln-fleet-backend", nil, "A model backend of this fleet, repeatable: name=NAME,provider=PROVIDER,model=MODEL[,endpoint=URL][,protocol=openai-chat|anthropic-messages][,credential-file=/path][,allow-insecure=true][,parameters-file=/abs/path.json][,max-output-tokens=N] (parameters-file: a JSON object the Celln host merges into every provider request of the backend; max-output-tokens: most output tokens per model request, 256–4096, default 512). Every node configures every backend and a namespace may run parents on any of them side by side. Without this flag the --celln-fleet-model-* flags define the single backend named native")
 	cmd.Flags().StringArrayVar(&f.options.HTTPSHosts, "celln-fleet-https-host", nil, "An exact host the https-fetch and https-post-json starter tools may reach, repeatable (lowercase DNS name; default example.com). Every backend's nodes configure the same list")
 	cmd.Flags().BoolVar(&f.skipPreflight, "celln-fleet-skip-preflight", false, "Skip the one-token chat probe of every backend with its key (use when only the nodes can reach the endpoint)")
 	cmd.Flags().BoolVar(&f.replacePackage, "celln-fleet-replace-package", false, "Approve moving an installed fleet to this package or scope (e.g. after upgrading to a sympozium release whose starter package inputs changed; most releases keep the package): nodes publish the new configuration, the scope's catalogue is replaced and every namespace's platform wrappers are rebound. Every live parent on the fleet is lost")
@@ -72,34 +81,8 @@ func installCellnFleet(ctx context.Context, f cellnFleetFlags, imageTag string, 
 	if !approve && !f.defaulted {
 		return fmt.Errorf("--celln-fleet requires --celln-native-approve-starter-tools: grants include %s", starterToolGrants)
 	}
-	backends, err := parseFleetBackends(f.backendSpecs)
-	if err != nil {
+	if err := f.applyBackendFlags(); err != nil {
 		return err
-	}
-	f.options.Backends = append(f.options.Backends, backends...)
-	if f.modelParametersFile != "" {
-		if len(f.backendSpecs) != 0 {
-			return fmt.Errorf("--celln-fleet-model-parameters-file configures the single --celln-fleet-model-* backend; with --celln-fleet-backend give parameters-file=/abs/path.json in the backend's spec")
-		}
-		parameters, err := cellninstall.ReadModelParametersFile(f.modelParametersFile)
-		if err != nil {
-			return fmt.Errorf("--celln-fleet-model-parameters-file: %w", err)
-		}
-		if len(f.options.Backends) == 0 {
-			f.options.Model.Parameters = parameters
-		} else {
-			// A bare install took its backends from the environment or a prompt;
-			// the flag applies to the default one.
-			applied := false
-			for i := range f.options.Backends {
-				if f.options.Backends[i].Name == cellnplatform.DefaultBackend {
-					f.options.Backends[i].Model.Parameters, applied = parameters, true
-				}
-			}
-			if !applied {
-				return fmt.Errorf("--celln-fleet-model-parameters-file: this install has no backend named %s", cellnplatform.DefaultBackend)
-			}
-		}
 	}
 	if err := f.applyStarterDefaults(); err != nil {
 		return err
@@ -110,11 +93,18 @@ func installCellnFleet(ctx context.Context, f cellnFleetFlags, imageTag string, 
 	if err := materializeCredentials(f.options.Backends, nil, f.outputDir); err != nil {
 		return err
 	}
-	fleetValues, err := cellninstall.FleetValues(f.options)
+	resolved, err := f.options.ResolvedBackends()
 	if err != nil {
 		return err
 	}
-	resolved, err := f.options.ResolvedBackends()
+	sized, err := f.sizeLimits(resolved)
+	if err != nil {
+		return err
+	}
+	if sized != "" {
+		fmt.Println("  " + sized)
+	}
+	fleetValues, err := cellninstall.FleetValues(f.options)
 	if err != nil {
 		return err
 	}
@@ -228,8 +218,8 @@ func installCellnFleet(ctx context.Context, f cellnFleetFlags, imageTag string, 
 			if time.Now().After(deadline) {
 				hint := ""
 				for _, b := range resolved {
-					if len(b.Model.Parameters) != 0 {
-						hint = ". Backend " + b.Name + ": " + cellninstall.ModelParametersCellnHint
+					if reason := cellninstall.HintForBackendModel(len(b.Model.Parameters) != 0, b.Model.MaxOutputTokens); reason != "" {
+						hint = ". Backend " + b.Name + ": " + reason
 						break
 					}
 				}
@@ -303,6 +293,77 @@ func installCellnFleet(ctx context.Context, f cellnFleetFlags, imageTag string, 
 	return nil
 }
 
+// sizeLimits settles the scope's ceilings for its backends. One policy bounds
+// every backend, so the ceilings are sized and checked for the backend whose
+// turns cost most; the returned line says when the default was scaled.
+func (f *cellnFleetFlags) sizeLimits(resolved []cellninstall.FleetBackend) (string, error) {
+	if f.outputTokensCeilingSet != nil && !f.outputTokensCeilingSet() {
+		f.options.Limits.MaxOutputTokens = 0
+	}
+	limits, sized, err := f.options.Limits.ResolveFor(resolved)
+	if err != nil {
+		return "", err
+	}
+	f.options.Limits = limits
+	return sized, nil
+}
+
+// applyBackendFlags turns the backend flags into the install's backends:
+// every --celln-fleet-backend spec, then the single-backend settings that
+// have no place in the --celln-fleet-model-* route itself.
+func (f *cellnFleetFlags) applyBackendFlags() error {
+	backends, err := parseFleetBackends(f.backendSpecs)
+	if err != nil {
+		return err
+	}
+	f.options.Backends = append(f.options.Backends, backends...)
+	if f.modelParametersFile != "" {
+		if len(f.backendSpecs) != 0 {
+			return fmt.Errorf("--celln-fleet-model-parameters-file configures the single --celln-fleet-model-* backend; with --celln-fleet-backend give parameters-file=/abs/path.json in the backend's spec")
+		}
+		parameters, err := cellninstall.ReadModelParametersFile(f.modelParametersFile)
+		if err != nil {
+			return fmt.Errorf("--celln-fleet-model-parameters-file: %w", err)
+		}
+		if err := f.applyToDefaultBackend("--celln-fleet-model-parameters-file", func(m *cellninstall.FleetModel) { m.Parameters = parameters }); err != nil {
+			return err
+		}
+	}
+	if f.modelMaxOutputTokens != 0 {
+		if len(f.backendSpecs) != 0 {
+			return fmt.Errorf("--celln-fleet-model-max-output-tokens configures the single --celln-fleet-model-* backend; with --celln-fleet-backend give max-output-tokens=N in the backend's spec")
+		}
+		if err := cellninstall.ValidateModelMaxOutputTokens(f.modelMaxOutputTokens); err != nil {
+			return fmt.Errorf("--celln-fleet-model-max-output-tokens: %w", err)
+		}
+		if err := f.applyToDefaultBackend("--celln-fleet-model-max-output-tokens", func(m *cellninstall.FleetModel) { m.MaxOutputTokens = f.modelMaxOutputTokens }); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// applyToDefaultBackend applies a single-backend flag to the default backend:
+// the --celln-fleet-model-* route, or, when a bare install took its backends
+// from the environment or a prompt, the one named native.
+func (f *cellnFleetFlags) applyToDefaultBackend(flag string, apply func(*cellninstall.FleetModel)) error {
+	if len(f.options.Backends) == 0 {
+		apply(&f.options.Model)
+		return nil
+	}
+	applied := false
+	for i := range f.options.Backends {
+		if f.options.Backends[i].Name == cellnplatform.DefaultBackend {
+			apply(&f.options.Backends[i].Model)
+			applied = true
+		}
+	}
+	if !applied {
+		return fmt.Errorf("%s: this install has no backend named %s", flag, cellnplatform.DefaultBackend)
+	}
+	return nil
+}
+
 // parseFleetBackends parses repeated --celln-fleet-backend values of the form
 // key=value pairs separated by commas.
 func parseFleetBackends(specs []string) ([]cellninstall.FleetBackend, error) {
@@ -338,8 +399,20 @@ func parseFleetBackends(specs []string) ([]cellninstall.FleetBackend, error) {
 					return nil, fmt.Errorf("--celln-fleet-backend %q: %w", spec, err)
 				}
 				b.Model.Parameters = parameters
+			case "max-output-tokens":
+				tokens, err := strconv.ParseInt(value, 10, 64)
+				if err != nil {
+					return nil, fmt.Errorf("--celln-fleet-backend %q: max-output-tokens must be a whole number", spec)
+				}
+				if err := cellninstall.ValidateModelMaxOutputTokens(tokens); err != nil {
+					return nil, fmt.Errorf("--celln-fleet-backend %q: %w", spec, err)
+				}
+				if tokens == 0 {
+					return nil, fmt.Errorf("--celln-fleet-backend %q: max-output-tokens must be %d–%d (omit it for the default %d)", spec, cellninstall.MinModelMaxOutputTokens, cellninstall.MaxModelMaxOutputTokens, cellninstall.DefaultModelMaxOutputTokens)
+				}
+				b.Model.MaxOutputTokens = tokens
 			default:
-				return nil, fmt.Errorf("--celln-fleet-backend %q: unknown key %q (name, provider, model, endpoint, protocol, credential-file, credential-env, allow-insecure, parameters-file)", spec, key)
+				return nil, fmt.Errorf("--celln-fleet-backend %q: unknown key %q (name, provider, model, endpoint, protocol, credential-file, credential-env, allow-insecure, parameters-file, max-output-tokens)", spec, key)
 			}
 		}
 		if b.Name == "" {
