@@ -31,6 +31,18 @@ if [ "${#hex}" -ne 64 ] || [ -n "${hex//[0-9a-f]/}" ]; then
 	exit 1
 fi
 umask 077
+# The celln-node owner runs as root: its dispatcher privileged, its
+# wait-prepared init container without capabilities, so that one reads the
+# state only as the owning uid. A directory an older install left to another
+# uid (the single-plane parent ran as 10001) keeps it out for ever. Hand the two
+# directories it looks into back to root and keep them 0700: nothing but root
+# gains access, and the credential material below them is not touched.
+for dir in "$FLEET_STATE" "$root"; do
+	if [ -d "$dir" ] && [ "$(stat -c '%u:%g' "$dir")" != 0:0 ]; then
+		echo "resetting $dir from owner $(stat -c '%u:%g mode %a' "$dir") to 0:0 mode 700 so the celln-node pod can read it"
+		chown 0:0 "$dir"
+	fi
+done
 install -d -m 0700 "$FLEET_STATE" "$root" "$root/motes" "$root/tools" \
 	"$root/parent-issuance" "$root/trusted-parent-permits" "$root/trusted-parent-launches"
 

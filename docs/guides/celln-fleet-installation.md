@@ -494,6 +494,57 @@ journey on a three-node Kind cluster, including a node-leave drain.
   journal claim; remove them only after every run has been deleted and
   cleanup confirmed.
 
+## Troubleshooting an install
+
+On a machine that has been used before, start with `sympozium doctor`. It only
+reads, prints one `PASS`/`WARN`/`FAIL` line per check with the exact command
+that fixes each problem, and exits 1 when anything fails (`--json` for
+scripts). `sympozium install` runs the same leftover checks before it changes
+anything and stops with the complete list rather than failing part-way.
+
+- **`… exists and cannot be imported into the current release: invalid
+  ownership metadata`.** Objects of an older, partly removed install are in the
+  way, and Helm names only the first. `doctor` (check *Ownership*) lists every
+  one at once with a single remedy each: the `kubectl label`/`annotate` pair
+  that adopts it, or `kubectl delete`. `sympozium install --adopt-existing`
+  adopts the safe kinds for you (Namespace, ServiceAccount, ConfigMap, Secret,
+  Service, NetworkPolicy, PersistentVolumeClaim and the chart's own
+  `sympozium.ai` resources). Deployments, DaemonSets and other kinds are never
+  adopted, because an old spec may be incompatible: delete them and the chart
+  recreates them. An object another Helm release claims is never taken
+  automatically.
+- **A CRD or namespace stuck `Terminating`** (the install used to print only
+  `Detected changes to resource agentruns.sympozium.ai which is currently being
+  deleted`). Custom resources still hold a finalizer such as
+  `sympozium.ai/agentrun-finalizer` and no controller is left to remove it.
+  `doctor` (check *Terminating*) names each holder and prints its `kubectl patch
+  … '{"metadata":{"finalizers":null}}'` command. Clearing a finalizer skips
+  the controller's cleanup for that object, so only do it for an install that
+  is gone, and remove leftover run pods by hand.
+- **`celln-node` never starts and the install sits in its wait.** `doctor`
+  (check *Fleet pods*) reports an init container that has run for more than two
+  minutes, or is backing off, with its last log lines. The usual cause is a
+  state directory `/var/lib/sympozium-celln/<scope>` left by an older install
+  under another uid: `wait-prepared` now fails at once with `cannot read the
+  Celln state directory …`, naming the path, its owner and mode, instead of
+  waiting for ever, and `celln-node-configure` resets the owner to root (mode
+  0700, nothing opened to other users) on its next pass, after which the pod
+  starts by itself. If it does not, move the directory aside on the node
+  (`sudo mv /var/lib/sympozium-celln/<scope>{,.old}`) or `sudo chown 0:0` it;
+  with SELinux enforcing also `sudo chcon -R -t container_file_t` it.
+- **A CLI built from source ran an old installer image** (`error: exact
+  five-bundle starter package required`). A build without a release version
+  used to default the installer image to the mutable `latest` tag, which a
+  node may have cached months ago. It now uses the embedded chart's
+  `appVersion` (`v`-prefixed), like the control-plane images, and says so.
+  `--image-tag` still overrides the control-plane images and
+  `--celln-installer-image` the installer image.
+
+`doctor` also reports whether any node carries `celln.dev/kvm=true`, whether
+every model backend has its key in `celln-fleet-model-credentials`, and whether
+the published fleet package differs from the one this CLI installs, in which
+case the upgrade needs `--celln-fleet-replace-package` (next section).
+
 ## Moving to a new package or scope
 
 A Sympozium release carries a new starter package only when the package's
