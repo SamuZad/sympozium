@@ -37,7 +37,7 @@ const hermes = {
     execution: {
       backend: "celln", executionLifecycle: "enduring", modelConnectionRef: "celln-llama-server", model: "Qwen3.8-27B-UD-Q4_K_XL.gguf",
       cellnSelection: { runtimeRef: "celln-llama-server", toolRefs: [], clusterToolRefs: [{ name: "celln-starter-grep", revision: "v1" }] },
-      enduring: { leaseSeconds: 14400, maxTurns: 64, maxModelRequests: 192, maxOutputTokens: 98304 },
+      enduring: { leaseSeconds: 14400, maxTurns: 64, maxModelRequests: 384, maxOutputTokens: 196608 },
     },
   },
   status: { phase: "Running" },
@@ -176,8 +176,8 @@ describe("Create Agent on a fleet with several backends", () => {
     credentialProfile: `starter${backend === "native" ? "" : "-" + backend}`, systemPrompt: "Keep replies brief.",
     backend, wrapper: backend === "native" ? "celln-native" : `celln-${backend}`, agent: "celln-agent",
     tools: [{ name: "celln-starter-workspace-read", revision: "v1" }, { name: "celln-starter-grep", revision: "v1" }],
-    ceilings: { leaseSeconds: 86400, maxTurns: 256, maxModelRequests: 768, maxOutputTokens: 393216 },
-    sessionDefaults: { leaseSeconds: 14400, maxTurns: 64, maxModelRequests: 192, maxOutputTokens: 98304 },
+    ceilings: { leaseSeconds: 86400, maxTurns: 256, maxModelRequests: 1536, maxOutputTokens: 786432 },
+    sessionDefaults: { leaseSeconds: 14400, maxTurns: 64, maxModelRequests: 384, maxOutputTokens: 196608 },
   });
   const profiles = [profile("native", "deepseek-chat"), profile("llama-server", "Qwen3.8-27B-UD-Q4_K_XL.gguf")];
   const runtimeFor = (p: (typeof profiles)[number]) => ({

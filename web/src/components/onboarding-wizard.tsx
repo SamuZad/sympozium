@@ -48,7 +48,7 @@ import { PlanePicker } from "@/components/plane-picker";
 import { CellnProviderPicker } from "@/components/celln-provider-picker";
 import { useCapabilities, useModels, useCellnTools, useClusterCellnTools, useModelConnections, useCellnPlatformProfiles } from "@/hooks/use-api";
 import { persistentHarnesses, persistentHarnessName } from "@/lib/persistent-harness";
-import { modelConnectionName, modelConnectionEndpoint } from "@/lib/agent-execution";
+import { modelConnectionName, modelConnectionEndpoint, describeEnduringLimits, LEGACY_ENDURING_DEFAULTS } from "@/lib/agent-execution";
 import { api } from "@/lib/api";
 import type { WizardExecution } from "@/lib/agent-execution";
 import { BorrowedToolsStep } from "@/components/wizard/borrowed-tools-step";
@@ -2206,7 +2206,7 @@ export function OnboardingWizard({
                 {celln && <>
                   <p>Lifecycle: {form.executionLifecycle}</p>
                   <p>Borrowed tools: {(form.borrowedTools || []).map((tool) => `${tool.name}@${tool.revision}`).join(", ") || "none (explicit empty selection)"}</p>
-                  <p className="text-xs text-muted-foreground">This saves requested defaults, not grants. {form.executionLifecycle === "enduring" ? "Parent defaults: 600-second lease, 8 turns, 24 model requests, 8192 output tokens. Context and files are lost with the parent." : "Each run uses a disposable cell."}</p>
+                  <p className="text-xs text-muted-foreground">This saves requested defaults, not grants. {form.executionLifecycle === "enduring" ? `Parent defaults: ${describeEnduringLimits(form.enduringDefaults || LEGACY_ENDURING_DEFAULTS)}. Context and files are lost with the parent.` : "Each run uses a disposable cell."}</p>
                 </>}
               </div>}
               {mode === "agent" && (

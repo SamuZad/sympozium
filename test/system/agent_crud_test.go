@@ -84,9 +84,11 @@ func TestAgentGetViaAPI(t *testing.T) {
 		httpDo(t, http.MethodDelete, fmt.Sprintf("/api/v1/agents/%s?namespace=%s", name, ns), nil)
 	})
 
-	// GET via API.
-	rec = httpDo(t, http.MethodGet, fmt.Sprintf("/api/v1/agents/%s?namespace=%s", name, ns), nil)
-	requireStatus(t, rec, http.StatusOK)
+	// GET via API. The server reads through the manager's cache, which sees
+	// the new Agent only after its informer does.
+	pollUntil(t, 10*time.Second, 200*time.Millisecond, func() bool {
+		return httpDo(t, http.MethodGet, fmt.Sprintf("/api/v1/agents/%s?namespace=%s", name, ns), nil).Code == http.StatusOK
+	})
 
 	var agent sympoziumv1alpha1.Agent
 	agent, _ = httpJSON[sympoziumv1alpha1.Agent](t, http.MethodGet, fmt.Sprintf("/api/v1/agents/%s?namespace=%s", name, ns), nil)

@@ -379,9 +379,13 @@ remembers before you send anything.
 The same move is available on request: **Restart elsewhere** in the UI, or
 `POST /api/v1/runs/{name}/continue?namespace=…&uid=…`, creates the seeded
 continuation and deletes the old run (`keep=true` leaves it). Memory is
-bounded by the parent's turn context (about 2 KiB of text): a long
-conversation keeps its most recent exchanges, and only committed answers are
-remembered, never failed turns, tool output or instructions. A run with
+bounded by the worker task the fleet's starter package takes, which the
+scope's `CellnRuntimeProfile` reports as `spec.limits.taskBytes`: about
+15 KiB of text (16384 − 512 bytes, at most 16 exchanges) on a current
+package, about 1.5 KiB on an older one, whose guest refuses a larger seed
+and would fail to start. A long conversation keeps its most recent
+exchanges, and only committed answers are remembered, never failed turns,
+tool output or instructions. A run with
 `spec.conversation.continuation: none` is not re-created; a chain stops after
 16 automatic continuations.
 
@@ -395,17 +399,59 @@ every run and are configured on every node at install time:
 | --- | --- | --- |
 | `--celln-fleet-max-lease-seconds` | 86400 (24 h) | 60–86400 |
 | `--celln-fleet-max-turns` | 256 | 1–1024 |
-| `--celln-fleet-max-model-requests` | 768 | 3–6144 |
-| `--celln-fleet-max-output-tokens` | 393216 | 1536–3145728 |
+| `--celln-fleet-max-model-requests` | 1536 | 6–6144 |
+| `--celln-fleet-max-output-tokens` | 786432 | 3072–3145728 |
+
+One turn of the current starter package may make 6 model requests (up to 4
+tool calls, then an answer) and produce 3072 output tokens, and **every turn
+reserves that whole allowance** from the parent's lifetime totals whether or
+not it spends it. Size the totals as turns × allowance: the defaults are
+256 × 6 and 256 × 3072, and the minima are one turn's worth. Totals that
+afford fewer turns than `max-turns` end the conversation early, at
+`min(requests / 6, tokens / 3072)` turns.
+
+One message is at most 2048 bytes and one committed answer at most 8192
+bytes (2048 on a fleet still running an older starter package, where a
+longer answer is a failed turn).
 
 A new conversation asks for a working session inside those ceilings by
-default (four hours, 64 turns, 192 requests, 98304 tokens; the API reports
+default (four hours, 64 turns, 384 requests, 196608 tokens; the API reports
 them per profile as `sessionDefaults`). A run asking for more than a ceiling
 is refused with `AUTH_LIMIT_RANGE`. When a lease ends no new turn is admitted
 and the parent stops; the conversation view shows the deadline and asks for a
 new conversation. Leases are not extended in place. Every live parent holds
 two cells and its declared memory for its whole lease, so long defaults cost
 node capacity while conversations sit idle.
+
+### Ceilings sized for an older package
+
+Before the per-turn allowance doubled, a turn reserved 3 requests and 1536
+tokens, and the default ceilings were 768 requests and 393216 tokens for 256
+turns. Those totals buy **half the turns** at 6 and 3072: a conversation
+under them ends after 128 turns, and an Agent that saved the old session
+defaults (64 turns, 192 requests, 98304 tokens) ends after 32.
+
+Ceilings are configured on the nodes together with the package and are
+never rewritten for an unchanged package. They are rewritten when the scope
+moves to another package, which is how the current allowance arrives in the
+first place:
+
+```sh
+sympozium install --celln-fleet --celln-fleet-replace-package
+# or, to choose the totals yourself (turns × 6, turns × 3072):
+sympozium install --celln-fleet --celln-fleet-replace-package \
+  --celln-fleet-max-turns 512 --celln-fleet-max-model-requests 3072 \
+  --celln-fleet-max-output-tokens 1572864
+```
+
+The move takes the ceilings from the `--celln-fleet-max-*` flags (the new
+defaults when omitted), so passing the old totals explicitly keeps the
+shortfall. `sympozium doctor` reports it as **Fleet turn budget** with the
+turn a conversation would end at. Agents keep the budget they were saved
+with: raise `spec.execution.enduring.maxModelRequests` and `maxOutputTokens`
+on an Agent created before the move (the wizard offers the new session
+defaults for new ones). The alternative is to accept fewer turns; a
+conversation that runs out can be carried on with **Restart elsewhere**.
 
 ## Authorising namespaces
 

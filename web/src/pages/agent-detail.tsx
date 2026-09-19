@@ -66,6 +66,7 @@ import {
 } from "lucide-react";
 import { Breadcrumbs } from "@/components/breadcrumbs";
 import { useRunsSeen } from "@/hooks/use-runs-seen";
+import { LEGACY_ENDURING_DEFAULTS } from "@/lib/agent-execution";
 import {
   costTooltip,
   effectiveCost,
@@ -540,7 +541,7 @@ function AgentRuntimeCard({ inst, runtimes }: { inst: Agent; runtimes: import("@
   // Every save keeps the selection's runtime and shared tools; only the
   // borrowed (namespaced) tool list is what the card edits.
   const selectionWith = (toolRefs: typeof tools) => ({ ...(execution?.cellnSelection || {}), toolRefs });
-  const enduringDefaults = execution?.enduring || wrapperProfile?.sessionDefaults || { leaseSeconds: 600, maxTurns: 8, maxModelRequests: 24, maxOutputTokens: 8192 };
+  const enduringDefaults = execution?.enduring || wrapperProfile?.sessionDefaults || LEGACY_ENDURING_DEFAULTS;
   const runtimeLabel = (runtime: import("@/lib/api").AgentRuntime) => {
     const profile = runtime.spec.cellnProfileRef ? (platformProfiles.data || []).find((candidate) => candidate.name === runtime.spec.cellnProfileRef?.name) : undefined;
     if (profile) return `${runtime.metadata.name} — fleet backend ${backendLabel(profile)}`;

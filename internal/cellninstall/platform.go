@@ -22,12 +22,20 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// A new conversation's default session: a four-hour parent with 64 turns.
+const (
+	sessionLeaseSeconds = 14400
+	sessionTurns        = 64
+)
+
 // SessionDefaults is the budget a new conversation asks for: a working
 // session that stays well inside the scope's ceilings — a four-hour parent
-// with 64 turns and the starter profile's per-turn allowance (3 requests,
-// 1536 output tokens) for each — capped by the ceilings themselves.
+// with 64 turns and the starter profile's per-turn allowance
+// (api.TurnModelRequests, api.TurnOutputTokens) for each, because every turn
+// reserves that whole allowance from the totals — capped by the ceilings
+// themselves.
 func SessionDefaults(ceilings api.EnduringRunSpec) *api.EnduringRunSpec {
-	return &api.EnduringRunSpec{LeaseSeconds: min(14400, ceilings.LeaseSeconds), MaxTurns: min(64, ceilings.MaxTurns), MaxModelRequests: min(192, ceilings.MaxModelRequests), MaxOutputTokens: min(98304, ceilings.MaxOutputTokens)}
+	return &api.EnduringRunSpec{LeaseSeconds: min(sessionLeaseSeconds, ceilings.LeaseSeconds), MaxTurns: min(sessionTurns, ceilings.MaxTurns), MaxModelRequests: min(sessionTurns*api.TurnModelRequests, ceilings.MaxModelRequests), MaxOutputTokens: min(sessionTurns*api.TurnOutputTokens, ceilings.MaxOutputTokens)}
 }
 
 // ScopeLabel opts a namespace into a scope in strict ("labeled") mode; the

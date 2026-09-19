@@ -233,12 +233,13 @@ func (s *Server) continueRun(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "only a live enduring conversation can be continued", http.StatusBadRequest)
 		return
 	}
-	seed, err := cellnparent.Transcript(r.Context(), s.client, run)
+	budget := cellnparent.SeedBudgetFor(r.Context(), s.client, run)
+	seed, err := cellnparent.Transcript(r.Context(), s.client, run, budget)
 	if err != nil {
 		http.Error(w, "turn history unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	next, err := cellnparent.Continuation(run, seed, cellnparent.ContinuationOriginRequested)
+	next, err := cellnparent.Continuation(run, seed, cellnparent.ContinuationOriginRequested, budget)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return

@@ -14,8 +14,29 @@ export interface WizardExecution {
   enduringDefaults?: EnduringLimits;
 }
 
+/**
+ * What one turn reserves from a parent's lifetime totals with the current
+ * Celln starter package (api/v1alpha1 TurnModelRequests, TurnOutputTokens).
+ * Totals are sized as turns × allowance; smaller totals end the conversation
+ * before its turn count is reached.
+ */
+export const TURN_MODEL_REQUESTS = 6;
+export const TURN_OUTPUT_TOKENS = 3072;
+
+const LEGACY_TURNS = 8;
+
 /** Budget for a legacy namespaced native runtime, whose registration bounds it. */
-export const LEGACY_ENDURING_DEFAULTS: EnduringLimits = { leaseSeconds: 600, maxTurns: 8, maxModelRequests: 24, maxOutputTokens: 8192 };
+export const LEGACY_ENDURING_DEFAULTS: EnduringLimits = {
+  leaseSeconds: 600,
+  maxTurns: LEGACY_TURNS,
+  maxModelRequests: LEGACY_TURNS * TURN_MODEL_REQUESTS,
+  maxOutputTokens: LEGACY_TURNS * TURN_OUTPUT_TOKENS,
+};
+
+/** One sentence naming a budget, for review screens. */
+export function describeEnduringLimits(limits: EnduringLimits): string {
+  return `${limits.leaseSeconds}-second lease, ${limits.maxTurns} turns, ${limits.maxModelRequests} model requests, ${limits.maxOutputTokens} output tokens`;
+}
 
 // Shared by API creation and YAML preview: neither may silently lose tool refs.
 export function executionFromWizard(form: WizardExecution): AgentExecutionDefaults {

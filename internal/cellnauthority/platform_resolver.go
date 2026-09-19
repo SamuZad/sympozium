@@ -395,7 +395,10 @@ func evaluatePlatform(s platformSnapshot, request PlatformResolveRequest) (*Plat
 			return nil, deny(ReasonPolicyContracted, "policy %q does not permit runtime revision", policy.Name)
 		}
 	}
-	if int64(len(s.Run.Spec.Task.GetPrompt())) > runtimeLimits.TaskBytes {
+	// A run's task is one user message. A current worker's taskBytes (16384)
+	// bounds history plus message, so the message keeps its own bound and is
+	// refused here rather than later as an unexplained invalid turn.
+	if int64(len(s.Run.Spec.Task.GetPrompt())) > min(runtimeLimits.TaskBytes, api.MaxConversationMessageBytes) {
 		return nil, deny(ReasonLimitRange, "task exceeds effective runtime limit")
 	}
 

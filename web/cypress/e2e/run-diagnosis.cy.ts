@@ -185,7 +185,7 @@ describe("Why did this fail panel", () => {
     open(turnFailed);
     cy.get('[data-testid="run-diagnosis"]').should("have.attr", "data-kind", "turn-failed");
     cy.get('[data-testid="run-diagnosis-cause"]').should("contain", "per-turn tool call limit");
-    cy.get('[data-testid="run-diagnosis-step"]').first().should("contain", "Ask for one action per message");
+    cy.get('[data-testid="run-diagnosis-step"]').first().should("contain", "Ask for fewer actions per message");
     evidenceCollapsedThenShows("CELLN_HARNESS_ERROR tool call budget exhausted");
   });
 
