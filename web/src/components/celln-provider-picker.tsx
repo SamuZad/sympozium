@@ -1,6 +1,6 @@
-import { useEffect, useState, type ComponentType } from "react";
+import { useEffect, useRef, useState, type ComponentType } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { Bot, Loader2 } from "lucide-react";
+import { Bot, Check, Loader2 } from "lucide-react";
 import type { CellnPlatformProfile } from "@/lib/api";
 import { useAddCellnFleetBackend, useCellnFleetBackends, useCellnPlatformProfiles } from "@/hooks/use-api";
 import { backendLabel } from "@/components/celln-backend-picker";
@@ -26,6 +26,18 @@ const FLEET_PRESETS = [
   { value: "custom", label: "Custom", model: "" },
 ];
 const PRESET_VALUES = new Set(FLEET_PRESETS.map((p) => p.value));
+
+// The server reports an added backend's progress as a state string; only the
+// prefixes (pending, configuring, error) and the exact "ready" are contract.
+const STAGES = ["Recorded", "Nodes configuring", "Publishing to namespaces"];
+const GRACE_SECONDS = 90;
+
+/** How many of STAGES are complete for a backend state. */
+function stagesDone(state: string): number {
+  if (state === "ready") return 3;
+  if (state.startsWith("configuring")) return 2;
+  return 1;
+}
 
 function uniqueName(base: string, taken: Set<string>): string {
   if (!taken.has(base)) return base;
@@ -67,7 +79,29 @@ export function CellnProviderPicker({
   ];
   const preset = FLEET_PRESETS.find((p) => p.value === provider);
   const matching = list.filter((p) => p.provider === provider);
-  const pending = backendList.filter((b) => b.provider === provider && b.state !== "ready");
+  // Backends seen in progress while this step is open, by name, with when each
+  // state prefix was first seen (the server does not report timestamps).
+  const seen = useRef(new Map<string, number>());
+  const [added, setAdded] = useState<string[]>([]);
+  const [now, setNow] = useState(() => Date.now());
+  const hasProfile = (b: { profile: string }) => list.some((p) => p.name === b.profile);
+  // In progress: not ready yet, or ready but its profile has not loaded here
+  // (only for a backend watched from this step, so the add form does not flash).
+  const pending = backendList.filter(
+    (b) => (b.provider === provider || added.includes(b.name)) && (b.state !== "ready" || (seen.current.has(`${b.name}:pending`) && !hasProfile(b))),
+  );
+  for (const b of pending) {
+    const phase = b.state.startsWith("error") ? "error" : b.state.startsWith("configuring") ? "configuring" : b.state === "ready" ? "ready" : "pending";
+    if (!seen.current.has(`${b.name}:pending`)) seen.current.set(`${b.name}:pending`, Date.now());
+    if (!seen.current.has(`${b.name}:${phase}`)) seen.current.set(`${b.name}:${phase}`, Date.now());
+  }
+  const readyWatched = pending.some((b) => b.state === "ready");
+  const waiting = pending.some((b) => !b.state.startsWith("error"));
+  useEffect(() => {
+    if (!waiting) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [waiting]);
 
   const [name, setName] = useState("");
   const [model, setModel] = useState("");
@@ -82,8 +116,24 @@ export function CellnProviderPicker({
   // becomes selectable without leaving the step.
   const readyWithoutProfile = backendList.some((b) => b.state === "ready" && !list.some((p) => p.name === b.profile));
   useEffect(() => {
-    if (readyWithoutProfile) qc.invalidateQueries({ queryKey: ["celln-platform-profiles"] });
-  }, [readyWithoutProfile, backendList, qc]);
+    if (!readyWithoutProfile) return;
+    qc.invalidateQueries({ queryKey: ["celln-platform-profiles"] });
+    if (!readyWatched) return;
+    // The profile of a backend watched here may trail its "ready" state; keep
+    // asking until it shows.
+    const timer = setInterval(() => qc.invalidateQueries({ queryKey: ["celln-platform-profiles"] }), 3000);
+    return () => clearInterval(timer);
+  }, [readyWithoutProfile, readyWatched, qc]);
+
+  // A backend added from this step binds as soon as it is ready, also when its
+  // provider identifier differs from the choice made here (Custom).
+  useEffect(() => {
+    const name = added.find((candidate) => backendList.some((b) => b.name === candidate && b.state === "ready" && list.some((p) => p.name === b.profile)));
+    if (!name) return;
+    const profile = list.find((p) => p.name === backendList.find((b) => b.name === name)?.profile);
+    setAdded((current) => current.filter((candidate) => candidate !== name));
+    if (profile && selected?.name !== profile.name) onProfile(profile);
+  }, [added, backendList, list, selected, onProfile]);
 
   // Bind to the provider's backend as soon as one exists.
   useEffect(() => {
@@ -118,11 +168,11 @@ export function CellnProviderPicker({
       credential: credential || undefined,
       skipPreflight: skipProbe || undefined,
     };
-    if (!/^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/.test(body.name)) return setError("Name the backend with a DNS label, e.g. claude.");
+    if (!/^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/.test(body.name)) return setError("Name the fleet backend with a DNS label, e.g. claude.");
     if (provider !== "llama-server" && !credential) return setError(`${preset?.label || provider} needs an API key.`);
     if ((provider === "llama-server" || custom) && !body.endpoint) return setError("Give the server's address, e.g. http://framework:8080.");
     if (!body.model && (!detectable || skipProbe)) return setError(skipProbe ? "Give the model name when the probe is skipped." : "Give the model name.");
-    add.mutate(body, { onSuccess: () => setCredential("") });
+    add.mutate(body, { onSuccess: () => { setCredential(""); setAdded((current) => [...current, body.name]); } });
   }
 
   const needsEndpoint = provider === "llama-server" || provider === "custom";
@@ -135,7 +185,7 @@ export function CellnProviderPicker({
       <div className="space-y-2">
         <Label>AI Provider</Label>
         <Select value={options.some((o) => o.value === provider) ? provider : ""} onValueChange={pick}>
-          <SelectTrigger><SelectValue placeholder="Select a provider…" /></SelectTrigger>
+          <SelectTrigger><SelectValue placeholder="Select an AI provider…" /></SelectTrigger>
           <SelectContent>
             {options.map((o) => {
               const count = list.filter((p) => p.provider === o.value).length;
@@ -144,7 +194,7 @@ export function CellnProviderPicker({
                   <span className="flex items-center gap-2">
                     <o.icon className="h-4 w-4 shrink-0" />
                     {o.label}
-                    <span className="text-xs text-muted-foreground">{count > 0 ? `(${count} fleet backend${count === 1 ? "" : "s"})` : "(add to fleet)"}</span>
+                    <span className="text-xs text-muted-foreground">{count > 0 ? `(${count} fleet backend${count === 1 ? "" : "s"})` : "(add a fleet backend)"}</span>
                   </span>
                 </SelectItem>
               );
@@ -159,41 +209,71 @@ export function CellnProviderPicker({
         <div className="space-y-2">
           <Label>Fleet backend</Label>
           <Select value={current?.name || ""} onValueChange={(value) => { const profile = matching.find((p) => p.name === value); if (profile) onProfile(profile); }}>
-            <SelectTrigger><SelectValue placeholder="Choose a backend" /></SelectTrigger>
+            <SelectTrigger><SelectValue placeholder="Choose a fleet backend" /></SelectTrigger>
             <SelectContent>{matching.map((p) => <SelectItem key={p.name} value={p.name}>{backendLabel(p)}</SelectItem>)}</SelectContent>
           </Select>
         </div>
       )}
 
       {current && (
-        <p className="text-xs text-muted-foreground">
-          Runs on fleet backend <span className="font-medium text-foreground">{current.backend}</span> ({current.model} at {current.endpoint}) with the key the fleet holds for it. No key is entered here; policy caps the ceilings.
-        </p>
+        <div className="space-y-1 rounded-md border p-3 text-xs" data-testid="fleet-backend-model">
+          <p className="text-sm">Model: <span className="font-mono">{current.model}</span> — fixed by fleet backend <span className="font-medium">{current.backend}</span></p>
+          <p className="text-muted-foreground">
+            Served at {current.endpoint} with the key the fleet holds for it. No key or model is entered here; to use another model, add a fleet backend for it. The fleet policy caps the ceilings.
+          </p>
+        </div>
       )}
 
-      {provider && matching.length === 0 && pending.length > 0 && (
-        <div role="status" className="space-y-1 rounded-md border border-amber-500/30 bg-amber-500/5 p-3 text-xs">
-          {pending.map((b) => (
-            <p key={b.name} className="flex items-center gap-2">
-              {!b.state.startsWith("error") && <Loader2 className="h-3 w-3 animate-spin" />}
-              <span><span className="font-medium">{b.name}</span> — {b.model}: <span className={b.state.startsWith("error") ? "text-red-500" : ""}>{b.state}</span></span>
-            </p>
-          ))}
-          <p className="text-muted-foreground">The fleet's nodes are configuring this backend; this step continues on its own once it is ready. Running conversations are not restarted.</p>
+      {provider && pending.length > 0 && (matching.length === 0 || pending.some((b) => added.includes(b.name))) && (
+        <div role="status" className="space-y-3 rounded-md border border-amber-500/30 bg-amber-500/5 p-3 text-xs" data-testid="fleet-backend-progress">
+          {pending.map((b) => {
+            const failed = b.state.startsWith("error");
+            const done = stagesDone(b.state);
+            const configuring = b.state.startsWith("configuring");
+            const since = seen.current.get(`${b.name}:${configuring ? "configuring" : "pending"}`) || now;
+            const elapsed = Math.max(0, Math.round((now - since) / 1000));
+            return (
+              <div key={b.name} className="space-y-1.5">
+                <p><span className="font-medium">{b.name}</span> — {b.model}</p>
+                {failed ? (
+                  <p className="whitespace-pre-wrap break-words text-red-500">{b.state}</p>
+                ) : (
+                  <>
+                    <ol className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                      {STAGES.map((stage, i) => (
+                        <li key={stage} data-stage={i < done ? "done" : i === done ? "active" : "todo"} className={i <= done ? "flex items-center gap-1 text-foreground" : "flex items-center gap-1 text-muted-foreground"}>
+                          {i < done ? <Check className="h-3 w-3 text-emerald-500" /> : i === done ? <Loader2 className="h-3 w-3 animate-spin" /> : <span className="inline-block h-3 w-3 rounded-full border" />}
+                          {stage}
+                        </li>
+                      ))}
+                    </ol>
+                    {done === 1 && <p className="text-muted-foreground">Waiting for every fleet node to configure it ({elapsed}s). This usually takes under a minute.</p>}
+                    {done === 2 && (
+                      <p className="text-muted-foreground">
+                        Waiting about {GRACE_SECONDS} seconds for the {b.provider === "llama-server" ? "configuration" : "key"} to reach the running dispatchers, then publishing the fleet backend to every namespace ({elapsed}s of about {GRACE_SECONDS}s). Nothing is stuck.
+                      </p>
+                    )}
+                    {done === 3 && <p className="text-muted-foreground">Ready; loading it…</p>}
+                  </>
+                )}
+              </div>
+            );
+          })}
+          <p className="text-muted-foreground">This step continues on its own once the fleet backend is ready. Running conversations are not restarted.</p>
         </div>
       )}
 
       {provider && !profiles.isLoading && matching.length === 0 && pending.every((b) => b.state.startsWith("error")) && (
         <div className="space-y-3 rounded-md border p-3" data-testid="celln-provider-add-backend">
           <p className="text-xs text-muted-foreground">
-            The fleet has no {preset?.label || provider} backend yet. Add one: the {needsEndpoint ? "endpoint is probed" : "key is probed once and published to the fleet"}, every node configures it, and every namespace is offered it.
+            The fleet has no fleet backend for {preset?.label || provider} yet. Add one: the {needsEndpoint ? "endpoint is probed" : "key is probed once and published to the fleet"}, every node configures it, and every namespace is offered it.
           </p>
           <div className="grid gap-3 sm:grid-cols-2">
-            <label className="space-y-1 text-sm"><span>Backend name</span><Input value={name} onChange={(e) => setName(e.target.value)} placeholder={provider} /></label>
+            <label className="space-y-1 text-sm"><span>Fleet backend name</span><Input value={name} onChange={(e) => setName(e.target.value)} placeholder={provider} /></label>
             <label className="space-y-1 text-sm"><span>Model</span><Input value={model} onChange={(e) => setModel(e.target.value)} placeholder={preset?.model || (detectable ? "detected from the server" : "the model the server serves")} /></label>
             {provider === "custom" && (
               <>
-                <label className="space-y-1 text-sm"><span>Provider id</span><Input value={customProvider} onChange={(e) => setCustomProvider(e.target.value)} placeholder="custom" /></label>
+                <label className="space-y-1 text-sm"><span>AI provider id</span><Input value={customProvider} onChange={(e) => setCustomProvider(e.target.value)} placeholder="custom" /></label>
                 <label className="space-y-1 text-sm">
                   <span>Protocol</span>
                   <Select value={protocol} onValueChange={setProtocol}>
@@ -213,7 +293,7 @@ export function CellnProviderPicker({
               <label className="space-y-1 text-sm sm:col-span-2"><span>API key</span><Input type="password" autoComplete="off" value={credential} onChange={(e) => setCredential(e.target.value)} placeholder="published once to the fleet, never shown again" /></label>
             )}
           </div>
-          {endpoint.trim().toLowerCase().startsWith("http://") && <p className="text-xs text-amber-500">Plain HTTP is approved for this backend; use it on private networks only.</p>}
+          {endpoint.trim().toLowerCase().startsWith("http://") && <p className="text-xs text-amber-500">Plain HTTP is approved for this fleet backend; use it on private networks only.</p>}
           {needsEndpoint && (
             <label className="flex items-start gap-2 text-xs text-muted-foreground">
               <input type="checkbox" className="mt-0.5" checked={skipProbe} onChange={(e) => setSkipProbe(e.target.checked)} />

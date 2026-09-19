@@ -208,4 +208,108 @@ describe("Create Agent on a fleet with several backends", () => {
       cy.contains("button", "Next").should("be.visible").and("be.enabled");
     });
   });
+
+  // Name → Celln plane → tools: the point where the fleet flow starts to differ.
+  const openToolsStep = () => {
+    cy.visit("/agents?create=1&kind=agent#token=test-token");
+    cy.get('[role="dialog"] input[placeholder="my-agent"]').type(`fleet-${Date.now().toString(36)}`);
+    cy.get('[role="dialog"]').contains("button", "Next").click();
+    cy.get('[data-testid="create-agent-execution-environment"]').contains("button", "Celln").click();
+    cy.get('[role="dialog"]').contains("button", "Next").click();
+    cy.get('[data-testid="create-agent-borrowed-tools"]').should("be.visible");
+  };
+
+  it("asks a fleet agent for no key and no model, and confirms the backend's fixed model", () => {
+    openToolsStep();
+    cy.get('[data-testid="wizard-steps"] [data-step]').then(($steps) => {
+      expect([...$steps].map((el) => el.getAttribute("data-step"))).to.deep.equal(["name", "plane", "tools", "provider", "confirm"]);
+    });
+    cy.get('[data-testid="wizard-steps"]').should("not.contain", "Auth").and("not.contain", "Model");
+    // The header counts what the policy lends, not the platform's cap of 24.
+    cy.get('[data-testid="borrowed-tools-count"]').should("have.text", "2 of 2 lent tools selected");
+    cy.get('[role="dialog"]').contains("button", "Next").click();
+    cy.get('[data-testid="fleet-backend-model"]').should("contain", "Model: deepseek-chat — fixed by fleet backend native");
+    cy.get('[data-testid="platform-model-route"]').invoke("text").should("not.match", /wrapper|runtime profile|model route/i);
+    cy.get('[role="dialog"]').contains("button", "Next").click();
+    // Provider leads straight to Confirm.
+    cy.get('[data-testid="execution-confirmation"]').should("be.visible");
+    cy.get('[data-testid="fleet-fixed-model"]').should("have.text", "Model: deepseek-chat — fixed by fleet backend native");
+    cy.get('[role="dialog"] input#native-model').should("not.exist");
+  });
+
+  it("shows a new fleet backend's progress, including the 90-second wait, until it is ready", () => {
+    const added = { ...profile("openai", "gpt-4o-mini"), endpoint: "https://api.openai.com/v1/chat/completions" };
+    const states = ["pending: waiting for the nodes to configure it", "configuring: waiting 90s for the credential to reach running dispatchers", "ready"];
+    let posted = false;
+    let polls = 0;
+    cy.intercept("POST", "**/api/v1/celln-platform/backends*", (request) => {
+      expect(request.body).to.include({ name: "openai", provider: "openai", model: "gpt-4o-mini", credential: "sk-test" });
+      posted = true;
+      request.reply({ statusCode: 202, body: { name: "openai", provider: "openai", protocol: "openai-chat", endpoint: added.endpoint, model: added.model, allowInsecure: false, source: "added", profile: added.name, state: states[0] } });
+    }).as("add");
+    const current = () => states[Math.min(Math.max(polls - 1, 0), states.length - 1)];
+    cy.intercept("GET", "**/api/v1/celln-platform/backends*", (request) => {
+      if (posted) polls++;
+      request.reply({ body: posted ? [{ name: "openai", provider: "openai", protocol: "openai-chat", endpoint: added.endpoint, model: added.model, allowInsecure: false, source: "added", profile: added.name, state: current() }] : [] });
+    }).as("backends");
+    // The profile appears once the backend is ready.
+    cy.intercept("GET", "**/api/v1/celln-platform/profiles*", (request) => request.reply({ body: posted && current() === "ready" ? [...profiles, added] : profiles }));
+
+    openToolsStep();
+    cy.get('[role="dialog"]').contains("button", "Next").click();
+    cy.get('[data-testid="platform-model-route"] button[role=combobox]').first().click();
+    cy.get("[role=option]").contains("OpenAI").click();
+    // No OpenAI backend yet: the add form, and the step cannot be completed.
+    cy.get('[data-testid="celln-provider-add-backend"]').should("contain", "The fleet has no fleet backend for OpenAI yet");
+    cy.get('[role="dialog"]').contains("button", "Next").should("be.disabled");
+    cy.get('[data-testid="celln-provider-add-backend"] input[type=password]').type("sk-test");
+    cy.contains("button", "Add to the fleet").click();
+    cy.wait("@add");
+
+    const stage = (name: string) => cy.contains('[data-testid="fleet-backend-progress"] li', name, { timeout: 10000 });
+    stage("Recorded").should("have.attr", "data-stage", "done");
+    stage("Nodes configuring").should("have.attr", "data-stage", "active");
+    stage("Publishing to namespaces").should("have.attr", "data-stage", "todo");
+    cy.get('[data-testid="celln-provider-add-backend"]').should("not.exist");
+    cy.get('[role="dialog"]').contains("button", "Next").should("be.disabled");
+
+    stage("Publishing to namespaces").should("have.attr", "data-stage", "active");
+    stage("Nodes configuring").should("have.attr", "data-stage", "done");
+    cy.get('[data-testid="fleet-backend-progress"]').should("contain", "Waiting about 90 seconds for the key to reach the running dispatchers").and("contain", "s of about 90s");
+
+    // Ready: bound on its own, and the step can be completed.
+    cy.get('[data-testid="fleet-backend-model"]', { timeout: 15000 }).should("contain", "Model: gpt-4o-mini — fixed by fleet backend openai");
+    cy.get('[data-testid="fleet-backend-progress"]').should("not.exist");
+    cy.get('[role="dialog"]').contains("button", "Next").should("be.enabled").click();
+    cy.get('[data-testid="fleet-fixed-model"]').should("contain", "gpt-4o-mini").and("contain", "fixed by fleet backend openai");
+  });
+});
+
+// A namespace-native Celln runtime (no fleet backend) still asks for the key
+// and the model: only a fleet backend fixes them.
+describe("Create Agent on a namespace-native Celln runtime", () => {
+  it("keeps the Auth and Model steps", () => {
+    cy.intercept("GET", "**/api/v1/**", { body: [] });
+    cy.intercept("GET", "**/api/v1/runtimes*", {
+      body: [{ metadata: { name: "native-local", namespace: "default" }, spec: { image: "", celln: { contractVersion: "celln.json-tools/v1" }, supportOwner: "op" } }],
+    });
+    cy.intercept("GET", "**/api/v1/capabilities*", { body: { celln: { available: true, state: "ready", reason: "ready" } } });
+    cy.visit("/agents?create=1&kind=agent#token=test-token");
+    cy.get('[role="dialog"] input[placeholder="my-agent"]').type(`native-${Date.now().toString(36)}`);
+    cy.get('[role="dialog"]').contains("button", "Next").click();
+    cy.get('[data-testid="create-agent-execution-environment"]').contains("button", "Celln").click();
+    cy.get('[data-testid="wizard-steps"] [data-step]').then(($steps) => {
+      expect([...$steps].map((el) => el.getAttribute("data-step"))).to.deep.equal(["name", "plane", "tools", "provider", "apikey", "model", "confirm"]);
+    });
+    cy.get('[data-testid="wizard-steps"]').should("contain", "Auth").and("contain", "Model");
+    cy.get('[role="dialog"]').contains("button", "Next").click();
+    // Namespaced tools are "installed", never "lent".
+    cy.get('[data-testid="create-agent-borrowed-tools"]').should("be.visible").and("not.contain", "lent tools");
+    cy.get('[role="dialog"]').contains("button", "Next").click();
+    cy.get('[data-testid="platform-model-route"]').should("not.exist");
+    cy.contains("label", "AI Provider").should("be.visible");
+    cy.get('[role="dialog"]').contains("button", "Next").click();
+    cy.get('[role="dialog"]').contains("button", "Next").click();
+    cy.get("#native-model").should("be.visible");
+  });
 });
