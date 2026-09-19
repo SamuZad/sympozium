@@ -183,16 +183,26 @@ export interface CellnRunRef {
 export interface CellnNodeParent {
   incarnation: string;
   updatedMs: number;
+  /** Stage is one of reserved, child-destroyed, committed — whichever source reported it. */
   turns: { turnId: string; stage: string; child?: string; succeeded?: boolean; timeoutMs?: number }[];
   run?: CellnRunRef;
+  /** The owner's observation of the parent (Ready, TurnActive, ContextLost, …); gateway only. */
+  status?: string;
+  /** Whether status was observed live rather than read back from the journal. */
+  statusLive?: boolean;
 }
 
-/** One fleet node's cells and parents, as its configure pod last reported them. */
+/** Where a node's cells came from: the Celln gateway's /v1/cells, or the node's own ConfigMap report. */
+export type CellnCellsSource = "gateway" | "node-report";
+
+/** One fleet node's cells and parents, from the gateway or as its configure pod last reported them. */
 export interface CellnNodeCells {
   node: string;
   reportedMs: number;
   stale: boolean;
+  /** An unreadable node report, or the reason the gateway gave for a backend it could not list. */
   error?: string;
+  source?: CellnCellsSource;
   cells: CellnCell[];
   parents: CellnNodeParent[];
 }

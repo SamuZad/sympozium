@@ -15,16 +15,18 @@ const cells = [
     node: "framework",
     reportedMs: now - 3000,
     stale: false,
+    source: "gateway",
     cells: [
       { id: "2e1e3481f3b7", description: child.slice(0, 29) + "…", status: "running", backend: "kvm", started_ms: now - 12000, finished_ms: null, duration_ms: null, error: null, tools: ["/worker"], run, parent: incarnation, turn: "initial" },
       { id: "07359a714094", description: "blake3:80a5803438c9b4dba1f6bc8…", status: "failed", backend: "kvm", started_ms: now - 600000, finished_ms: now - 570000, duration_ms: 30000, error: "guest exited with code 1", tools: ["/worker"] },
     ],
     parents: [
-      { incarnation, updatedMs: now - 12000, turns: [{ turnId: "initial", stage: "reserved", child }], run },
+      { incarnation, updatedMs: now - 12000, turns: [{ turnId: "initial", stage: "reserved", child }], run, status: "TurnActive", statusLive: true },
       { incarnation: "blake3:" + "b".repeat(64), updatedMs: now - 900000, turns: [{ turnId: "initial", stage: "child-destroyed", succeeded: false }], run: { ...run, name: "hermes-old01", phase: "Failed", live: false } },
     ],
   },
-  { node: "gpu-2", reportedMs: now - 600000, stale: true, cells: [], parents: [] },
+  // A backend the gateway could not list, filled from its node's own report.
+  { node: "gpu-2", reportedMs: now - 600000, stale: true, source: "node-report", cells: [], parents: [] },
 ];
 
 const hermes = {
@@ -77,6 +79,11 @@ describe("Celln cells in the console", () => {
     cy.wait("@cells");
     cy.get('[data-testid="celln-node-cells"]').within(() => {
       cy.contains("celln ps").should("be.visible");
+      // Two sources in one fleet: said per node, and the parent's own status shown.
+      cy.get('[data-testid="celln-cells-source"]').should("contain", "source: mixed");
+      cy.get('[data-testid="celln-node-source-framework"]').should("contain", "source: gateway");
+      cy.get('[data-testid="celln-node-source-gpu-2"]').should("contain", "source: node reports");
+      cy.get('[data-testid="celln-parent-status"]').should("contain", "TurnActive");
       cy.get('[data-testid="celln-node-framework"]').within(() => {
         cy.contains("1 running");
         cy.contains("1 live parent");
