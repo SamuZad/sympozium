@@ -381,21 +381,33 @@ function diagnoseLost(run: AgentRun, status: string, ready: Condition | undefine
 
 // ── Failed turns ─────────────────────────────────────────────────────────────
 
-interface HarnessEntry { match: RegExp; title: string; cause: string; steps: (run: AgentRun, initial: boolean) => DiagnosisStep[] }
+/**
+ * closed: the parent takes no further message, so a retry needs a new
+ * conversation. A failed turn alone never closes a parent — the owner keeps
+ * its context after a failed result, first turn or later — so this is true
+ * only for a failed first turn whose parent is not reported Ready.
+ * resendPointless: another message would fail the same way.
+ */
+interface HarnessEntry { match: RegExp; title: string; cause: string; resendPointless?: boolean; steps: (run: AgentRun, closed: boolean) => DiagnosisStep[] }
 
-function retryStep(run: AgentRun, initial: boolean, label: string, detail: string): DiagnosisStep {
-  return initial
-    ? { ...newConversationStep(run, `${detail} The first turn failed, so this parent accepts no more messages.`), label }
+function retryStep(run: AgentRun, closed: boolean, label: string, detail: string): DiagnosisStep {
+  return closed
+    ? { ...newConversationStep(run, `${detail} The first turn failed and this parent is not accepting messages.`), label }
     : { label, detail: `${detail} The parent is still alive — send the next message below.` };
 }
+
+const sendAnotherStep: DiagnosisStep = {
+  label: "Send another message",
+  detail: "The first turn failed; the conversation is still open — send another message below. The failed turn still counts toward this conversation's turn limit.",
+};
 
 export const HARNESS_ERRORS: HarnessEntry[] = [
   {
     match: /tool call budget exhausted/i,
     title: "Turn failed: too many tool calls for one turn",
     cause: "The agent used up the per-turn tool call limit before it produced an answer, so the turn was discarded.",
-    steps: (run, initial) => [
-      retryStep(run, initial, "Ask for fewer actions per message", "Every turn has a tool call limit, set by the fleet's starter package. Split the request (“fetch X”, then “now summarise it”) so each message stays inside the turn's tool call limit."),
+    steps: (run, closed) => [
+      retryStep(run, closed, "Ask for fewer actions per message", "Every turn has a tool call limit, set by the fleet's starter package. Split the request (“fetch X”, then “now summarise it”) so each message stays inside the turn's tool call limit."),
       { label: "Nothing was committed", detail: "A failed turn records no answer; work the tools already did is not replayed." },
     ],
   },
@@ -404,10 +416,10 @@ export const HARNESS_ERRORS: HarnessEntry[] = [
     match: /final answer is empty: the model used its whole output budget/i,
     title: "Turn failed: the model spent its output budget before answering",
     cause: "The model used the whole output budget of a request without writing an answer, so no result was committed. Celln allows 512 output tokens per model request; a reasoning model (Qwen, DeepSeek-R1 and the like) can spend them all thinking and return nothing.",
-    steps: (run, initial) => [
+    steps: (run, closed) => [
       thinkingOffStep(run),
       raiseOutputTokensStep(run),
-      retryStep(run, initial, "Then send the message again", "Nothing was committed, so the turn is not replayed automatically. Rephrasing alone rarely helps while the model still thinks first."),
+      retryStep(run, closed, "Then send the message again", "Nothing was committed, so the turn is not replayed automatically. Rephrasing alone rarely helps while the model still thinks first."),
     ],
   },
   {
@@ -415,8 +427,8 @@ export const HARNESS_ERRORS: HarnessEntry[] = [
     match: /final answer exceeds/i,
     title: "Turn failed: the answer was too long",
     cause: "The agent's final answer exceeded the turn's answer size bound, so no result was committed. A fleet backend that allows many output tokens per request lets the model write more than an answer may hold.",
-    steps: (run, initial) => [
-      retryStep(run, initial, "Ask for a shorter answer", "Ask for a summary, a fixed number of bullet points, or one part at a time."),
+    steps: (run, closed) => [
+      retryStep(run, closed, "Ask for a shorter answer", "Ask for a summary, a fixed number of bullet points, or one part at a time."),
       lowerOutputTokensStep(run),
     ],
   },
@@ -424,8 +436,8 @@ export const HARNESS_ERRORS: HarnessEntry[] = [
     match: /final answer is empty/i,
     title: "Turn failed: the answer was empty or too long",
     cause: "The agent's final answer was empty or exceeded the turn's answer size bound, so no result was committed. An empty answer usually means a reasoning model spent the request's whole output budget (512 tokens on Celln) thinking.",
-    steps: (run, initial) => [
-      retryStep(run, initial, "Ask for a shorter answer", "Ask for a summary, a fixed number of bullet points, or one part at a time."),
+    steps: (run, closed) => [
+      retryStep(run, closed, "Ask for a shorter answer", "Ask for a summary, a fixed number of bullet points, or one part at a time."),
       thinkingOffStep(run),
       raiseOutputTokensStep(run),
       { label: "If answers are routinely cut", detail: "The answer size bound is fixed by the fleet's Celln starter package, not by this conversation's budget. A fleet still on an older package has a smaller bound until its operator moves it to a current one." },
@@ -435,13 +447,14 @@ export const HARNESS_ERRORS: HarnessEntry[] = [
     match: /context capacity exceeded|context (window|length)/i,
     title: "Turn failed: the conversation no longer fits the model's context",
     cause: "The retained conversation plus this message exceeded the harness's context capacity.",
+    resendPointless: true,
     steps: (run) => [restartStep, newConversationStep(run, "Or start clean if the earlier exchanges are no longer needed.")],
   },
   {
     match: /cancel/i,
     title: "Turn cancelled",
     cause: "The turn was cancelled before it committed a result; the parent itself was not stopped.",
-    steps: (run, initial) => [retryStep(run, initial, "Send the message again if you still need it", "A cancelled turn records no answer and is never replayed.")],
+    steps: (run, closed) => [retryStep(run, closed, "Send the message again if you still need it", "A cancelled turn records no answer and is never replayed.")],
   },
 ];
 
@@ -461,16 +474,21 @@ function failedTurn(run: AgentRun, turns: AgentRunTurn[]): { answer: string; ini
   return initial && !initial.succeeded ? { answer: initial.answer, initial: true } : null;
 }
 
-function diagnoseTurn(run: AgentRun, failure: { answer: string; initial: boolean }): Diagnosis {
+function diagnoseTurn(run: AgentRun, failure: { answer: string; initial: boolean }, accepting: boolean): Diagnosis {
   const reason = harnessError(failure.answer);
   const entry = HARNESS_ERRORS.find((candidate) => candidate.match.test(reason));
   const evidence = [truncate(`${failure.initial ? "initialTurn" : "turn"}.result.answer: ${failure.answer}`)];
-  if (entry) return { kind: "turn-failed", severity: "warning", code: reason.slice(0, 80), title: entry.title, cause: entry.cause, evidence, nextSteps: entry.steps(run, failure.initial) };
+  const closed = failure.initial && !accepting;
+  const open = failure.initial && accepting;
+  if (entry) {
+    return { kind: "turn-failed", severity: "warning", code: reason.slice(0, 80), title: entry.title, cause: entry.cause, evidence,
+      nextSteps: [...entry.steps(run, closed), ...(open && !entry.resendPointless ? [sendAnotherStep] : [])] };
+  }
   return {
     kind: "turn-failed", severity: "warning", title: failure.initial ? "The first turn failed" : "The last turn failed",
     cause: reason ? `The turn ended without a committed answer: ${truncate(reason, 200)}` : "The turn ended without a committed answer.",
     evidence,
-    nextSteps: [retryStep(run, failure.initial, "Rephrase and try again", "Nothing was committed, so the turn is not replayed automatically.")],
+    nextSteps: [retryStep(run, closed, "Rephrase and try again", "Nothing was committed, so the turn is not replayed automatically."), ...(open ? [sendAnotherStep] : [])],
   };
 }
 
@@ -511,7 +529,10 @@ export function diagnoseRun(run: AgentRun, turns: AgentRunTurn[] = [], context: 
   }
 
   const failure = failedTurn(run, turns);
-  if (failure) return diagnoseTurn(run, failure);
+  // The same evidence the API requires before it takes a turn: a running run
+  // whose owner reports the parent ready, with no terminal outcome recorded.
+  const accepting = run.status?.phase === "Running" && ready?.status === "True" && !parent?.ownerOutcome && !run.metadata.deletionTimestamp;
+  if (failure) return diagnoseTurn(run, failure, accepting);
 
   const phase = run.status?.phase;
   if (phase !== "Failed" && phase !== "Refused") return null;
