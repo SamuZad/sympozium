@@ -11872,6 +11872,30 @@ func wrapText(s string, maxWidth int) []string {
 
 // ---------- serve command ----------
 
+// kubectlOutput runs kubectl and returns its trimmed stdout, or "" on failure.
+func kubectlOutput(args ...string) string {
+	out, err := exec.Command("kubectl", args...).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// serveTargetLine names the cluster 'serve' is about to forward to. Every
+// lookup is best effort; an unknown value is printed as "unknown".
+func serveTargetLine(kubectl func(args ...string) string) string {
+	orUnknown := func(v string) string {
+		if v == "" {
+			return "unknown"
+		}
+		return v
+	}
+	kubeContext := orUnknown(kubectl("config", "current-context"))
+	server := orUnknown(kubectl("config", "view", "--minify", "-o", "jsonpath={.clusters[0].cluster.server}"))
+	node := orUnknown(kubectl("get", "nodes", "--request-timeout=5s", "-o", "jsonpath={.items[0].metadata.name}"))
+	return fmt.Sprintf("Serving the console for context %s (%s), node %s", kubeContext, server, node)
+}
+
 func newServeCmd() *cobra.Command {
 	var localPort string
 	var openBrowser bool
@@ -11895,6 +11919,10 @@ the login URL.`,
 			if ns == "" {
 				ns = "sympozium-system"
 			}
+
+			// Say which cluster this follows: the forward silently tracks
+			// the active kubeconfig context.
+			fmt.Println("  " + serveTargetLine(kubectlOutput))
 
 			// Retrieve the UI token from the cluster secret.
 			fmt.Println("  Retrieving UI token...")

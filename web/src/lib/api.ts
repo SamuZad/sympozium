@@ -1095,6 +1095,28 @@ export interface ClusterInfoResponse {
   version?: string;
 }
 
+/** One node in the cluster identity response. */
+export interface ClusterIdentityNode {
+  name: string;
+  roles: string[];
+  kubeletVersion?: string;
+}
+
+/** GET /api/v1/cluster/identity — which cluster this console is talking to.
+ *  Every field is best effort and may be empty. */
+export interface ClusterIdentity {
+  /** kube-system namespace UID. */
+  clusterID: string;
+  /** kubeadm clusterName, else the Kind cluster name, else "". */
+  name: string;
+  kubernetesVersion: string;
+  /** Capped server-side; nodeCount is the total. */
+  nodes: ClusterIdentityNode[];
+  nodeCount: number;
+  /** The API server's own build version. */
+  sympoziumVersion: string;
+}
+
 // ── Provider Discovery ───────────────────────────────────────────────────────
 
 export interface NodeProvider {
@@ -1898,6 +1920,10 @@ export const api = {
 
   cluster: {
     info: () => apiFetch<ClusterInfoResponse>("/api/v1/cluster"),
+    get: () =>
+      apiFetch<ClusterIdentity>("/api/v1/cluster/identity", {
+        skipNamespace: true,
+      }),
   },
 
   capabilities: {

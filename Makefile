@@ -252,6 +252,7 @@ web-dev-serve: web-install ## Vite hot-reload + port-forward to in-cluster apise
 	echo "  UI:     http://localhost:$(VITE_PORT)"; \
 	echo "  API:    localhost:$(API_LOCAL_PORT) (port-forward)"; \
 	echo "  Token:  $$APISERVER_TOKEN"; \
+	echo "  Context: $$(kubectl config current-context 2>/dev/null || echo unknown) ($$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null)), node $$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"; \
 	echo "============================================"; \
 	echo ""; \
 	PF_LOG=/tmp/sympozium-web-dev-serve-portforward.log; \

@@ -74,6 +74,7 @@ type Server struct {
 	densityCache *controller.DensityCache // optional: set when llmfit DaemonSet is enabled
 	powerClient  *collector.Client        // optional: nil when energy collection is disabled
 	authEnabled  bool                     // set by buildMux; gates pricing writes
+	version      string                   // build version, reported by /api/v1/cluster/identity
 }
 
 // NewServer creates a new API server.
@@ -311,6 +312,7 @@ func (s *Server) buildMux(frontendFS fs.FS, expected *tokenReader) http.Handler 
 
 	// Cluster info & capabilities
 	mux.HandleFunc("GET /api/v1/cluster", s.getClusterInfo)
+	mux.HandleFunc("GET /api/v1/cluster/identity", s.getClusterIdentity)
 	mux.HandleFunc("GET /api/v1/capabilities", s.getCapabilities)
 
 	// Agent Sandbox CRD management
