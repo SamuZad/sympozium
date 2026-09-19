@@ -62,7 +62,7 @@ describe("Persistent Celln conversation", () => {
       cy.intercept("GET", "/api/v1/runs/conversation/turns*", { body: { runUID: "parent-uid", continue: "", items: [{
         ...turn, status: { execution: { attempted: true, result: { succeeded: false, answer: "Turn cancelled after child teardown." } } },
       }] } });
-      cy.contains("Turn failed: Turn cancelled after child teardown.").should("be.visible");
+      cy.contains("Turn failed: Turn cancelled after child teardown.").scrollIntoView().should("be.visible");
       cy.get('[data-testid="celln-turn-cancel-pending"]').should("not.exist");
       // Parent-slot evidence is still active; the answer alone cannot enable work.
       cy.get('[data-testid="celln-turn-send"]').should("be.disabled");
@@ -130,7 +130,7 @@ describe("Persistent Celln conversation", () => {
 
   it("keeps historical answers visible but refuses sending after context loss", () => {
     open(false);
-    cy.contains("Agent: Remembered violet").should("be.visible");
+    cy.contains("Agent: Remembered violet").scrollIntoView().should("be.visible");
     cy.contains("Parent unavailable or starting").should("be.visible");
     cy.get('[data-testid="celln-turn-message"]').should("be.disabled");
     cy.get('[data-testid="celln-turn-send"]').should("be.disabled");
@@ -156,7 +156,7 @@ describe("Persistent Celln conversation", () => {
     it(`explains ${reason} without treating history as live context`, () => {
       open(false, 1, { reason });
       cy.get('[data-testid="celln-parent-lifecycle-detail"]').should("contain", explanation);
-      cy.contains("Agent: Remembered violet").should("be.visible");
+      cy.contains("Agent: Remembered violet").scrollIntoView().should("be.visible");
       cy.get('[data-testid="celln-turn-send"]').should("be.disabled");
     });
   }
@@ -196,7 +196,7 @@ describe("Persistent Celln conversation", () => {
       status: { execution: { attempted: true, result: { succeeded: false, answer: "context capacity exceeded" } } },
     }] } });
     cy.reload();
-    cy.contains("Turn failed: context capacity exceeded").should("be.visible");
+    cy.contains("Turn failed: context capacity exceeded").scrollIntoView().should("be.visible");
     cy.contains("Agent: context capacity exceeded").should("not.exist");
   });
 

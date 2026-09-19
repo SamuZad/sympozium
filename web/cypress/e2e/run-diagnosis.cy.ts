@@ -1,0 +1,224 @@
+// Intercepted browser contract tests plus a table over the pure diagnosis
+// function (this repo has no unit-test runner): not live Celln evidence.
+// Fixtures are statuses observed on a real cluster.
+import { AUTH_REASONS, diagnoseRun, harnessError, parseAdmissionRefusal } from "../../src/lib/run-diagnosis";
+import type { AgentRun, AgentRunTurn, CellnPlatformProfile } from "../../src/lib/api";
+
+const REFUSAL_TAIL = "Ask the operator to authorise this namespace, runtime profile, tools and model route; do not create a replacement run.";
+const LOST_MESSAGE = "owner=ContextLost reachedReady=true admittedAge=33s incarnation=blake3:1f0c launchProfile=blake3:77ab; parent context unavailable; no automatic reconstruction";
+const BUDGET_ANSWER = 'Turn failed; no result committed: child refused: guest exited with code 1: CELLN_HARNESS_EVENT {"type":"tool_call","name":"web-fetch"} CELLN_HARNESS_ERROR tool call budget exhausted';
+const LENGTH_ANSWER = 'Turn failed; no result committed: child refused: guest exited with code 1: CELLN_HARNESS_EVENT {"type":"final"} CELLN_HARNESS_ERROR final answer is empty or exceeds limit';
+
+function run(status: Record<string, unknown>, spec: Record<string, unknown> = {}): AgentRun {
+  return {
+    metadata: { name: "hermes-abc12", namespace: "default", uid: "run-uid", generation: 1 },
+    spec: { agentRef: "hermes", agentId: "hermes", sessionKey: "s", backend: "celln", task: "Remember violet", executionLifecycle: "enduring", enduring: { leaseSeconds: 3600, maxTurns: 8, maxModelRequests: 32, maxOutputTokens: 4096 }, ...spec },
+    status,
+  } as unknown as AgentRun;
+}
+
+function condition(type: string, reason: string, message: string, status = "False") {
+  return { type, status, reason, message, observedGeneration: 1, lastTransitionTime: "2026-09-18T10:00:00Z" };
+}
+
+const initialOK = { id: "initial", message: "Remember violet", child: "c", attempted: true, result: { succeeded: true, answer: "Remembered violet" } };
+
+const parentLost = run({
+  phase: "Failed",
+  error: `Celln parent context lost or stopped; reconcile recorded turns: ${LOST_MESSAGE}; continued as hermes-tzvz6`,
+  conditions: [condition("CellnParentReady", "ContextLost", LOST_MESSAGE)],
+  cellnParent: { binding: { incarnation: "blake3:1f0c", runUID: "run-uid" }, createAttempted: true, acceptedTurns: 1, initialTurn: initialOK,
+    ownerOutcome: { status: "ContextLost", reachedReady: true, observedAt: "2026-09-18T10:00:33Z" }, continuedBy: "hermes-tzvz6" },
+});
+
+const admissionRefused = run({
+  phase: "Pending",
+  conditions: [condition("CellnParentReady", "AdmissionPending", `Platform policy refused admission (AUTH_TOOL_UNKNOWN). ${REFUSAL_TAIL}`)],
+}, { cellnSelection: { runtimeRef: "celln-fleet-native", toolRefs: [], clusterToolRefs: [{ name: "web-fetch", revision: "r1" }, { name: "shell-exec", revision: "r9" }] } });
+
+const turnFailed = run({
+  phase: "Running",
+  conditions: [condition("CellnParentReady", "Ready", "Native parent initialized; turn completion is tracked separately", "True")],
+  cellnParent: { binding: { incarnation: "blake3:1f0c", runUID: "run-uid" }, createAttempted: true, acceptedTurns: 0,
+    initialTurn: { ...initialOK, result: { succeeded: false, answer: BUDGET_ANSWER } } },
+});
+
+const continuationWithheld = run({
+  phase: "Failed",
+  error: `Celln parent lost again on its continuation; not continuing automatically — start a new conversation: ${LOST_MESSAGE}`,
+  conditions: [
+    condition("CellnParentReady", "ContextLost", LOST_MESSAGE),
+    condition("CellnContinuation", "LostBeforeFollowUp", "Celln parent lost again on its continuation; not continuing automatically — start a new conversation"),
+  ],
+  cellnParent: { binding: { incarnation: "blake3:1f0c", runUID: "run-uid" }, createAttempted: true, acceptedTurns: 0, initialTurn: initialOK,
+    ownerOutcome: { status: "ContextLost", reachedReady: true } },
+}, { conversation: { continuation: "automatic", continuesFrom: "hermes-first", depth: 1 } });
+
+const profiles = [{
+  name: "native", revision: "p1", policy: "fleet", model: "qwen3", provider: "llama-server", endpoint: "", credentialProfile: "", systemPrompt: "You are Hermes.",
+  backend: "native", wrapper: "celln-fleet-native", agent: "hermes", tools: [{ name: "web-fetch", revision: "r1" }],
+  ceilings: { leaseSeconds: 7200, maxTurns: 16, maxModelRequests: 64, maxOutputTokens: 8192 },
+  sessionDefaults: { leaseSeconds: 3600, maxTurns: 8, maxModelRequests: 32, maxOutputTokens: 4096 },
+}] as CellnPlatformProfile[];
+
+describe("diagnoseRun", () => {
+  it("has an entry for every reason code the platform resolver can return", () => {
+    cy.readFile("../internal/cellnauthority/platform_resolver.go").then((source: string) => {
+      const codes = [...new Set([...source.matchAll(/=\s*"(AUTH_[A-Z_]+)"/g)].map((match) => match[1]))];
+      expect(codes.length, "reason constants found").to.be.greaterThan(5);
+      for (const code of [...codes, "AUTH_PROTOCOL_UNSUPPORTED"]) expect(AUTH_REASONS, code).to.have.property(code);
+    });
+  });
+
+  it("explains each admission refusal without deferring to someone else", () => {
+    for (const code of [...Object.keys(AUTH_REASONS), "AUTH_CRED_SIG_INVALID", "AUTH_ADMISSION_WINDOW_EXPIRED", "AUTH_SOMETHING_NEW"]) {
+      const diagnosis = diagnoseRun(run({ phase: "Pending", conditions: [condition("CellnParentReady", "AdmissionPending", `Platform policy refused admission (${code}). ${REFUSAL_TAIL}`)] }));
+      expect(diagnosis, code).to.include({ kind: "admission-refused", code, severity: "error" });
+      expect(diagnosis!.cause, code).to.have.length.greaterThan(20);
+      expect(diagnosis!.nextSteps, code).to.have.length.greaterThan(0);
+      expect(JSON.stringify([diagnosis!.title, diagnosis!.cause, diagnosis!.nextSteps]), code).not.to.match(/ask (the|your|an) operator/i);
+      expect(diagnosis!.evidence[0], code).to.contain(code);
+    }
+  });
+
+  const table: [string, AgentRun, AgentRunTurn[], Partial<ReturnType<typeof diagnoseRun>> | null, RegExp?][] = [
+    ["healthy running run", run({ phase: "Running", conditions: [condition("CellnParentReady", "Ready", "ok", "True")], cellnParent: { acceptedTurns: 0, initialTurn: initialOK } }), [], null],
+    ["succeeded one-shot", run({ phase: "Succeeded" }, { executionLifecycle: "one-shot" }), [], null],
+    ["parent lost and continued", parentLost, [], { kind: "parent-lost", severity: "info", code: "ContextLost" }, /continues as hermes-tzvz6/],
+    ["parent stopped", run({ phase: "Failed", conditions: [condition("CellnParentReady", "Stopped", "owner=Stopped")], cellnParent: { acceptedTurns: 0 } }), [], { kind: "parent-lost", code: "Stopped", severity: "error" }, /^The parent has stopped/],
+    ["teardown uncertain", run({ phase: "Failed", conditions: [condition("CellnParentReady", "TeardownUncertain", "owner=TeardownUncertain")], cellnParent: { acceptedTurns: 0 } }), [], { kind: "parent-lost", code: "TeardownUncertain", severity: "warning" }, /^Parent teardown is unconfirmed/],
+    ["lost while warming", run({ phase: "Failed", cellnParent: { acceptedTurns: 0, ownerOutcome: { status: "ContextLost", reachedReady: false } } }), [], { kind: "parent-lost", code: "ContextLost" }, /warming up/],
+    ["owner refused create", run({ phase: "Failed", conditions: [condition("CellnParentReady", "CreateRefused", "refused")], cellnParent: { acceptedTurns: 0 } }), [], { kind: "create-refused" }],
+    ["continuation withheld", continuationWithheld, [], { kind: "continuation-withheld", code: "LostBeforeFollowUp" }, /avoid a loop/],
+    ["stale generation is ignored", { ...parentLost, metadata: { ...parentLost.metadata, generation: 2 }, status: { ...parentLost.status, cellnParent: undefined, error: undefined } } as AgentRun, [], { kind: "run-failed" }],
+    ["waiting admission", run({ phase: "Pending", conditions: [condition("CellnParentReady", "AdmissionPending", "Waiting for a matching operator-prepared parent registration and current grants.")] }), [], { kind: "admission-pending", severity: "info" }, /current grants/],
+    ["initial turn tool budget", turnFailed, [], { kind: "turn-failed", code: "tool call budget exhausted" }, /per-turn tool call limit/],
+    ["follow-up answer bound", { ...turnFailed, status: { ...turnFailed.status, cellnParent: { ...turnFailed.status!.cellnParent!, initialTurn: initialOK } } } as AgentRun,
+      [{ metadata: { name: "turn-1" }, spec: { runName: "r", runUID: "run-uid", message: "List everything" }, status: { execution: { ...initialOK, result: { succeeded: false, answer: LENGTH_ANSWER } } } }],
+      { kind: "turn-failed", code: "final answer is empty or exceeds limit" }, /answer size bound/],
+    ["older failed turn followed by an answer", { ...turnFailed, status: { ...turnFailed.status, cellnParent: { ...turnFailed.status!.cellnParent!, initialTurn: initialOK } } } as AgentRun, [
+      { metadata: { name: "turn-1", creationTimestamp: "2026-09-18T10:00:00Z" }, spec: { runName: "r", runUID: "run-uid", message: "a" }, status: { execution: { ...initialOK, result: { succeeded: false, answer: LENGTH_ANSWER } } } },
+      { metadata: { name: "turn-2", creationTimestamp: "2026-09-18T10:01:00Z" }, spec: { runName: "r", runUID: "run-uid", message: "b" }, status: { execution: initialOK } },
+    ], null],
+    ["unrecognised harness error", { ...turnFailed, status: { ...turnFailed.status, cellnParent: { ...turnFailed.status!.cellnParent!, initialTurn: { ...initialOK, result: { succeeded: false, answer: "CELLN_HARNESS_ERROR model route returned 503" } } } } } as AgentRun, [], { kind: "turn-failed" }, /model route returned 503/],
+    ["generic failure shows status.error", run({ phase: "Failed", error: "pod OOMKilled", conditions: [condition("PodReady", "OOM", "container exceeded memory")] }, { executionLifecycle: "one-shot" }), [], { kind: "run-failed" }, /pod OOMKilled/],
+  ];
+  for (const [name, subject, turns, expected, cause] of table) {
+    it(`diagnoses: ${name}`, () => {
+      const diagnosis = diagnoseRun(subject, turns);
+      if (expected === null) { expect(diagnosis).to.equal(null); return; }
+      expect(diagnosis).to.include(expected);
+      if (cause) expect(diagnosis!.cause).to.match(cause);
+      expect(diagnosis!.evidence.every((text) => text.length <= 600)).to.equal(true);
+    });
+  }
+
+  it("names the refused tool from the condition detail, else from the profile", () => {
+    const detailed = run({ phase: "Pending", conditions: [condition("CellnParentReady", "AdmissionPending", `Platform policy refused admission (AUTH_TOOL_UNKNOWN): policy "fleet" does not permit tool "shell-exec" at the selected revision. ${REFUSAL_TAIL}`)] });
+    expect(diagnoseRun(detailed)!.cause).to.contain("shell-exec").and.not.contain("fleet\"");
+    expect(diagnoseRun(admissionRefused)!.cause).not.to.contain("shell-exec");
+    const named = diagnoseRun(admissionRefused, [], { profiles })!;
+    expect(named.cause).to.contain("shell-exec@r9").and.not.contain("web-fetch");
+    expect(named.nextSteps[0].label).to.contain("Remove shell-exec@r9");
+    expect(named.nextSteps[0].detail).to.contain("web-fetch@r1");
+  });
+
+  it("uses the controller's persona detail for AUTH_POLICY_CONTRACTED", () => {
+    const message = `Platform policy refused admission (AUTH_POLICY_CONTRACTED): run persona differs from the runtime profile's bound persona; send the profile's systemPrompt verbatim. ${REFUSAL_TAIL}`;
+    expect(parseAdmissionRefusal(message)).to.deep.equal({ code: "AUTH_POLICY_CONTRACTED", detail: "run persona differs from the runtime profile's bound persona; send the profile's systemPrompt verbatim" });
+    const diagnosis = diagnoseRun(run({ phase: "Pending", conditions: [condition("CellnParentReady", "AdmissionPending", message)] }))!;
+    expect(diagnosis.cause).to.contain("system prompt differs from the persona");
+    expect(diagnosis.nextSteps[0].action).to.deep.equal({ kind: "link", label: "Open the Agent's Chat tab", to: "/agents/hermes?tab=chat" });
+  });
+
+  it("strips harness event JSON from the error line and truncates evidence", () => {
+    expect(harnessError(BUDGET_ANSWER)).to.equal("tool call budget exhausted");
+    const long = run({ phase: "Failed", error: "x".repeat(5000) }, { executionLifecycle: "one-shot" });
+    expect(diagnoseRun(long)!.evidence[0].length).to.be.at.most(600);
+  });
+});
+
+describe("Why did this fail panel", () => {
+  function open(subject: AgentRun, turns: unknown[] = []) {
+    cy.intercept("GET", "**/api/v1/**", { body: [] });
+    cy.intercept("GET", "**/api/v1/celln-platform/profiles*", { body: profiles }).as("profiles");
+    cy.intercept("GET", `**/api/v1/runs/${subject.metadata.name}*`, { body: subject });
+    cy.intercept("GET", `**/api/v1/runs/${subject.metadata.name}/turns*`, { body: { runUID: subject.metadata.uid, items: turns, continue: "" } });
+    cy.visit(`/runs/${subject.metadata.name}#token=test-token`);
+    cy.get('[data-testid="run-diagnosis"]').should("have.length", 1).and("be.visible");
+  }
+
+  function evidenceCollapsedThenShows(text: string) {
+    cy.get('[data-testid="run-diagnosis-evidence"]').should("have.attr", "aria-expanded", "false");
+    cy.get('[data-testid="run-diagnosis-evidence-text"]').should("not.exist");
+    cy.get('[data-testid="run-diagnosis-evidence"]').click();
+    cy.get('[data-testid="run-diagnosis-evidence-text"]').should("be.visible").and("contain", text);
+  }
+
+  it("parent lost: says the conversation moved and links to the continuation", () => {
+    open(parentLost);
+    cy.get('[data-testid="run-diagnosis"]').should("have.attr", "data-kind", "parent-lost");
+    cy.get('[data-testid="run-diagnosis-cause"]').should("contain", "Live harness context was lost").and("contain", "continues as hermes-tzvz6");
+    // The conversation view carries the same sentence, from the same function.
+    cy.get('[data-testid="celln-parent-lifecycle-detail"]').should("contain", "continues as hermes-tzvz6");
+    cy.get('[data-testid="run-diagnosis-continue"]').should("not.exist");
+    evidenceCollapsedThenShows("owner=ContextLost reachedReady=true admittedAge=33s");
+    cy.get('[data-testid="run-diagnosis-evidence-text"]').should("contain", "ownerOutcome: status=ContextLost");
+    cy.intercept("GET", "**/api/v1/runs/hermes-tzvz6*", { body: run({ phase: "Running" }) });
+    cy.get('[data-testid="run-diagnosis-link"]').should("contain", "Open hermes-tzvz6").click();
+    cy.location("pathname").should("eq", "/runs/hermes-tzvz6");
+  });
+
+  it("admission refused: names the unknown tool and points at the Agent's Harness tab", () => {
+    open(admissionRefused);
+    cy.wait("@profiles");
+    cy.get('[data-testid="run-diagnosis-code"]').should("contain", "AUTH_TOOL_UNKNOWN");
+    cy.get('[data-testid="run-diagnosis-cause"]').should("contain", "does not lend").and("contain", "shell-exec@r9");
+    cy.get('[data-testid="run-diagnosis-step"]').first().should("contain", "Remove shell-exec@r9 from the Agent's tools")
+      .find('[data-testid="run-diagnosis-link"] a, a[data-testid="run-diagnosis-link"]').should("have.attr", "href", "/agents/hermes?tab=harness");
+    cy.get('[data-testid="run-diagnosis"]').should("not.contain", "Ask the operator");
+    cy.get('[data-testid="celln-parent-admission"]').should("contain", "shell-exec@r9");
+    evidenceCollapsedThenShows("Platform policy refused admission (AUTH_TOOL_UNKNOWN)");
+  });
+
+  it("turn failed with the parent alive: explains the per-turn tool call limit", () => {
+    open(turnFailed);
+    cy.get('[data-testid="run-diagnosis"]').should("have.attr", "data-kind", "turn-failed");
+    cy.get('[data-testid="run-diagnosis-cause"]').should("contain", "per-turn tool call limit");
+    cy.get('[data-testid="run-diagnosis-step"]').first().should("contain", "Ask for one action per message");
+    evidenceCollapsedThenShows("CELLN_HARNESS_ERROR tool call budget exhausted");
+  });
+
+  it("follow-up turn failed: suggests a shorter answer", () => {
+    const alive = { ...turnFailed, status: { ...turnFailed.status, cellnParent: { ...turnFailed.status!.cellnParent!, initialTurn: initialOK } } } as AgentRun;
+    open(alive, [{ metadata: { name: "turn-1", uid: "turn-1-uid" }, spec: { runName: alive.metadata.name, runUID: "run-uid", message: "List everything" }, status: { execution: { ...initialOK, result: { succeeded: false, answer: LENGTH_ANSWER } } } }]);
+    cy.get('[data-testid="run-diagnosis-cause"]').should("contain", "answer size bound");
+    cy.get('[data-testid="run-diagnosis-step"]').first().should("contain", "Ask for a shorter answer").and("contain", "send the next message below");
+  });
+
+  it("continuation withheld: explains the loop guard and restarts elsewhere on request", () => {
+    open(continuationWithheld);
+    cy.get('[data-testid="run-diagnosis"]').should("have.attr", "data-kind", "continuation-withheld");
+    cy.get('[data-testid="run-diagnosis-cause"]').should("contain", "already an automatic continuation").and("contain", "avoid a loop");
+    cy.get('[data-testid="run-diagnosis-steps"]').should("contain", "Start a new conversation");
+    evidenceCollapsedThenShows("CellnContinuation=False (LostBeforeFollowUp)");
+    cy.intercept("POST", "**/api/v1/runs/hermes-abc12/continue*", (request) => {
+      expect(request.url).to.contain("uid=run-uid");
+      request.reply({ statusCode: 201, body: { ...run({ phase: "Pending" }), metadata: { name: "hermes-next", namespace: "default", uid: "next-uid", generation: 1 } } });
+    }).as("continue");
+    cy.intercept("GET", "**/api/v1/runs/hermes-next*", { body: { ...run({ phase: "Pending" }), metadata: { name: "hermes-next", namespace: "default", uid: "next-uid", generation: 1 } } });
+    cy.get('[data-testid="run-diagnosis-continue"]').should("contain", "Restart elsewhere").click();
+    cy.wait("@continue");
+    cy.location("pathname").should("eq", "/runs/hermes-next");
+  });
+
+  it("stays out of the way of a healthy run", () => {
+    cy.intercept("GET", "**/api/v1/**", { body: [] });
+    const healthy = run({ phase: "Running", conditions: [condition("CellnParentReady", "Ready", "ok", "True")], cellnParent: { acceptedTurns: 0, createAttempted: true, initialTurn: initialOK } });
+    cy.intercept("GET", "**/api/v1/runs/hermes-abc12*", { body: healthy });
+    cy.intercept("GET", "**/api/v1/runs/hermes-abc12/turns*", { body: { runUID: "run-uid", items: [], continue: "" } });
+    cy.visit("/runs/hermes-abc12#token=test-token");
+    cy.get('[data-testid="celln-conversation"]').should("be.visible");
+    cy.get('[data-testid="run-diagnosis"]').should("not.exist");
+  });
+});

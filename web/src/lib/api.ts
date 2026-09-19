@@ -456,6 +456,8 @@ export interface AgentRunStatus {
     initialTurn?: ParentTurnExecution;
     acceptedTurns: number;
     activeTurn?: { name: string; uid: string };
+    /** The first terminal owner observation, frozen by the controller. */
+    ownerOutcome?: { status: "ContextLost" | "Stopped" | "TeardownUncertain" | "CreateRefused" | string; reachedReady: boolean; observedAt?: string };
     /** The run that continues this conversation after its context was lost. */
     continuedBy?: string;
   };
