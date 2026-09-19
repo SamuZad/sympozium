@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.10.82](https://github.com/sympozium-ai/sympozium/compare/v0.10.81...v0.10.82) (2026-09-19)
+
+
+### Features
+
+* **celln:** model parameters for fleet backends ([cae4cce](https://github.com/sympozium-ai/sympozium/commit/cae4cce07754aa8aac16601db07a62d1598326ba))
+* **celln:** model parameters for fleet backends ([e5f440b](https://github.com/sympozium-ai/sympozium/commit/e5f440b8e6911ddd2e5b5f1114e9bbefe6bdfcb2))
+
 ## [0.10.81](https://github.com/sympozium-ai/sympozium/compare/v0.10.80...v0.10.81) (2026-09-19)
 
 
