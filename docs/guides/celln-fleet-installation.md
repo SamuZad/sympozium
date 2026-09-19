@@ -493,10 +493,39 @@ journey on a three-node Kind cluster, including a node-leave drain.
 
 ## Moving to a new package or scope
 
-Every Sympozium release pins its own starter package (a new package hash and
-publisher key), so upgrading `sympozium` and rerunning `sympozium install`
-moves the fleet to a new package. The same applies to a rebuilt package or a
-changed `--celln-fleet-scope`. Because this ends every live parent on the
+A Sympozium release carries a new starter package only when the package's
+inputs changed: the pinned Celln release (`config/celln/release.json`), the
+packaging recipe (`hack/build-celln-starter.sh`) or the tool images it
+packages. Every other release republishes the previous release's package
+unchanged (the same image digest, package hash and publisher key), so
+upgrading `sympozium` and rerunning `sympozium install` keeps the fleet's
+package, restarts no dispatcher and says so:
+
+```console
+$ sympozium install ...
+  Celln fleet package unchanged (blake3:d365…); live conversations are kept
+```
+
+To see whether a release changes the package before you upgrade, compare the
+`celln-starter.json` asset of the two releases. `inputs` is the fingerprint of
+the package's inputs (`hack/celln-starter-inputs.sh` prints it, and
+`--manifest` shows what it covers); when it and `packageHash` are equal, the
+package is the same one:
+
+```console
+$ for tag in v0.10.80 v0.10.81; do gh release download "$tag" --repo sympozium-ai/sympozium \
+    --pattern celln-starter.json --output - | jq -c '{inputs, packageHash}'; done
+```
+
+Releases published before the fingerprint was recorded have no `inputs`
+field, and each of them carries its own package. A maintainer can also force
+a release to build a new package (`force_starter_rebuild` on the release
+workflow), which changes `packageHash` while `inputs` stays the same, so
+`packageHash` is the field that decides.
+
+`--celln-fleet-replace-package` is therefore only needed when upgrading across
+a release whose package changed, for a package you rebuilt yourself, or for a
+changed `--celln-fleet-scope`. Because a move ends every live parent on the
 fleet, the installer checks the published configuration before it changes
 anything and refuses unless you approve the move:
 
