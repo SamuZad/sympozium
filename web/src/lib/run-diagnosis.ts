@@ -85,7 +85,7 @@ function thinkingOffStep(run: AgentRun): DiagnosisStep {
 /** The other remedy for a reasoning model that returns nothing: a fleet backend that allows more output tokens per request. */
 function raiseOutputTokensStep(run: AgentRun): DiagnosisStep {
   return harnessStep(run, "Or use a fleet backend with more output tokens per request",
-    "To keep the model thinking, add a fleet backend for the same server with “Max output tokens per request” raised under “Advanced” (2048–4096 for a reasoning model; the default is 512). A turn reserves 6 requests of it, so it costs 4–8× the tokens per turn, buys fewer turns under the fleet's ceilings, and may exceed the 60-second turn limit on a slow local model. It needs a fleet on a Celln newer than v0.5.23, and an existing fleet backend cannot change, so add it under a new name and move the Agent to it.");
+    "To keep the model thinking, add a fleet backend for the same server with “Max output tokens per request” raised under “Advanced” (2048–4096 for a reasoning model; the default is 512). A turn reserves 6 requests of it, so it costs 4–8× the tokens per turn, and buys fewer turns under the fleet's ceilings. The turn's time limit grows with it (60 seconds at 512, 4 minutes at 2048, 5 minutes at most) on a fleet whose Celln is newer than v0.5.24. It needs a fleet on a Celln newer than v0.5.23, and an existing fleet backend cannot change, so add it under a new name and move the Agent to it.");
 }
 
 /** The remedy for an answer longer than the answer size bound when the backend's output cap was raised. */
@@ -441,6 +441,16 @@ export const HARNESS_ERRORS: HarnessEntry[] = [
       thinkingOffStep(run),
       raiseOutputTokensStep(run),
       { label: "If answers are routinely cut", detail: "The answer size bound is fixed by the fleet's Celln starter package, not by this conversation's budget. A fleet still on an older package has a smaller bound until its operator moves it to a current one." },
+    ],
+  },
+  {
+    match: /child timed out/i,
+    title: "Turn failed: the turn ran out of time",
+    cause: "The worker cell was stopped at the turn's time limit before the model finished, so no result was committed. The limit covers every model request and tool call of the turn: 60 seconds on a fleet backend with the default 512 output tokens per request, longer on one that allows more. A slow local model, or a reasoning model thinking at length, runs past it.",
+    steps: (run, closed) => [
+      retryStep(run, closed, "Ask for less in one message", "A shorter answer, or one tool action per message, finishes sooner."),
+      thinkingOffStep(run),
+      { label: "If the backend already allows more output tokens", detail: "Its turn limit only grows with the cap on a fleet whose Celln is newer than v0.5.24. On an older fleet every turn has 60 seconds whatever the cap; move the fleet to a current release, then add the backend again under a new name." },
     ],
   },
   {

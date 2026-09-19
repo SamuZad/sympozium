@@ -94,6 +94,36 @@ func sameJSON(a, b []byte) bool {
 	return json.Unmarshal(a, &left) == nil && json.Unmarshal(b, &right) == nil && reflect.DeepEqual(left, right)
 }
 
+// workerTimeoutMs is the lifetime a native worker request gives one turn.
+func workerTimeoutMs(worker []byte) int64 {
+	var request struct {
+		Capabilities struct {
+			TimeoutMs int64 `json:"timeoutMs"`
+		} `json:"capabilities"`
+	}
+	if json.Unmarshal(worker, &request) != nil {
+		return 0
+	}
+	return request.Capabilities.TimeoutMs
+}
+
+// sameWorkerMaterial compares two native worker requests apart from the turn
+// lifetime, which follows each backend's output-token cap.
+func sameWorkerMaterial(a, b []byte) bool {
+	strip := func(raw []byte) any {
+		var request map[string]any
+		if json.Unmarshal(raw, &request) != nil {
+			return nil
+		}
+		if capabilities, ok := request["capabilities"].(map[string]any); ok {
+			delete(capabilities, "timeoutMs")
+		}
+		return request
+	}
+	left, right := strip(a), strip(b)
+	return left != nil && reflect.DeepEqual(left, right)
+}
+
 // backendConfiguration is one backend's reviewed starter configuration as a
 // fleet node published it.
 type backendConfiguration struct {
@@ -180,18 +210,25 @@ func InstallPlatform(ctx context.Context, store client.Client, o PlatformOptions
 		backends = append(backends, b)
 	}
 	first := backends[0]
-	var worker struct {
-		Capabilities struct {
-			TimeoutMs int64 `json:"timeoutMs"`
-		} `json:"capabilities"`
-	}
-	if json.Unmarshal(first.native.Worker, &worker) != nil || worker.Capabilities.TimeoutMs < 1000 {
-		return fmt.Errorf("native worker request lacks a bounded lifetime")
+	// The policy's turn ceiling admits the longest turn any backend grants;
+	// each profile still holds its own runs to its own lifetime.
+	var maxTurnMs int64
+	for _, b := range backends {
+		timeout := workerTimeoutMs(b.native.Worker)
+		if timeout < 1000 || timeout != b.cat.Worker.Limits.TimeoutMillis {
+			return fmt.Errorf("backend %s: native worker request lacks a bounded lifetime matching its catalogue", b.name)
+		}
+		maxTurnMs = max(maxTurnMs, timeout)
 	}
 	// One scope, one package: every backend must be the same reviewed
-	// material with only its model route and credential differing.
+	// material with only its model route, credential and the turn lifetime
+	// that follows its output-token cap differing.
+	firstWorker := first.cat.Worker
+	firstWorker.Limits.TimeoutMillis = 0
 	for _, b := range backends[1:] {
-		if !reflect.DeepEqual(b.cat.Tools, first.cat.Tools) || !reflect.DeepEqual(b.cat.Worker, first.cat.Worker) || b.cat.SystemPrompt != first.cat.SystemPrompt || b.configured.HostLimits != first.configured.HostLimits || !sameJSON(b.native.Parent, first.native.Parent) || !sameJSON(b.native.Worker, first.native.Worker) {
+		worker := b.cat.Worker
+		worker.Limits.TimeoutMillis = 0
+		if !reflect.DeepEqual(b.cat.Tools, first.cat.Tools) || !reflect.DeepEqual(worker, firstWorker) || b.cat.SystemPrompt != first.cat.SystemPrompt || b.configured.HostLimits != first.configured.HostLimits || !sameJSON(b.native.Parent, first.native.Parent) || !sameWorkerMaterial(b.native.Worker, first.native.Worker) {
 			return fmt.Errorf("backend %s differs from %s in reviewed package material; one scope carries one package", b.name, first.name)
 		}
 	}
@@ -244,7 +281,7 @@ func InstallPlatform(ctx context.Context, store client.Client, o PlatformOptions
 		Tools:             policyTools,
 		Lifecycles:        []string{"direct-one-shot", "harness-one-shot", "enduring"},
 		Routes:            routes,
-		Ceilings:          api.CellnExecutionPolicyCeilings{MaxTurns: int64(limits.MaxTurns), MaxModelRequests: int64(limits.MaxModelRequests), MaxOutputTokens: limits.MaxOutputTokens, MaxParentLeaseSeconds: int64(limits.LeaseSeconds), MaxTurnSeconds: worker.Capabilities.TimeoutMs / 1000},
+		Ceilings:          api.CellnExecutionPolicyCeilings{MaxTurns: int64(limits.MaxTurns), MaxModelRequests: int64(limits.MaxModelRequests), MaxOutputTokens: limits.MaxOutputTokens, MaxParentLeaseSeconds: int64(limits.LeaseSeconds), MaxTurnSeconds: maxTurnMs / 1000},
 	}}
 	// Reserve the private output before any cluster change; a rerun that adds
 	// a backend reuses the directory it made.
@@ -409,6 +446,12 @@ func ensurePlatformPolicy(ctx context.Context, store client.Client, policy *api.
 			existing.Spec.Routes = append(existing.Spec.Routes, route)
 			changed = true
 		}
+	}
+	// An added backend may grant a longer turn than any before it; the
+	// ceiling follows it up and is never lowered under running agents.
+	if policy.Spec.Ceilings.MaxTurnSeconds > existing.Spec.Ceilings.MaxTurnSeconds {
+		existing.Spec.Ceilings.MaxTurnSeconds = policy.Spec.Ceilings.MaxTurnSeconds
+		changed = true
 	}
 	if !changed {
 		return nil
