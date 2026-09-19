@@ -55,7 +55,7 @@ func (f *cellnFleetFlags) register(cmd *cobra.Command) {
 	cmd.Flags().StringArrayVar(&f.backendSpecs, "celln-fleet-backend", nil, "A model backend of this fleet, repeatable: name=NAME,provider=PROVIDER,model=MODEL[,endpoint=URL][,protocol=openai-chat|anthropic-messages][,credential-file=/path][,allow-insecure=true]. Every node configures every backend and a namespace may run parents on any of them side by side. Without this flag the --celln-fleet-model-* flags define the single backend named native")
 	cmd.Flags().StringArrayVar(&f.options.HTTPSHosts, "celln-fleet-https-host", nil, "An exact host the https-fetch and https-post-json starter tools may reach, repeatable (lowercase DNS name; default example.com). Every backend's nodes configure the same list")
 	cmd.Flags().BoolVar(&f.skipPreflight, "celln-fleet-skip-preflight", false, "Skip the one-token chat probe of every backend with its key (use when only the nodes can reach the endpoint)")
-	cmd.Flags().BoolVar(&f.replacePackage, "celln-fleet-replace-package", false, "Approve moving an installed fleet to this package or scope (e.g. after upgrading sympozium, whose release pins a new starter package): nodes publish the new configuration, the scope's catalogue is replaced and every namespace's platform wrappers are rebound. Every live parent on the fleet is lost")
+	cmd.Flags().BoolVar(&f.replacePackage, "celln-fleet-replace-package", false, "Approve moving an installed fleet to this package or scope (e.g. after upgrading to a sympozium release whose starter package inputs changed; most releases keep the package): nodes publish the new configuration, the scope's catalogue is replaced and every namespace's platform wrappers are rebound. Every live parent on the fleet is lost")
 	cmd.Flags().StringVar(&f.outputDir, "celln-fleet-output-dir", "", "Absolute private directory for the materialized configuration and installation records (default ~/.sympozium/celln-fleet/<scope>)")
 	cmd.Flags().DurationVar(&f.wait, "celln-fleet-wait", 15*time.Minute, "How long to wait for the first labeled node to publish the starter configuration")
 }
@@ -111,6 +111,9 @@ func installCellnFleet(ctx context.Context, f cellnFleetFlags, imageTag string, 
 	replacing := publication.Replaces(f.options.Scope, f.options.PackageHash)
 	if replacing && !f.replacePackage {
 		return publication.ReplacementRefusal(f.options.Scope, f.options.PackageHash)
+	}
+	if notice := fleetPackageUnchangedNotice(publication, f.options.Scope, f.options.PackageHash); notice != "" {
+		fmt.Println("  " + notice)
 	}
 	// Every backend answers a one-token chat request with its key before the
 	// cluster changes, so a dead provider or bad key is reported here rather
@@ -298,4 +301,15 @@ func parseFleetBackends(specs []string) ([]cellninstall.FleetBackend, error) {
 		out = append(out, b)
 	}
 	return out, nil
+}
+
+// fleetPackageUnchangedNotice tells an operator upgrading an installed fleet
+// that this install keeps the package and scope the nodes published, so no
+// dispatcher restarts and no live parent is lost. It is empty for a first
+// install and for a replacement, which says what it costs instead.
+func fleetPackageUnchangedNotice(p cellninstall.FleetPublication, scope, packageHash string) string {
+	if !p.Exists || p.Replaces(scope, packageHash) {
+		return ""
+	}
+	return fmt.Sprintf("Celln fleet package unchanged (%s); live conversations are kept", packageHash)
 }
