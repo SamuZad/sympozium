@@ -75,6 +75,7 @@ type Server struct {
 	powerClient  *collector.Client        // optional: nil when energy collection is disabled
 	authEnabled  bool                     // set by buildMux; gates pricing writes
 	version      string                   // build version, reported by /api/v1/cluster/identity
+	cellnCells   cellnCellsSource         // gateway `/v1/cells` client and its "unsupported" verdict
 }
 
 // NewServer creates a new API server.

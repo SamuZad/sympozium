@@ -475,6 +475,24 @@ Follow-up turns created by hand must carry the run's controller
 refused as unbound. `test/integration/test-celln-fleet.sh` runs the whole
 journey on a three-node Kind cluster, including a node-leave drain.
 
+### Seeing cells in the console
+
+The Harnesses page and the topology show `celln ps` for every fleet node
+(`GET /api/v1/celln-platform/cells`), and the card says where the data came
+from. The API server first asks the Celln gateway for `GET /v1/cells` with the
+same read-only capability token it uses for `/v1/capabilities`
+(**source: gateway**); this also carries each parent's live owner status
+(`Ready`, `TurnActive`, `ContextLost`, …), which the console shows in place of
+the run's phase. Celln releases that predate that endpoint answer 404, which
+the API server remembers for five minutes, and it then reads the
+`celln-fleet-cells` ConfigMap that every node's `celln-node-configure` pod
+publishes every two seconds (**source: node reports**). The ConfigMap is also
+used when the gateway is busy or unreachable, and for a single node whose
+dispatcher the gateway could not list; a backend with neither appears as
+`node-<index>` with the gateway's reason. The node reporter and its chart
+wiring stay installed for older Celln releases and become redundant once the
+pinned Celln release serves `/v1/cells`.
+
 ## Operations
 
 - **Join a node:** label it. The package is admitted on that node only.
