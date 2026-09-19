@@ -27,6 +27,7 @@ jobs:
     outputs:
       code: ${{ steps.filter.outputs.code }}
       web: ${{ steps.filter.outputs.web }}
+      system: ${{ steps.filter.outputs.system }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -45,6 +46,20 @@ jobs:
               - 'config/celln/**'
             web:
               - 'web/**'
+              - '.github/workflows/build.yaml'
+            # Inputs of the envtest suite: Go code (api/, internal/, the tests
+            # themselves), the CRDs it installs, and the chart copies that must
+            # match them. Kept apart from `code`, which also gates image builds.
+            system:
+              - '**.go'
+              - 'go.mod'
+              - 'go.sum'
+              - 'Makefile'
+              - 'api/**'
+              - 'config/crd/**'
+              - 'charts/sympozium/crds/**'
+              - 'charts/sympozium-crds/templates/**'
+              - 'test/system/**'
               - '.github/workflows/build.yaml'
 
   verify:
@@ -69,6 +84,10 @@ jobs:
           fi
       - name: Vet
         run: go vet ./...
+      - name: Vet build-tagged code
+        # `./...` skips files behind a build constraint (test/system is
+        # `//go:build system`), so they can stop compiling unnoticed.
+        run: make vet-tags
       - name: Build
         run: go build ./...
       - name: Test
@@ -83,6 +102,39 @@ jobs:
           fi
       - name: Check Helm chart CRDs in sync
         run: make helm-sync-check
+
+  system-tests:
+    name: System tests (envtest)
+    # Controllers + API server against a real kube-apiserver/etcd; no cluster.
+    # `make test-system` is what CLAUDE.md prescribes for reconcile changes.
+    needs: [changes]
+    if: >-
+      always() &&
+      (needs.changes.outputs.system == 'true' || github.event_name == 'workflow_dispatch')
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Read envtest Kubernetes version
+        id: envtest
+        run: echo "version=$(make -s envtest-k8s-version)" >> "$GITHUB_OUTPUT"
+      - name: Cache envtest binaries
+        # bin/ is the Makefile's LOCALBIN: setup-envtest plus the etcd and
+        # kube-apiserver it downloads. With a hit, the run needs no download.
+        uses: actions/cache@v4
+        with:
+          path: bin
+          key: envtest-${{ runner.os }}-${{ runner.arch }}-${{ steps.envtest.outputs.version }}
+      - name: Download envtest binaries
+        run: make envtest-assets
+      - name: Run system tests
+        run: make test-system
 
   web-stubbed-e2e:
     name: Console stubbed Cypress specs
