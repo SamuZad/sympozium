@@ -291,7 +291,7 @@ func TestCellnParentLostContinuationIsNotContinuedAgain(t *testing.T) {
 	seed := []api.ConversationExchange{{User: "Remember the word saffron.", Assistant: "Noted: saffron."}}
 	asContinuation := func(t *testing.T, run *api.AgentRun, origin string) *api.AgentRun {
 		t.Helper()
-		next, err := cellnparent.Continuation(run, seed, origin)
+		next, err := cellnparent.Continuation(run, seed, origin, cellnparent.LegacySeedBytes)
 		if err != nil {
 			t.Fatal(err)
 		}

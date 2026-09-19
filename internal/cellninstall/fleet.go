@@ -148,10 +148,37 @@ type FleetLimits struct {
 	MaxOutputTokens  int64
 }
 
+// defaultFleetTurns is how many turns the default ceilings afford one parent.
+const defaultFleetTurns = 256
+
+// Bounds of the lifetime totals. The minima are one turn of the starter
+// profile's allowance (Celln refuses less when configuring a node); the
+// maxima are the CRD's.
+const (
+	MinFleetModelRequests = api.TurnModelRequests
+	MaxFleetModelRequests = 6144
+	MinFleetOutputTokens  = api.TurnOutputTokens
+	MaxFleetOutputTokens  = 3145728
+)
+
 // DefaultFleetLimits favour long-running agents: a day-long parent with room
-// for a working session of turns (the starter profile spends up to 3 requests
-// and 1536 output tokens per turn).
-var DefaultFleetLimits = FleetLimits{LeaseSeconds: 86400, MaxTurns: 256, MaxModelRequests: 768, MaxOutputTokens: 393216}
+// for a working session of turns. Every turn reserves the starter profile's
+// whole per-turn allowance (api.TurnModelRequests requests,
+// api.TurnOutputTokens output tokens) from these totals, so they are sized as
+// turns × allowance.
+var DefaultFleetLimits = FleetLimits{LeaseSeconds: 86400, MaxTurns: defaultFleetTurns, MaxModelRequests: defaultFleetTurns * api.TurnModelRequests, MaxOutputTokens: defaultFleetTurns * api.TurnOutputTokens}
+
+// CapFleetTotal bounds a suggested lifetime total by its maximum.
+func CapFleetTotal(total, maximum int64) int64 { return min(total, maximum) }
+
+// TurnsAfforded is how many turns lifetime totals pay for when every turn
+// reserves turnRequests model requests and turnTokens output tokens.
+func TurnsAfforded(maxModelRequests, maxOutputTokens, turnRequests, turnTokens int64) int64 {
+	if turnRequests < 1 || turnTokens < 1 {
+		return 0
+	}
+	return min(maxModelRequests/turnRequests, maxOutputTokens/turnTokens)
+}
 
 // Resolve fills zero fields from the defaults and applies the CRD bounds.
 func (l FleetLimits) Resolve() (FleetLimits, error) {
@@ -168,8 +195,8 @@ func (l FleetLimits) Resolve() (FleetLimits, error) {
 	if l.MaxOutputTokens == 0 {
 		l.MaxOutputTokens = d.MaxOutputTokens
 	}
-	if l.LeaseSeconds < 60 || l.LeaseSeconds > 86400 || l.MaxTurns < 1 || l.MaxTurns > 1024 || l.MaxModelRequests < 3 || l.MaxModelRequests > 6144 || l.MaxOutputTokens < 1536 || l.MaxOutputTokens > 3145728 {
-		return l, fmt.Errorf("fleet limits out of range: lease 60–86400 s, turns 1–1024, model requests 3–6144, output tokens 1536–3145728")
+	if l.LeaseSeconds < 60 || l.LeaseSeconds > 86400 || l.MaxTurns < 1 || l.MaxTurns > 1024 || l.MaxModelRequests < MinFleetModelRequests || l.MaxModelRequests > MaxFleetModelRequests || l.MaxOutputTokens < MinFleetOutputTokens || l.MaxOutputTokens > MaxFleetOutputTokens {
+		return l, fmt.Errorf("fleet limits out of range: lease 60–86400 s, turns 1–1024, model requests %d–%d, output tokens %d–%d", MinFleetModelRequests, MaxFleetModelRequests, MinFleetOutputTokens, MaxFleetOutputTokens)
 	}
 	return l, nil
 }

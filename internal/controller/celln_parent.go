@@ -217,11 +217,12 @@ func (r *AgentRunReconciler) recordParentAdmissionPending(ctx context.Context, o
 // continueConversation creates the run that carries a lost enduring parent's
 // conversation on, seeded with its recorded exchanges, and returns its name.
 func (r *AgentRunReconciler) continueConversation(ctx context.Context, lost *api.AgentRun) (string, error) {
-	seed, err := cellnparent.Transcript(ctx, r.parentReader(), lost)
+	budget := cellnparent.SeedBudgetFor(ctx, r.parentReader(), lost)
+	seed, err := cellnparent.Transcript(ctx, r.parentReader(), lost, budget)
 	if err != nil {
 		return "", err
 	}
-	next, err := cellnparent.Continuation(lost, seed, cellnparent.ContinuationOriginAutomatic)
+	next, err := cellnparent.Continuation(lost, seed, cellnparent.ContinuationOriginAutomatic, budget)
 	if err != nil {
 		return "", err
 	}

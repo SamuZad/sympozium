@@ -333,7 +333,7 @@ func (r *AgentRunTurnReconciler) applyTurnStatus(ctx context.Context, turn *api.
 		if state == nil {
 			return errors.New("scoped turn status lost")
 		}
-		if len(current.UID) <= 64 && len(state.Output) >= 1 && len(state.Output) <= 2048 && len(state.ChildID) == 71 && state.ChildID[:7] == "blake3:" && scopedReceiptPattern.MatchString(state.ChildID) {
+		if len(current.UID) <= 64 && len(state.Output) >= 1 && len(state.Output) <= api.MaxConversationAnswerBytes && len(state.ChildID) == 71 && state.ChildID[:7] == "blake3:" && scopedReceiptPattern.MatchString(state.ChildID) {
 			current.Status.Execution = &api.CellnParentTurnStatus{ID: string(current.UID), Message: current.Spec.Message, Child: state.ChildID, Attempted: true, Result: &api.CellnParentTurnResult{Succeeded: observed.Phase == "Succeeded", Answer: state.Output}}
 		}
 		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{Type: "CellnTurnComplete", Status: metav1.ConditionTrue, Reason: "Committed", Message: "The original scoped turn owner returned a terminal correlated result; child cleanup confirmation is pending.", ObservedGeneration: current.Generation})

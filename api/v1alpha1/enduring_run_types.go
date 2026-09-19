@@ -58,9 +58,31 @@ type ConversationExchange struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=2048
 	User string `json:"user"`
-	// +kubebuilder:validation:MaxLength=2048
+	// +kubebuilder:validation:MaxLength=8192
 	Assistant string `json:"assistant"`
 }
+
+// Bounds of one exchange in an enduring conversation, mirroring the Celln
+// host's parent protocol. The CRD MaxLength markers on messages and answers
+// state the same numbers; a marker cannot reference a constant, so
+// TestConversationBoundsMatchSchema keeps them together.
+const (
+	// MaxConversationMessageBytes bounds one user message.
+	MaxConversationMessageBytes = 2048
+	// MaxConversationAnswerBytes bounds one committed answer.
+	MaxConversationAnswerBytes = 8192
+	// MaxWorkerTaskBytes is the worker task (history plus message) a current
+	// starter package reports as its runtime profile's taskBytes.
+	MaxWorkerTaskBytes = 16384
+)
+
+// Per-turn model allowance of the current Celln starter package. Every turn
+// reserves the whole allowance from its parent's lifetime totals, so totals
+// are sized as turns × allowance.
+const (
+	TurnModelRequests = 6
+	TurnOutputTokens  = 3072
+)
 
 // MaxContinuationDepth bounds automatic re-creation along one conversation.
 const MaxContinuationDepth = 16

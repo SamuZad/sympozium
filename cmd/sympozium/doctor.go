@@ -260,7 +260,7 @@ func (d *doctor) run(ctx context.Context) doctorReport {
 		rel, releaseFinding := d.checkRelease()
 		findings = append(findings, releaseFinding)
 		findings = append(findings, d.checkLeftovers(ctx, rel)...)
-		findings = append(findings, d.checkKVMNodes(ctx), d.checkFleetPods(ctx), d.checkFleetPackage(ctx), d.checkModelCredentials(ctx))
+		findings = append(findings, d.checkKVMNodes(ctx), d.checkFleetPods(ctx), d.checkFleetPackage(ctx), d.checkFleetBudget(ctx), d.checkModelCredentials(ctx))
 	}
 	report := doctorReport{OK: true, Findings: findings}
 	for _, f := range findings {

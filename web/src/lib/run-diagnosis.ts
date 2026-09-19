@@ -377,7 +377,7 @@ export const HARNESS_ERRORS: HarnessEntry[] = [
     title: "Turn failed: too many tool calls for one turn",
     cause: "The agent used up the per-turn tool call limit before it produced an answer, so the turn was discarded.",
     steps: (run, initial) => [
-      retryStep(run, initial, "Ask for one action per message", "Each turn allows only a few tool calls. Split the request (“fetch X”, then “now summarise it”) so each message needs one."),
+      retryStep(run, initial, "Ask for fewer actions per message", "Every turn has a tool call limit, set by the fleet's starter package. Split the request (“fetch X”, then “now summarise it”) so each message stays inside the turn's tool call limit."),
       { label: "Nothing was committed", detail: "A failed turn records no answer; work the tools already did is not replayed." },
     ],
   },
@@ -387,7 +387,7 @@ export const HARNESS_ERRORS: HarnessEntry[] = [
     cause: "The agent's final answer was empty or exceeded the turn's answer size bound, so no result was committed.",
     steps: (run, initial) => [
       retryStep(run, initial, "Ask for a shorter answer", "Ask for a summary, a fixed number of bullet points, or one part at a time."),
-      { label: "If answers are routinely cut", detail: "The bound comes from the conversation's output token budget; a new conversation can ask for a larger one within the profile's ceiling." },
+      { label: "If answers are routinely cut", detail: "The answer size bound is fixed by the fleet's Celln starter package, not by this conversation's budget. A fleet still on an older package has a smaller bound until its operator moves it to a current one." },
     ],
   },
   {

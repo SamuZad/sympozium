@@ -35,7 +35,7 @@ func TestCellnPlatformProfilesAndWrappersFollowTheNamespacePolicy(t *testing.T) 
 			{Provider: "deepseek", Protocol: "openai-chat", Models: []string{"deepseek-chat"}, EndpointOrigins: []string{"https://api.deepseek.com"}, Auth: "host-profile"},
 			{Provider: "llama-server", Protocol: "openai-chat", Models: []string{"qwen.gguf"}, EndpointOrigins: []string{"http://100.81.163.75:8080"}, Auth: "host-profile", AllowInsecure: true},
 		},
-		Ceilings: sympoziumv1alpha1.CellnExecutionPolicyCeilings{MaxTurns: 256, MaxModelRequests: 768, MaxOutputTokens: 393216, MaxParentLeaseSeconds: 86400, MaxTurnSeconds: 60},
+		Ceilings: sympoziumv1alpha1.CellnExecutionPolicyCeilings{MaxTurns: 256, MaxModelRequests: 1536, MaxOutputTokens: 786432, MaxParentLeaseSeconds: 86400, MaxTurnSeconds: 60},
 	}}
 	ns := func(name string) *corev1.Namespace {
 		return &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{cellnplatform.NamespaceNameLabel: name}}}
@@ -60,7 +60,7 @@ func TestCellnPlatformProfilesAndWrappersFollowTheNamespacePolicy(t *testing.T) 
 	for _, p := range got {
 		byName[p.Name] = p
 	}
-	if p := byName["celln-native-trial"]; len(got) != 2 || p.Provider != "deepseek" || p.Model != "deepseek-chat" || p.CredentialProfile != "trial" || p.Backend != "native" || p.Wrapper != "celln-native" || p.Agent != "celln-agent" || len(p.Tools) != 1 || p.Tools[0].Name != "celln-trial-workspace-read" || p.SystemPrompt != "host persona" || p.Ceilings.LeaseSeconds != 86400 || p.SessionDefaults.LeaseSeconds != 14400 || p.SessionDefaults.MaxTurns != 64 {
+	if p := byName["celln-native-trial"]; len(got) != 2 || p.Provider != "deepseek" || p.Model != "deepseek-chat" || p.CredentialProfile != "trial" || p.Backend != "native" || p.Wrapper != "celln-native" || p.Agent != "celln-agent" || len(p.Tools) != 1 || p.Tools[0].Name != "celln-trial-workspace-read" || p.SystemPrompt != "host persona" || p.Ceilings.LeaseSeconds != 86400 || p.SessionDefaults.LeaseSeconds != 14400 || p.SessionDefaults.MaxTurns != 64 || p.SessionDefaults.MaxModelRequests != 384 || p.SessionDefaults.MaxOutputTokens != 196608 {
 		t.Fatalf("tenant profiles: %+v", got)
 	}
 	if p := byName["celln-native-trial-local"]; p.Provider != "llama-server" || p.Model != "qwen.gguf" || p.CredentialProfile != "trial-local" || p.Backend != "local" || p.Wrapper != "celln-local" || p.Agent != "celln-agent-local" {
