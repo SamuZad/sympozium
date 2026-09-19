@@ -780,6 +780,19 @@ export function useClusterInfo() {
   });
 }
 
+/** Which cluster the console is talking to. Identity rarely changes, so this
+ *  polls far slower than the 5 s app default; a window refocus still refetches,
+ *  which is when a silently re-pointed port-forward is most likely noticed. */
+export function useCluster(refetchInterval = 60000) {
+  return useQuery({
+    queryKey: ["cluster", "identity"],
+    queryFn: api.cluster.get,
+    refetchInterval,
+    // Always stale, so every return to the tab re-checks the cluster.
+    staleTime: 0,
+  });
+}
+
 // ── Pods ─────────────────────────────────────────────────────────────────────
 
 export function usePods() {
