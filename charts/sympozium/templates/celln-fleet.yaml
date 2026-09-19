@@ -34,7 +34,7 @@
 {{- end }}
 {{- if not $backends }}
 {{- $legacyModel := $fleet.model | default dict }}
-{{- $backends = list (dict "name" "native" "provider" ($legacyModel.provider | default "") "protocol" ($legacyModel.protocol | default "") "endpoint" ($legacyModel.endpoint | default "") "model" ($legacyModel.name | default "") "allowInsecure" ($legacyModel.allowInsecure | default false)) }}
+{{- $backends = list (dict "name" "native" "provider" ($legacyModel.provider | default "") "protocol" ($legacyModel.protocol | default "") "endpoint" ($legacyModel.endpoint | default "") "model" ($legacyModel.name | default "") "allowInsecure" ($legacyModel.allowInsecure | default false) "parameters" ($legacyModel.parameters | default dict)) }}
 {{- end }}
 {{- if gt (len $backends) 32 }}
 {{- fail "celln.fleet.backends allows at most 32 model backends per scope" }}
@@ -58,7 +58,29 @@
 {{- if and $endpoint (hasPrefix "http://" $endpoint) (not $b.allowInsecure) }}
 {{- fail (printf "celln.fleet.backends[%s].endpoint is plain HTTP; set allowInsecure=true to approve it" $name) }}
 {{- end }}
-{{- $backendExport = append $backendExport (dict "name" $name "provider" ($b.provider | default "") "protocol" ($b.protocol | default "") "endpoint" $endpoint "model" ($b.model | default "") "allowInsecure" ($b.allowInsecure | default false) "credentialFile" $credential) }}
+{{- $export := dict "name" $name "provider" ($b.provider | default "") "protocol" ($b.protocol | default "") "endpoint" $endpoint "model" ($b.model | default "") "allowInsecure" ($b.allowInsecure | default false) "credentialFile" $credential }}
+{{- /* Model parameters: an object, or the same object as one JSON string (what
+     the installer sends, since --set values cannot carry an object). Only a
+     backend that has some exports the key, so every other backend's plan,
+     and this list's checksum, stay exactly as they were. Celln validates
+     the object when it configures the node. */}}
+{{- $parameters := $b.parameters | default dict }}
+{{- if kindIs "string" $parameters }}
+{{- $parameters = fromJson $parameters }}
+{{- if hasKey $parameters "Error" }}
+{{- fail (printf "celln.fleet.backends[%s].parameters is not a JSON object: %s" $name $parameters.Error) }}
+{{- end }}
+{{- end }}
+{{- if not (kindIs "map" $parameters) }}
+{{- fail (printf "celln.fleet.backends[%s].parameters must be an object" $name) }}
+{{- end }}
+{{- if $parameters }}
+{{- if not $endpoint }}
+{{- fail (printf "celln.fleet.backends[%s].parameters needs the backend's endpoint, provider, model and protocol" $name) }}
+{{- end }}
+{{- $_ := set $export "parameters" $parameters }}
+{{- end }}
+{{- $backendExport = append $backendExport $export }}
 {{- end }}
 {{- $limits := $fleet.limits | default dict }}
 {{- $lease := int64 ($limits.leaseSeconds | default 0) }}
@@ -157,6 +179,8 @@ data:
 {{ .Files.Get "files/celln/fleet-prepare.sh" | indent 4 }}
   fleet-publish.py: |
 {{ .Files.Get "files/celln/fleet-publish.py" | indent 4 }}
+  fleet-plan.py: |
+{{ .Files.Get "files/celln/fleet-plan.py" | indent 4 }}
   fleet-cells.sh: |
 {{ .Files.Get "files/celln/fleet-cells.sh" | indent 4 }}
   fleet-cells.py: |
@@ -278,6 +302,10 @@ spec:
             - name: prepare
               mountPath: /etc/celln-fleet/fleet-publish.py
               subPath: fleet-publish.py
+              readOnly: true
+            - name: prepare
+              mountPath: /etc/celln-fleet/fleet-plan.py
+              subPath: fleet-plan.py
               readOnly: true
             - name: prepare
               mountPath: /etc/celln-fleet/fleet-cells.sh

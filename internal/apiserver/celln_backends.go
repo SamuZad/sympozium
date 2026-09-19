@@ -32,6 +32,9 @@ type CellnFleetBackend struct {
 	Endpoint      string `json:"endpoint"`
 	Model         string `json:"model"`
 	AllowInsecure bool   `json:"allowInsecure"`
+	// Parameters are what the Celln host merges into every provider request
+	// of this backend; absent when it has none.
+	Parameters map[string]any `json:"parameters,omitempty"`
 	// Source is install (the chart's list) or added (through this API).
 	Source string `json:"source"`
 	// Profile is the runtime profile every namespace's wrapper binds to.
@@ -55,6 +58,11 @@ type AddCellnFleetBackendRequest struct {
 	// SkipPreflight skips the one-token probe, for endpoints only the nodes
 	// can reach.
 	SkipPreflight bool `json:"skipPreflight,omitempty"`
+	// Parameters is an optional JSON object the Celln host merges into every
+	// provider request of this backend (cellninstall.ValidateModelParameters).
+	// They need a Celln newer than v0.5.22 on the nodes and cannot change once
+	// the backend exists.
+	Parameters map[string]any `json:"parameters,omitempty"`
 }
 
 const extraBackendCompletionTimeout = 25 * time.Minute
@@ -86,7 +94,7 @@ func (s *Server) listCellnFleetBackends(w http.ResponseWriter, r *http.Request) 
 		if present[profile] {
 			state = "ready"
 		}
-		out = append(out, CellnFleetBackend{Name: b.Name, Provider: b.Provider, Protocol: b.Protocol, Endpoint: b.Endpoint, Model: b.Model, AllowInsecure: b.AllowInsecure, Source: "install", Profile: profile, State: state})
+		out = append(out, CellnFleetBackend{Name: b.Name, Provider: b.Provider, Protocol: b.Protocol, Endpoint: b.Endpoint, Model: b.Model, AllowInsecure: b.AllowInsecure, Parameters: b.Parameters, Source: "install", Profile: profile, State: state})
 	}
 	for _, b := range extra {
 		profile := cellninstall.PlatformProfileName(facts.Scope, b.Name)
@@ -96,7 +104,7 @@ func (s *Server) listCellnFleetBackends(w http.ResponseWriter, r *http.Request) 
 		} else if state == "" {
 			state = "pending: waiting for the nodes to configure it"
 		}
-		out = append(out, CellnFleetBackend{Name: b.Name, Provider: b.Provider, Protocol: b.Protocol, Endpoint: b.Endpoint, Model: b.Model, AllowInsecure: b.AllowInsecure, Source: "added", Profile: profile, State: state})
+		out = append(out, CellnFleetBackend{Name: b.Name, Provider: b.Provider, Protocol: b.Protocol, Endpoint: b.Endpoint, Model: b.Model, AllowInsecure: b.AllowInsecure, Parameters: b.Parameters, Source: "added", Profile: profile, State: state})
 	}
 	writeJSON(w, out)
 }
@@ -105,6 +113,7 @@ func (s *Server) addCellnFleetBackend(w http.ResponseWriter, r *http.Request) {
 	var req AddCellnFleetBackendRequest
 	decoder := json.NewDecoder(io.LimitReader(r.Body, 16384))
 	decoder.DisallowUnknownFields()
+	decoder.UseNumber()
 	if err := decoder.Decode(&req); err != nil || strings.TrimSpace(req.Name) == "" || strings.TrimSpace(req.Provider) == "" {
 		http.Error(w, "name and provider are required", http.StatusBadRequest)
 		return
@@ -114,7 +123,12 @@ func (s *Server) addCellnFleetBackend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	model := cellninstall.FleetModel{Provider: strings.TrimSpace(req.Provider), Protocol: req.Protocol, Endpoint: strings.TrimSpace(req.Endpoint), Name: strings.TrimSpace(req.Model), AllowInsecure: req.AllowInsecure}
+	// Checked before anything is probed or published, with the precise rule.
+	if err := cellninstall.ValidateModelParameters(req.Parameters); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	model := cellninstall.FleetModel{Provider: strings.TrimSpace(req.Provider), Protocol: req.Protocol, Endpoint: strings.TrimSpace(req.Endpoint), Name: strings.TrimSpace(req.Model), AllowInsecure: req.AllowInsecure, Parameters: req.Parameters}
 	// An OpenAI-compatible server given only by its address names its own
 	// model; a local llama-server serves exactly one.
 	if model.Name == "" && model.Endpoint != "" && (model.Protocol == "" || model.Protocol == "openai-chat") {
@@ -159,15 +173,19 @@ func (s *Server) addCellnFleetBackend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	profile := cellninstall.PlatformProfileName(facts.Scope, req.Name)
-	go s.completeCellnFleetBackend(req.Name, facts)
+	complete := s.completeCellnBackend
+	if complete == nil {
+		complete = s.completeCellnFleetBackend
+	}
+	go complete(req.Name, facts, len(resolved.Parameters) != 0)
 	w.WriteHeader(http.StatusAccepted)
-	writeJSON(w, CellnFleetBackend{Name: req.Name, Provider: resolved.Provider, Protocol: resolved.Protocol, Endpoint: resolved.Endpoint, Model: resolved.Name, AllowInsecure: resolved.AllowInsecure, Source: "added", Profile: profile, State: "pending: waiting for the nodes to configure it"})
+	writeJSON(w, CellnFleetBackend{Name: req.Name, Provider: resolved.Provider, Protocol: resolved.Protocol, Endpoint: resolved.Endpoint, Model: resolved.Name, AllowInsecure: resolved.AllowInsecure, Parameters: resolved.Parameters, Source: "added", Profile: profile, State: "pending: waiting for the nodes to configure it"})
 }
 
 // completeCellnFleetBackend waits for the nodes to publish the added
 // backend's configuration, then installs its profile, route and wrappers
 // the way the installer does, recording progress on the extra list.
-func (s *Server) completeCellnFleetBackend(name string, facts cellninstall.FleetFacts) {
+func (s *Server) completeCellnFleetBackend(name string, facts cellninstall.FleetFacts, hasParameters bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), extraBackendCompletionTimeout)
 	defer cancel()
 	record := func(state string) {
@@ -209,7 +227,11 @@ func (s *Server) completeCellnFleetBackend(name string, facts cellninstall.Fleet
 		}
 		select {
 		case <-ctx.Done():
-			fail(fmt.Errorf("the nodes did not publish backend %s within %s; check the celln-node-configure logs in celln-system", name, extraBackendCompletionTimeout))
+			hint := ""
+			if hasParameters {
+				hint = "; " + cellninstall.ModelParametersCellnHint
+			}
+			fail(fmt.Errorf("the nodes did not publish backend %s within %s; check the celln-node-configure logs in celln-system%s", name, extraBackendCompletionTimeout, hint))
 			return
 		case <-time.After(10 * time.Second):
 		}

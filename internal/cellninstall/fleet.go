@@ -209,6 +209,11 @@ type FleetModel struct {
 	Endpoint      string
 	Name          string
 	AllowInsecure bool
+	// Parameters are merged by the Celln host into every provider request of
+	// this backend (ValidateModelParameters); the guest never sees them. They
+	// need a Celln release newer than ModelParametersMinCelln on the nodes and
+	// cannot change once the backend is published.
+	Parameters map[string]any
 }
 
 // Fleet model provider presets.
@@ -264,6 +269,12 @@ func (m FleetModel) Resolve(scope string) (FleetModel, error) {
 	}
 	if strings.ContainsAny(m.Endpoint+m.Name+m.Provider, ",= \t") {
 		return m, fmt.Errorf("model provider, endpoint and name must not contain commas, equals signs or spaces")
+	}
+	if err := ValidateModelParameters(m.Parameters); err != nil {
+		return m, err
+	}
+	if len(m.Parameters) == 0 {
+		m.Parameters = nil
 	}
 	return m, nil
 }
@@ -351,6 +362,13 @@ func FleetValues(o FleetOptions) ([]string, error) {
 			prefix+"model="+b.Model.Name,
 			fmt.Sprintf("%sallowInsecure=%t", prefix, b.Model.AllowInsecure),
 		)
+		// Only a backend that has parameters carries the key: a Celln up to
+		// ModelParametersMinCelln refuses a plan that names them. The object
+		// travels as one JSON string, escaped so strvals keeps it literally;
+		// the chart decodes it.
+		if parameters := ModelParametersJSON(b.Model.Parameters); parameters != "" {
+			values = append(values, prefix+"parameters="+strvalsEscape(parameters))
+		}
 	}
 	return append(values,
 		fmt.Sprintf("celln.fleet.limits.leaseSeconds=%d", limits.LeaseSeconds),

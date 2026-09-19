@@ -76,6 +76,12 @@ function newConversationStep(run: AgentRun, detail: string): DiagnosisStep {
   return { label: "Start a new conversation", detail, action: { kind: "link", label: "Open the Agent's Chat tab", to: agentTab(run, "chat") } };
 }
 
+/** The remedy for a reasoning model that returns nothing: a fleet backend that sends the provider's "no thinking" parameter. */
+function thinkingOffStep(run: AgentRun): DiagnosisStep {
+  return harnessStep(run, "Use a fleet backend with thinking disabled",
+    "On the Harness tab, add a fleet backend for the same server and tick “Disable thinking (reasoning models)” under “Advanced: model parameters” (it sends {\"chat_template_kwargs\":{\"enable_thinking\":false}} with every request; other providers take their own switch in the JSON parameters). Parameters of an existing fleet backend cannot change, so add it under a new name and move the Agent to it.");
+}
+
 const replaceRunStep: DiagnosisStep = {
   label: "Delete this run, then start a new one",
   detail: "A run keeps the selection it was created with, so the fix only reaches a new run. Delete this pending one first so two runs never compete for the same admission.",
@@ -382,11 +388,22 @@ export const HARNESS_ERRORS: HarnessEntry[] = [
     ],
   },
   {
-    match: /final answer is empty or exceeds limit/i,
+    // Newer Celln releases say which of the two it was.
+    match: /final answer is empty: the model used its whole output budget/i,
+    title: "Turn failed: the model spent its output budget before answering",
+    cause: "The model used the whole output budget of a request without writing an answer, so no result was committed. Celln allows 512 output tokens per model request; a reasoning model (Qwen, DeepSeek-R1 and the like) can spend them all thinking and return nothing.",
+    steps: (run, initial) => [
+      thinkingOffStep(run),
+      retryStep(run, initial, "Then send the message again", "Nothing was committed, so the turn is not replayed automatically. Rephrasing alone rarely helps while the model still thinks first."),
+    ],
+  },
+  {
+    match: /final answer is empty/i,
     title: "Turn failed: the answer was empty or too long",
-    cause: "The agent's final answer was empty or exceeded the turn's answer size bound, so no result was committed.",
+    cause: "The agent's final answer was empty or exceeded the turn's answer size bound, so no result was committed. An empty answer usually means a reasoning model spent the request's whole output budget (512 tokens on Celln) thinking.",
     steps: (run, initial) => [
       retryStep(run, initial, "Ask for a shorter answer", "Ask for a summary, a fixed number of bullet points, or one part at a time."),
+      thinkingOffStep(run),
       { label: "If answers are routinely cut", detail: "The answer size bound is fixed by the fleet's Celln starter package, not by this conversation's budget. A fleet still on an older package has a smaller bound until its operator moves it to a current one." },
     ],
   },

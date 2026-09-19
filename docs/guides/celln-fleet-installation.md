@@ -237,6 +237,85 @@ define the single backend named `native`.
   backends; changing an existing backend's route needs a new scope (see
   **Moving to a new package or scope** below).
 
+### Model parameters
+
+A backend may carry **model parameters**: a JSON object the Celln host merges
+into every request it sends to that backend's provider. The host injects
+them after the guest has built its request, so the agent (the guest) cannot
+see, set or change them, and they apply to every conversation on the backend.
+Use them for provider switches Celln has no field for — sampling settings,
+or turning a reasoning phase off.
+
+The case that needs them: Celln allows **512 output tokens per model
+request**. A reasoning model (Qwen3, DeepSeek-R1 and the like) served by
+llama-server can spend all of them thinking and return an empty answer
+(`finish_reason: length`), which fails the turn with `final answer is
+empty…`. The server flag `--reasoning-budget 0` does not help; the switch has
+to travel with each request:
+
+```sh
+cat >/etc/sympozium/qwen-parameters.json <<'JSON'
+{"chat_template_kwargs": {"enable_thinking": false}}
+JSON
+
+sympozium install --celln-fleet --celln-native-approve-starter-tools \
+  --celln-fleet-backend name=native,provider=deepseek,model=deepseek-chat,credential-file=/path/to/deepseek-key \
+  --celln-fleet-backend name=qwen,provider=llama-server,model=MODEL.gguf,endpoint=http://HOST:8080,allow-insecure=true,parameters-file=/etc/sympozium/qwen-parameters.json
+```
+
+`parameters-file` is an absolute path to a file holding the object (a file,
+because JSON contains the commas that separate the flag's pairs). With the
+single-backend flags use `--celln-fleet-model-parameters-file`. Through the
+API, send the object as `parameters`
+(`{"name":"qwen","provider":"llama-server","endpoint":"http://HOST:8080","allowInsecure":true,"parameters":{"chat_template_kwargs":{"enable_thinking":false}}}`).
+In the console, both add-a-fleet-backend forms (the Create Agent wizard's
+Provider step and an Agent's Harness tab) have **Advanced: model parameters**:
+tick **Disable thinking (reasoning models)** — offered for llama-server and
+for Custom with the OpenAI chat protocol — or write the JSON; the two edit
+the same object. `GET /api/v1/celln-platform/backends` returns each backend's
+`parameters`, and the console shows them next to the backend.
+
+Rules (Celln's own; the installer, the API and the console check them first
+and name the rule that is broken, and Celln checks again on every node):
+
+- at most 16 top-level keys; every key, at any depth, matches
+  `^[a-z][a-z0-9_]{0,63}$`;
+- values are booleans, finite numbers, strings of at most 256 bytes (no NUL),
+  objects under the same rules, or arrays of at most 8 scalars; no `null`;
+  at most 3 levels of nesting, the object itself being the first;
+- at most 2048 bytes serialized;
+- these top-level keys are reserved, because Celln sets them on every request:
+  `model`, `messages`, `system`, `stream`, `stream_options`, `max_tokens`,
+  `max_completion_tokens`, `n`, `tools`, `tool_choice`, `functions`,
+  `function_call`, `parallel_tool_calls`, `user`. Parameters therefore cannot
+  raise the 512-token allowance.
+
+The one-token probe sends the parameters too, so one the provider rejects
+(HTTP 400) is reported at install or add time rather than as lost turns.
+
+**Celln version.** Parameters need a Celln release **newer than v0.5.22** on
+the fleet nodes; the installer image (`celln-node-configure`) carries Celln,
+so that means a Sympozium release that pins such a Celln. An older Celln
+refuses a plan that names `parameters`: the backend is never configured, the
+`celln-node-configure` log shows Celln's refusal followed by `backend NAME
+sets model parameters: they need a Celln release newer than v0.5.22…`, and
+the installer's wait (or the API's `error:` state) says the same. A backend
+without parameters gets exactly the plan it always got, on any Celln.
+
+**Parameters cannot be changed in place.** A node configures a backend once,
+and a published backend's configuration is never rewritten, so an install
+that asks for other parameters on a published backend (adding, changing or
+removing them) stops with `model parameters of a published backend cannot
+change` instead of ignoring the change. Add a backend under another name
+with the parameters you want (`--celln-fleet-backend name=qwen-2,…` or the
+API; the API refuses a name that exists) and move Agents to it on their
+Harness tab, or move the fleet to a new scope with `--celln-fleet-scope` and
+`--celln-fleet-replace-package`, which configures every backend afresh and
+ends every live parent.
+
+In a values file, `celln.fleet.backends[].parameters` takes the object
+itself.
+
 ## One-shot runs
 
 A run without `executionLifecycle: enduring` is a one-shot: the same

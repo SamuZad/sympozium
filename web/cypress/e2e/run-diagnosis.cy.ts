@@ -8,6 +8,7 @@ const REFUSAL_TAIL = "Ask the operator to authorise this namespace, runtime prof
 const LOST_MESSAGE = "owner=ContextLost reachedReady=true admittedAge=33s incarnation=blake3:1f0c launchProfile=blake3:77ab; parent context unavailable; no automatic reconstruction";
 const BUDGET_ANSWER = 'Turn failed; no result committed: child refused: guest exited with code 1: CELLN_HARNESS_EVENT {"type":"tool_call","name":"web-fetch"} CELLN_HARNESS_ERROR tool call budget exhausted';
 const LENGTH_ANSWER = 'Turn failed; no result committed: child refused: guest exited with code 1: CELLN_HARNESS_EVENT {"type":"final"} CELLN_HARNESS_ERROR final answer is empty or exceeds limit';
+const BUDGET_SPENT_ANSWER = 'Turn failed; no result committed: child refused: guest exited with code 1: CELLN_HARNESS_EVENT {"type":"final"} CELLN_HARNESS_ERROR final answer is empty: the model used its whole output budget (512 tokens) without answering';
 
 function run(status: Record<string, unknown>, spec: Record<string, unknown> = {}): AgentRun {
   return {
@@ -95,7 +96,10 @@ describe("diagnoseRun", () => {
     ["initial turn tool budget", turnFailed, [], { kind: "turn-failed", code: "tool call budget exhausted" }, /per-turn tool call limit/],
     ["follow-up answer bound", { ...turnFailed, status: { ...turnFailed.status, cellnParent: { ...turnFailed.status!.cellnParent!, initialTurn: initialOK } } } as AgentRun,
       [{ metadata: { name: "turn-1" }, spec: { runName: "r", runUID: "run-uid", message: "List everything" }, status: { execution: { ...initialOK, result: { succeeded: false, answer: LENGTH_ANSWER } } } }],
-      { kind: "turn-failed", code: "final answer is empty or exceeds limit" }, /answer size bound/],
+      { kind: "turn-failed", code: "final answer is empty or exceeds limit" }, /answer size bound.*reasoning model/],
+    ["follow-up answer spent on reasoning", { ...turnFailed, status: { ...turnFailed.status, cellnParent: { ...turnFailed.status!.cellnParent!, initialTurn: initialOK } } } as AgentRun,
+      [{ metadata: { name: "turn-1" }, spec: { runName: "r", runUID: "run-uid", message: "List everything" }, status: { execution: { ...initialOK, result: { succeeded: false, answer: BUDGET_SPENT_ANSWER } } } }],
+      { kind: "turn-failed", title: "Turn failed: the model spent its output budget before answering" }, /512 output tokens.*reasoning model/],
     ["older failed turn followed by an answer", { ...turnFailed, status: { ...turnFailed.status, cellnParent: { ...turnFailed.status!.cellnParent!, initialTurn: initialOK } } } as AgentRun, [
       { metadata: { name: "turn-1", creationTimestamp: "2026-09-18T10:00:00Z" }, spec: { runName: "r", runUID: "run-uid", message: "a" }, status: { execution: { ...initialOK, result: { succeeded: false, answer: LENGTH_ANSWER } } } },
       { metadata: { name: "turn-2", creationTimestamp: "2026-09-18T10:01:00Z" }, spec: { runName: "r", runUID: "run-uid", message: "b" }, status: { execution: initialOK } },
@@ -112,6 +116,18 @@ describe("diagnoseRun", () => {
       expect(diagnosis!.evidence.every((text) => text.length <= 600)).to.equal(true);
     });
   }
+
+  it("names the thinking-disabled fleet backend as the remedy for an empty answer", () => {
+    for (const answer of [LENGTH_ANSWER, BUDGET_SPENT_ANSWER]) {
+      const failed = { ...turnFailed, status: { ...turnFailed.status, cellnParent: { ...turnFailed.status!.cellnParent!, initialTurn: { ...initialOK, result: { succeeded: false, answer } } } } } as AgentRun;
+      const steps = diagnoseRun(failed)!.nextSteps;
+      const step = steps.find((candidate) => candidate.label === "Use a fleet backend with thinking disabled")!;
+      // The message that names the spent budget leads with the remedy.
+      expect(steps.indexOf(step)).to.equal(answer === BUDGET_SPENT_ANSWER ? 0 : 1);
+      expect(step.detail).to.contain("Disable thinking (reasoning models)").and.contain('{"chat_template_kwargs":{"enable_thinking":false}}').and.contain("JSON parameters");
+      expect(step.action).to.deep.include({ kind: "link", to: "/agents/hermes?tab=harness" });
+    }
+  });
 
   it("names the refused tool from the condition detail, else from the profile", () => {
     const detailed = run({ phase: "Pending", conditions: [condition("CellnParentReady", "AdmissionPending", `Platform policy refused admission (AUTH_TOOL_UNKNOWN): policy "fleet" does not permit tool "shell-exec" at the selected revision. ${REFUSAL_TAIL}`)] });
@@ -194,6 +210,7 @@ describe("Why did this fail panel", () => {
     open(alive, [{ metadata: { name: "turn-1", uid: "turn-1-uid" }, spec: { runName: alive.metadata.name, runUID: "run-uid", message: "List everything" }, status: { execution: { ...initialOK, result: { succeeded: false, answer: LENGTH_ANSWER } } } }]);
     cy.get('[data-testid="run-diagnosis-cause"]').should("contain", "answer size bound");
     cy.get('[data-testid="run-diagnosis-step"]').first().should("contain", "Ask for a shorter answer").and("contain", "send the next message below");
+    cy.get('[data-testid="run-diagnosis-step"]').eq(1).should("contain", "Use a fleet backend with thinking disabled").and("contain", "Disable thinking (reasoning models)");
   });
 
   it("continuation withheld: explains the loop guard and restarts elsewhere on request", () => {

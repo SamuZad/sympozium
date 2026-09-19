@@ -4,6 +4,8 @@ import { Bot, Check, Loader2 } from "lucide-react";
 import type { CellnPlatformProfile } from "@/lib/api";
 import { useAddCellnFleetBackend, useCellnFleetBackends, useCellnPlatformProfiles } from "@/hooks/use-api";
 import { backendLabel } from "@/components/celln-backend-picker";
+import { CellnModelParametersField, CellnModelParametersSummary } from "@/components/celln-model-parameters";
+import { parseModelParameters } from "@/lib/model-parameters";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -110,6 +112,7 @@ export function CellnProviderPicker({
   const [customProvider, setCustomProvider] = useState("");
   const [credential, setCredential] = useState("");
   const [skipProbe, setSkipProbe] = useState(false);
+  const [parameters, setParameters] = useState("");
   const [error, setError] = useState("");
 
   // A backend the nodes finished configuring gets its profile; refresh so it
@@ -148,6 +151,7 @@ export function CellnProviderPicker({
     setEndpoint("");
     setCredential("");
     setSkipProbe(false);
+    setParameters("");
     add.reset();
     const served = list.filter((p) => p.provider === value);
     if (served.length > 0) onProfile(served[0]);
@@ -158,6 +162,7 @@ export function CellnProviderPicker({
     setError("");
     const custom = provider === "custom";
     const trimmedEndpoint = endpoint.trim();
+    const parsedParameters = parseModelParameters(parameters);
     const body = {
       name: name.trim(),
       provider: custom ? customProvider.trim() || "custom" : provider,
@@ -167,18 +172,22 @@ export function CellnProviderPicker({
       allowInsecure: trimmedEndpoint.toLowerCase().startsWith("http://") || undefined,
       credential: credential || undefined,
       skipPreflight: skipProbe || undefined,
+      parameters: parsedParameters.parameters,
     };
+    // The precise rule is shown under the JSON field.
+    if (parsedParameters.error) return setError("Fix the model parameters first.");
     if (!/^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/.test(body.name)) return setError("Name the fleet backend with a DNS label, e.g. claude.");
     if (provider !== "llama-server" && !credential) return setError(`${preset?.label || provider} needs an API key.`);
     if ((provider === "llama-server" || custom) && !body.endpoint) return setError("Give the server's address, e.g. http://framework:8080.");
     if (!body.model && (!detectable || skipProbe)) return setError(skipProbe ? "Give the model name when the probe is skipped." : "Give the model name.");
-    add.mutate(body, { onSuccess: () => { setCredential(""); setAdded((current) => [...current, body.name]); } });
+    add.mutate(body, { onSuccess: () => { setCredential(""); setParameters(""); setAdded((current) => [...current, body.name]); } });
   }
 
   const needsEndpoint = provider === "llama-server" || provider === "custom";
   // An OpenAI-compatible server lists its models, so the API can detect one.
   const detectable = provider === "llama-server" || (provider === "custom" && protocol === "openai-chat");
   const current = selected && selected.provider === provider ? selected : undefined;
+  const currentParameters = current ? backendList.find((b) => b.profile === current.name)?.parameters : undefined;
 
   return (
     <div className="space-y-4" data-testid="platform-model-route">
@@ -217,7 +226,9 @@ export function CellnProviderPicker({
 
       {current && (
         <div className="space-y-1 rounded-md border p-3 text-xs" data-testid="fleet-backend-model">
-          <p className="text-sm">Model: <span className="font-mono">{current.model}</span> — fixed by fleet backend <span className="font-medium">{current.backend}</span></p>
+          <p className="text-sm">Model: <span className="font-mono">{current.model}</span> — fixed by fleet backend <span className="font-medium">{current.backend}</span>
+            {currentParameters && <> · <CellnModelParametersSummary parameters={currentParameters} testId="fleet-backend-parameters" /></>}
+          </p>
           <p className="text-muted-foreground">
             Served at {current.endpoint} with the key the fleet holds for it. No key or model is entered here; to use another model, add a fleet backend for it. The fleet policy caps the ceilings.
           </p>
@@ -300,6 +311,7 @@ export function CellnProviderPicker({
               <span>Skip the probe from the control plane. Use this when only the fleet nodes can reach the server; the model name is then required.</span>
             </label>
           )}
+          <CellnModelParametersField value={parameters} onChange={setParameters} showThinking={provider === "llama-server" || (provider === "custom" && protocol === "openai-chat")} />
           {(error || add.error) && <p role="alert" className="whitespace-pre-wrap break-words text-xs text-red-500">{error || add.error?.message}</p>}
           <Button type="button" size="sm" disabled={add.isPending} onClick={submit}>
             {add.isPending ? "Probing and recording…" : "Add to the fleet"}
