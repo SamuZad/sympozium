@@ -1,5 +1,5 @@
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { api } from "@/lib/api";
+import { useInfiniteQuery, useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { api, type AgentRun } from "@/lib/api";
 import { toast } from "sonner";
 
 /** Show a user-friendly toast for mutation errors.  Network failures get a
@@ -223,6 +223,28 @@ export function useCreateRun() {
       toast.success("Run created");
     },
     onError: toastError,
+  });
+}
+
+/**
+ * An enduring run's turn history, pinned to the run UID it was loaded for. The
+ * conversation view and the failure diagnosis share this one query, so the
+ * page polls the history once however many of them are mounted.
+ */
+export function useParentTurns(run: AgentRun, enabled = true) {
+  const uid = run.metadata.uid || "";
+  const namespace = run.metadata.namespace || "default";
+  return useInfiniteQuery({
+    queryKey: ["parent-turns", namespace, run.metadata.name, uid],
+    initialPageParam: "",
+    queryFn: async ({ pageParam }) => {
+      const page = await api.runs.turns(run.metadata.name, namespace, pageParam);
+      if (page.runUID !== uid) throw new Error("Run identity changed. Reload the run before continuing.");
+      return page;
+    },
+    getNextPageParam: (page) => page.continue || undefined,
+    enabled: enabled && Boolean(uid),
+    refetchInterval: 2000,
   });
 }
 

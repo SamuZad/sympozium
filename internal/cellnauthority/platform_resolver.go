@@ -54,6 +54,33 @@ func PlatformReason(err error) string {
 	return ""
 }
 
+// platformDetailLimit bounds the refusal detail copied into tenant status.
+const platformDetailLimit = 200
+
+// PlatformDetail returns the authored part of a platform refusal's detail when
+// it is safe to show a tenant, or "" otherwise. Details are short sentences
+// about names, revisions and limits. A wrapped error follows ": " and may carry
+// an operator path, address or URL, so it is cut off; whatever remains is
+// withheld entirely if it still holds a path separator, a control character or
+// non-ASCII text, and is length-bounded. The detail grants no authority.
+func PlatformDetail(err error) string {
+	var target *PlatformResolutionError
+	if !errors.As(err, &target) {
+		return ""
+	}
+	detail, _, _ := strings.Cut(strings.TrimSpace(target.Detail), ": ")
+	for _, r := range detail {
+		if r == '/' || r == '\\' || r < 0x20 || r > 0x7e {
+			return ""
+		}
+	}
+	detail = strings.TrimRight(detail, ". ")
+	if len(detail) > platformDetailLimit {
+		detail = detail[:platformDetailLimit-3] + "..."
+	}
+	return detail
+}
+
 type PlatformResolveRequest struct {
 	ClusterID         string
 	Now               time.Time
