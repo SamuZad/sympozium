@@ -266,7 +266,8 @@ export function useCellnFleetBackends(enabled = true) {
     queryFn: api.cellnPlatform.backends,
     enabled,
     retry: false,
-    refetchInterval: 15000,
+    // Poll faster while an added backend is still being configured.
+    refetchInterval: (query) => (query.state.data?.some((b) => b.state !== "ready" && !b.state.startsWith("error")) ? 3000 : 15000),
   });
 }
 
@@ -288,7 +289,7 @@ export function useAddCellnFleetBackend() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["celln-fleet-backends"] });
       qc.invalidateQueries({ queryKey: ["celln-platform-profiles"] });
-      toast.success("Backend recorded; the fleet's nodes are configuring it");
+      toast.success("Fleet backend recorded; the fleet's nodes are configuring it");
     },
     onError: toastError,
   });

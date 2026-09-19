@@ -288,7 +288,10 @@ admitted package; owners and their conversations are untouched. Once the
 nodes have published its configuration, the API server installs the
 backend's runtime profile, policy route and wrappers, and
 `GET /api/v1/celln-platform/backends` reports it `ready`; until then it
-shows `pending` or `configuring`, or `error: …` with the reason. The Agent
+shows `pending` or `configuring`, or `error: …` with the reason. The
+`configuring` state includes a deliberate wait of about 90 seconds for the key
+to reach the running dispatchers; the state text and the Create Agent wizard
+say so while it lasts. The Agent
 page's backend picker has the same form. A backend named at install cannot
 be added again, and a key already published for a name is never replaced.
 

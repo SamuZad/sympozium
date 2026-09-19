@@ -51,6 +51,7 @@ import { persistentHarnesses, persistentHarnessName } from "@/lib/persistent-har
 import { modelConnectionName, modelConnectionEndpoint } from "@/lib/agent-execution";
 import { api } from "@/lib/api";
 import type { WizardExecution } from "@/lib/agent-execution";
+import { BorrowedToolsStep } from "@/components/wizard/borrowed-tools-step";
 import type { AgentRuntime, SympoziumPolicy, CellnSelection, CellnTool, CellnPlatformProfile, ModelConnection } from "@/lib/api";
 import {
   YamlModal,
@@ -288,6 +289,7 @@ function stepsForMode(
   celln = false,
   persistent = false,
   runtimeImplicit = false,
+  fleetBackend = false,
 ): WizardStep[] {
   if (mode === "canary") {
     return ["provider", "apikey", "model"];
@@ -299,7 +301,7 @@ function stepsForMode(
         "plane",
         ...(runtimeImplicit ? [] : ["runtime"]),
         ...(celln
-          ? ["tools", "provider", "apikey", "model"]
+          ? ["tools", "provider", ...(fleetBackend ? [] : ["apikey", "model"])]
           : ["skills", "provider", "apikey", "model", "heartbeat", "channels"]),
         "confirm",
         "channelAction",
@@ -359,9 +361,9 @@ function StepIndicator({
   const idx = steps.indexOf(current);
 
   return (
-    <div className="flex flex-wrap items-center justify-center gap-1 mb-6">
+    <div className="flex flex-wrap items-center justify-center gap-1 mb-6" data-testid="wizard-steps">
       {steps.map((step, i) => (
-        <div key={step} className="flex items-center gap-1">
+        <div key={step} className="flex items-center gap-1" data-step={step}>
           <div
             className={cn(
               "flex items-center gap-1 rounded-full px-2 py-1 text-[11px] font-medium transition-colors",
@@ -685,7 +687,6 @@ export function OnboardingWizard({
   const singleRuntimeRef =
     selectableRuntimes.length === 1 || fleetWrappersOnly ? selectableRuntimes[0]?.metadata.name || "" : "";
   const runtimeImplicit = creationKind === "agent" && !!singleRuntimeRef;
-  const steps = stepsForMode(mode, celln, creationKind === "agent", runtimeImplicit);
   useEffect(() => {
     if (!open || !runtimeImplicit) return;
     // With several fleet wrappers this only fills in a missing runtime: the
@@ -709,6 +710,9 @@ export function OnboardingWizard({
   // model route from the namespace's host-profile ModelConnection; nothing is
   // created for it here because the platform policy owns both.
   const wrapperRuntime = celln && !!selectedRuntime?.spec.cellnProfileRef;
+  // A fleet backend fixes the model and holds the key, and the Provider step
+  // binds both, so there is nothing to ask on an Auth or a Model step.
+  const steps = stepsForMode(mode, celln, creationKind === "agent", runtimeImplicit, wrapperRuntime);
   const namespacedCatalogue = useCellnTools();
   const clusterCatalogue = useClusterCellnTools();
   const platformProfile = wrapperRuntime ? (platformProfiles.data || []).find((profile) => profile.name === selectedRuntime?.spec.cellnProfileRef?.name) : undefined;
@@ -870,7 +874,7 @@ export function OnboardingWizard({
         return !!form.runtimeRef && compatibleRuntime;
       case "provider":
         // A fleet provider needs a ready backend before the Agent can bind to it.
-        if (wrapperRuntime) return !!platformProfile && platformProfile.provider === form.provider;
+        if (wrapperRuntime) return !!platformProfile && platformProfile.provider === form.provider && platformProfile.model === form.model;
         return !!form.provider;
       case "plane":
         return true;
@@ -931,6 +935,11 @@ export function OnboardingWizard({
       !!result.runtimeRef &&
       compatibleRuntime;
     if (wrapperRuntime) {
+      // The backend fixes the provider and model; admission refuses any other.
+      if (platformProfile) {
+        result.provider = platformProfile.provider;
+        result.model = platformProfile.model;
+      }
       if (!result.modelConnectionRef && platformProfile) {
         // First use of the platform in this namespace: the API creates the
         // wrapper objects from the policy; nothing here is invented.
@@ -942,13 +951,13 @@ export function OnboardingWizard({
           result.runtimeRef = wrappers.runtime;
         } catch (err) {
           setSavingConnection(false);
-          setConnectionError(err instanceof Error ? err.message : "Could not prepare this namespace for the platform runtime");
+          setConnectionError(err instanceof Error ? err.message : "Could not prepare this namespace for the fleet backend");
           return;
         }
         setSavingConnection(false);
       }
       if (!result.modelConnectionRef) {
-        setConnectionError("This namespace has no ModelConnection with a host credential profile for the platform runtime; ask the operator to add one.");
+        setConnectionError(`This namespace is not set up for fleet backend ${platformProfile?.backend || result.runtimeRef}; ask the operator to publish it to this namespace.`);
         return;
       }
       result.clusterTools = (result.borrowedTools || []).map((tool) => ({ ...tool }));
@@ -1286,47 +1295,17 @@ export function OnboardingWizard({
 
         </div>}
 
-        {step === "tools" && <div className="space-y-3" data-testid="create-agent-borrowed-tools">
-          <h3 className="font-medium">Borrow tools for Celln</h3>
-          <p className="text-sm text-muted-foreground">All compatible installed tools are selected by default; deselect any you do not want. This saves defaults, not permission grants. Effective operator/runtime/Agent permissions can be previewed on the Harness tab after the Agent exists and are checked again before execution.</p>
-          {catalogue.isLoading && <p>Loading tool catalogue…</p>}
-          {catalogue.isError && <p role="alert">Cannot load the tool catalogue. Retry before creating this Agent.</p>}
-          {catalogue.isError && <Button type="button" onClick={() => catalogue.refetch()}>Retry catalogue</Button>}
-          {!catalogue.isLoading && !catalogue.isError && catalogue.data?.length === 0 && <p>{wrapperRuntime ? "The platform policy lends this backend no shared tools." : "No tools installed in this namespace."} An empty selection lends no tools.</p>}
-          {!!catalogue.data?.length && (() => {
-            const selectedTools = form.borrowedTools || [];
-            const supportedTools = catalogue.data.filter(toolSupported);
-            // Compatible tools first so the unsupported ones don't bury them.
-            const tools = [...supportedTools, ...catalogue.data.filter((tool) => !toolSupported(tool))];
-            const selectAll = () => setForm({ ...form, borrowedTools: supportedTools.slice(0, maxTools).map((tool) => ({ name: tool.metadata.name, revision: tool.spec.revision })) });
-            return <>
-              <div className="flex flex-wrap items-center gap-2">
-                <span className={cn("text-xs", selectedTools.length > maxTools && "text-destructive")}>{selectedTools.length}/{maxTools} selected</span>
-                <span className="flex-1" />
-                <Button type="button" size="sm" variant="outline" disabled={selectedTools.length === Math.min(supportedTools.length, maxTools) && !staleTools} onClick={selectAll}>Select all</Button>
-                <Button type="button" size="sm" variant="outline" disabled={selectedTools.length === 0} onClick={() => setForm({ ...form, borrowedTools: [] })}>Lend no tools</Button>
-              </div>
-              <div className="grid max-h-[45vh] grid-cols-1 gap-2 overflow-y-auto rounded border p-2 sm:grid-cols-2">
-                {tools.map((tool) => {
-                  const selected = selectedTools.some((ref) => ref.name === tool.metadata.name && ref.revision === tool.spec.revision);
-                  const supported = toolSupported(tool);
-                  return <label key={tool.metadata.name} title={tool.spec.description} className={cn("flex min-w-0 gap-2 rounded border p-2 text-xs", supported ? "cursor-pointer hover:bg-muted/50" : "opacity-50", selected && "border-primary bg-primary/5")}>
-                    <input type="checkbox" className="mt-0.5 shrink-0" disabled={!supported || (!selected && selectedTools.length >= maxTools)} checked={selected}
-                      onChange={() => setForm({ ...form, borrowedTools: selected ? selectedTools.filter((ref) => ref.name !== tool.metadata.name) : [...selectedTools, { name: tool.metadata.name, revision: tool.spec.revision }] })} />
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate font-medium">{tool.metadata.name}<span className="text-muted-foreground">@{tool.spec.revision}</span></span>
-                      <span className="line-clamp-2 text-muted-foreground">{tool.spec.description}</span>
-                      <span className="block truncate text-muted-foreground">{tool.spec.limits.timeoutMillis} ms · effects: {tool.spec.limits.effects}{!supported ? " · unsupported ABI/lane" : ""}</span>
-                    </span>
-                  </label>;
-                })}
-              </div>
-            </>;
-          })()}
-          {(form.borrowedTools || []).length > maxTools && <p role="alert">Select at most {maxTools} tools to continue.</p>}
-          <p className="text-xs text-muted-foreground">No shell, Python, host mounts or unrestricted network access is included.</p>
-          {staleTools && <p role="alert">The catalogue changed. Clear the selection and choose current revisions.</p>}
-        </div>}
+        {step === "tools" && (
+          <BorrowedToolsStep
+            catalogue={catalogue}
+            fleet={wrapperRuntime}
+            selected={form.borrowedTools || []}
+            onChange={(borrowedTools) => setForm({ ...form, borrowedTools })}
+            toolSupported={toolSupported}
+            maxTools={maxTools}
+            stale={staleTools}
+          />
+        )}
 
         {/* ── Provider step ─────────────────────────────────────────── */}
         {step === "provider" && wrapperRuntime && (
@@ -2218,7 +2197,11 @@ export function OnboardingWizard({
               )}
               {mode === "agent" && <div className="space-y-2" data-testid="execution-confirmation">
                 <p>Execution plane: {celln ? "Celln" : "Kubernetes"}</p>
-                {celln && <p>Model connection: {form.provider} / {form.model}</p>}
+                {celln && !wrapperRuntime && <p>Model connection: {form.provider} / {form.model}</p>}
+                {wrapperRuntime && <>
+                  <p>AI provider: {form.provider}</p>
+                  <p data-testid="fleet-fixed-model">Model: <span className="font-mono">{platformProfile?.model || form.model}</span> — fixed by fleet backend <span className="font-medium">{platformProfile?.backend || form.runtimeRef}</span></p>
+                </>}
                 {!celln && form.runtimeRef && <p>Model connection: {form.provider} / {form.model} (saved for this harness)</p>}
                 {celln && <>
                   <p>Lifecycle: {form.executionLifecycle}</p>
@@ -2229,7 +2212,7 @@ export function OnboardingWizard({
               {mode === "agent" && (
                 <div className="flex justify-between gap-4">
                   <span className="text-muted-foreground">Execution</span>
-                  <span className="font-mono text-right">{form.runtimeRef || "Built-in Agent runner"}</span>
+                  <span className="font-mono text-right">{wrapperRuntime ? `fleet backend ${platformProfile?.backend || form.runtimeRef}` : form.runtimeRef || "Built-in Agent runner"}</span>
                 </div>
               )}
               {mode === "persona" && targetName && (
@@ -2242,10 +2225,10 @@ export function OnboardingWizard({
                 <span className="text-muted-foreground">Provider</span>
                 <span>{form.provider}</span>
               </div>
-              <div className="flex justify-between">
+              {!wrapperRuntime && <div className="flex justify-between">
                 <span className="text-muted-foreground">Secret</span>
                 <span className="font-mono">{form.secretName || "—"}</span>
-              </div>
+              </div>}
               <div className="flex justify-between">
                 <span className="text-muted-foreground">Model</span>
                 <span className="font-mono">{form.model}</span>

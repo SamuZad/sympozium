@@ -214,7 +214,7 @@ func (s *Server) completeCellnFleetBackend(name string, facts cellninstall.Fleet
 		case <-time.After(10 * time.Second):
 		}
 	}
-	record("configuring: nodes published it; installing its profile and wrappers")
+	record("configuring: nodes published it; reading the fleet configuration")
 	if ok, err := cellninstall.ReadFleetConfigurationFor(ctx, s.client, configuration, facts.PackageHash, expected); err != nil || !ok {
 		if err == nil {
 			err = fmt.Errorf("published configuration incomplete")
@@ -223,13 +223,16 @@ func (s *Server) completeCellnFleetBackend(name string, facts cellninstall.Fleet
 		return
 	}
 	// The running owners' mount of the credential Secret follows the kubelet
-	// sync period; give it that before offering the backend.
+	// sync period; give it that before offering the backend. The state says so:
+	// a silent wait looks stuck. Clients key on the "configuring" prefix only.
+	record(fmt.Sprintf("configuring: waiting %.0fs for the credential to reach running dispatchers", cellninstall.FleetCredentialPropagationGrace.Seconds()))
 	select {
 	case <-ctx.Done():
 		fail(ctx.Err())
 		return
 	case <-time.After(cellninstall.FleetCredentialPropagationGrace):
 	}
+	record("configuring: installing its profile and wrappers")
 	clusterID, err := cellninstall.ClusterIdentity(ctx, s.client)
 	if err != nil {
 		fail(err)
