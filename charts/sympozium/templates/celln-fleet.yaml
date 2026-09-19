@@ -411,6 +411,19 @@ spec:
             - /bin/sh
             - -ec
             - |
+              # "Not prepared yet" is worth waiting for; "cannot read the state
+              # directory" never resolves by waiting. This container is root
+              # without capabilities, so a directory an older install left to
+              # another uid (mode 0700) is closed to it. Listing "dir/." needs
+              # both read and search, which is what the tests below rely on.
+              for dir in "$FLEET_STATE" "$FLEET_STATE/authority"; do
+                if [ -d "$dir" ] && ! ls -A "$dir/." >/dev/null 2>&1; then
+                  echo "cannot read the Celln state directory $dir on node $NODE_NAME: owner $(stat -c '%u:%g mode %a' "$dir" 2>/dev/null || echo unknown), this container runs as uid $(id -u) without capabilities." >&2
+                  echo "It was probably left by an older install. celln-node-configure resets the owner on its next pass and this pod then starts by itself." >&2
+                  echo "If it does not, on the node either move it aside (sudo mv $FLEET_STATE $FLEET_STATE.old) or sudo chown 0:0 $dir && sudo chmod 0700 $dir; with SELinux enforcing also: sudo chcon -R -t container_file_t $FLEET_STATE" >&2
+                  exit 1
+                fi
+              done
               until [ -f "$FLEET_STATE/admitted-$FLEET_PACKAGE_HEX" ] && [ -f "$FLEET_STATE/authority/trusted-parent-clients.json" ]; do
                 echo "waiting for celln-node-configure to admit package $FLEET_PACKAGE_HEX on this node" >&2
                 sleep 5
@@ -420,6 +433,10 @@ spec:
               value: {{ $state | quote }}
             - name: FLEET_PACKAGE_HEX
               value: {{ trimPrefix "blake3:" $package.hash | quote }}
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
           securityContext:
             runAsNonRoot: false
             readOnlyRootFilesystem: true
