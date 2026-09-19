@@ -21,6 +21,8 @@ type cellnFleetFlags struct {
 	options       cellninstall.FleetOptions
 	backendSpecs  []string
 	skipPreflight bool
+	// modelParametersFile is the single-backend form of parameters-file=.
+	modelParametersFile string
 	// replacePackage approves moving an installed scope to another package
 	// or scope, which ends every live parent on the fleet.
 	replacePackage bool
@@ -53,7 +55,8 @@ func (f *cellnFleetFlags) register(cmd *cobra.Command) {
 	cmd.Flags().Int64Var(&f.options.Limits.MaxOutputTokens, "celln-fleet-max-output-tokens", cellninstall.DefaultFleetLimits.MaxOutputTokens, fmt.Sprintf("Most model output tokens one parent may consume over its life (%d–%d); every turn reserves %d, so size it as turns × %d", cellninstall.MinFleetOutputTokens, cellninstall.MaxFleetOutputTokens, sympoziumv1alpha1.TurnOutputTokens, sympoziumv1alpha1.TurnOutputTokens))
 	cmd.Flags().StringVar(&f.authorise, "celln-fleet-authorise", "all", "Which namespaces may run on the fleet: 'all' (every namespace except kube-*, cert-manager, the control-plane namespaces and namespaces labeled celln.sympozium.ai/excluded) or 'labeled' (only namespaces labeled celln.sympozium.ai/scope=<scope>)")
 	cmd.Flags().StringVar(&f.options.ModelCredentialFile, "celln-fleet-model-credential-file", "", "Local file holding the default backend's provider credential to publish once as a Secret in celln-system (omit to keep an existing Secret; not needed for llama-server)")
-	cmd.Flags().StringArrayVar(&f.backendSpecs, "celln-fleet-backend", nil, "A model backend of this fleet, repeatable: name=NAME,provider=PROVIDER,model=MODEL[,endpoint=URL][,protocol=openai-chat|anthropic-messages][,credential-file=/path][,allow-insecure=true]. Every node configures every backend and a namespace may run parents on any of them side by side. Without this flag the --celln-fleet-model-* flags define the single backend named native")
+	cmd.Flags().StringVar(&f.modelParametersFile, "celln-fleet-model-parameters-file", "", "Absolute path of a JSON object the Celln host merges into every provider request of the default backend, e.g. {\"chat_template_kwargs\":{\"enable_thinking\":false}} for a reasoning model on llama-server (needs a Celln newer than "+cellninstall.ModelParametersMinCelln+" on the nodes; cannot change once the backend is published)")
+	cmd.Flags().StringArrayVar(&f.backendSpecs, "celln-fleet-backend", nil, "A model backend of this fleet, repeatable: name=NAME,provider=PROVIDER,model=MODEL[,endpoint=URL][,protocol=openai-chat|anthropic-messages][,credential-file=/path][,allow-insecure=true][,parameters-file=/abs/path.json] (parameters-file: a JSON object the Celln host merges into every provider request of the backend). Every node configures every backend and a namespace may run parents on any of them side by side. Without this flag the --celln-fleet-model-* flags define the single backend named native")
 	cmd.Flags().StringArrayVar(&f.options.HTTPSHosts, "celln-fleet-https-host", nil, "An exact host the https-fetch and https-post-json starter tools may reach, repeatable (lowercase DNS name; default example.com). Every backend's nodes configure the same list")
 	cmd.Flags().BoolVar(&f.skipPreflight, "celln-fleet-skip-preflight", false, "Skip the one-token chat probe of every backend with its key (use when only the nodes can reach the endpoint)")
 	cmd.Flags().BoolVar(&f.replacePackage, "celln-fleet-replace-package", false, "Approve moving an installed fleet to this package or scope (e.g. after upgrading to a sympozium release whose starter package inputs changed; most releases keep the package): nodes publish the new configuration, the scope's catalogue is replaced and every namespace's platform wrappers are rebound. Every live parent on the fleet is lost")
@@ -74,6 +77,30 @@ func installCellnFleet(ctx context.Context, f cellnFleetFlags, imageTag string, 
 		return err
 	}
 	f.options.Backends = append(f.options.Backends, backends...)
+	if f.modelParametersFile != "" {
+		if len(f.backendSpecs) != 0 {
+			return fmt.Errorf("--celln-fleet-model-parameters-file configures the single --celln-fleet-model-* backend; with --celln-fleet-backend give parameters-file=/abs/path.json in the backend's spec")
+		}
+		parameters, err := cellninstall.ReadModelParametersFile(f.modelParametersFile)
+		if err != nil {
+			return fmt.Errorf("--celln-fleet-model-parameters-file: %w", err)
+		}
+		if len(f.options.Backends) == 0 {
+			f.options.Model.Parameters = parameters
+		} else {
+			// A bare install took its backends from the environment or a prompt;
+			// the flag applies to the default one.
+			applied := false
+			for i := range f.options.Backends {
+				if f.options.Backends[i].Name == cellnplatform.DefaultBackend {
+					f.options.Backends[i].Model.Parameters, applied = parameters, true
+				}
+			}
+			if !applied {
+				return fmt.Errorf("--celln-fleet-model-parameters-file: this install has no backend named %s", cellnplatform.DefaultBackend)
+			}
+		}
+	}
 	if err := f.applyStarterDefaults(); err != nil {
 		return err
 	}
@@ -112,6 +139,11 @@ func installCellnFleet(ctx context.Context, f cellnFleetFlags, imageTag string, 
 	replacing := publication.Replaces(f.options.Scope, f.options.PackageHash)
 	if replacing && !f.replacePackage {
 		return publication.ReplacementRefusal(f.options.Scope, f.options.PackageHash)
+	}
+	// A published backend keeps the parameters it was configured with; asking
+	// for others is refused rather than silently ignored.
+	if err := cellninstall.CheckPublishedModelParameters(ctx, k8sClient, f.options); err != nil {
+		return err
 	}
 	if notice := fleetPackageUnchangedNotice(publication, f.options.Scope, f.options.PackageHash); notice != "" {
 		fmt.Println("  " + notice)
@@ -194,7 +226,14 @@ func installCellnFleet(ctx context.Context, f cellnFleetFlags, imageTag string, 
 				}
 			}
 			if time.Now().After(deadline) {
-				return fmt.Errorf("%s did not happen within %s; label a KVM node (or give a Kind node a kernel), check the celln-node-configure logs in celln-system, then rerun this command", what, f.wait)
+				hint := ""
+				for _, b := range resolved {
+					if len(b.Model.Parameters) != 0 {
+						hint = ". Backend " + b.Name + ": " + cellninstall.ModelParametersCellnHint
+						break
+					}
+				}
+				return fmt.Errorf("%s did not happen within %s; label a KVM node (or give a Kind node a kernel), check the celln-node-configure logs in celln-system, then rerun this command%s", what, f.wait, hint)
 			}
 			select {
 			case <-ctx.Done():
@@ -292,8 +331,15 @@ func parseFleetBackends(specs []string) ([]cellninstall.FleetBackend, error) {
 				b.CredentialEnv = value
 			case "allow-insecure":
 				b.Model.AllowInsecure = value == "true" || value == "1" || value == "yes"
+			case "parameters-file":
+				// A file, because JSON contains the commas that separate pairs.
+				parameters, err := cellninstall.ReadModelParametersFile(value)
+				if err != nil {
+					return nil, fmt.Errorf("--celln-fleet-backend %q: %w", spec, err)
+				}
+				b.Model.Parameters = parameters
 			default:
-				return nil, fmt.Errorf("--celln-fleet-backend %q: unknown key %q (name, provider, model, endpoint, protocol, credential-file, credential-env, allow-insecure)", spec, key)
+				return nil, fmt.Errorf("--celln-fleet-backend %q: unknown key %q (name, provider, model, endpoint, protocol, credential-file, credential-env, allow-insecure, parameters-file)", spec, key)
 			}
 		}
 		if b.Name == "" {

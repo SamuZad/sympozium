@@ -149,6 +149,8 @@ export interface CellnFleetBackend {
   endpoint: string;
   model: string;
   allowInsecure: boolean;
+  /** What the fleet merges into every model request of this backend; absent when none. */
+  parameters?: Record<string, unknown>;
   source: "install" | "added";
   profile: string;
   state: string;
@@ -216,6 +218,8 @@ export interface AddCellnFleetBackendRequest {
   allowInsecure?: boolean;
   credential?: string;
   skipPreflight?: boolean;
+  /** A JSON object the fleet merges into every model request (lib/model-parameters.ts has the rules). */
+  parameters?: Record<string, unknown>;
 }
 
 export interface CellnPlatformProfile {

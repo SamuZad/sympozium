@@ -586,6 +586,15 @@ celln:
     # while the owner DaemonSet is untouched so running conversations keep
     # going. Names are DNS labels. Keys live in `modelCredentialsSecret`
     # under the backend's name.
+    # `parameters` (optional) is a JSON object the Celln host merges into
+    # every provider request of that backend; the guest never sees it. Give
+    # the object itself (or the same object as one JSON string, which is what
+    # the installer's `parameters-file=` sends). Celln validates it: at most
+    # 16 keys matching ^[a-z][a-z0-9_]{0,63}$, scalars, objects up to 3 levels
+    # and arrays of at most 8 scalars, 2048 bytes, and none of the request
+    # fields Celln owns (model, messages, max_tokens, tools, ...). It needs a
+    # Celln release newer than v0.5.22 on the nodes, and cannot change once
+    # the backend is published: add a backend under another name instead.
     backends: []
     # - name: native
     #   provider: deepseek
@@ -598,6 +607,15 @@ celln:
     #   protocol: anthropic-messages
     #   endpoint: https://api.anthropic.com/v1/messages
     #   model: claude-sonnet-5
+    # - name: qwen
+    #   provider: llama-server
+    #   protocol: openai-chat
+    #   endpoint: http://10.0.0.5:8080/v1/chat/completions
+    #   model: qwen.gguf
+    #   allowInsecure: true
+    #   parameters:
+    #     chat_template_kwargs:
+    #       enable_thinking: false
     # -- Secret in celln-system holding every backend's provider key under the
     # backend's name, mounted read-only into every dispatcher at
     # /etc/celln-native/credentials. Guests and the controller never see it;

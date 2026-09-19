@@ -290,6 +290,101 @@ describe("Create Agent on a fleet with several backends", () => {
     cy.get('[role="dialog"]').contains("button", "Next").should("be.enabled").click();
     cy.get('[data-testid="fleet-fixed-model"]').should("contain", "gpt-4o-mini").and("contain", "fixed by fleet backend openai");
   });
+
+  // A reasoning model can spend Celln's 512 output tokens per request thinking
+  // and answer nothing; the fleet backend's model parameters switch that off.
+  it("sends model parameters with a new fleet backend, and refuses invalid ones before posting", () => {
+    const thinkingOff = { chat_template_kwargs: { enable_thinking: false } };
+    const added = { ...profile("custom", "qwen3"), endpoint: "https://models.example/v1/chat/completions" };
+    const listed = { name: "custom", provider: "custom", protocol: "openai-chat", endpoint: added.endpoint, model: added.model, allowInsecure: false, parameters: thinkingOff, source: "added", profile: added.name };
+    let posts = 0;
+    cy.intercept("POST", "**/api/v1/celln-platform/backends*", (request) => {
+      posts++;
+      expect(request.body).to.deep.include({ name: "custom", provider: "custom", model: "qwen3", protocol: "openai-chat", parameters: thinkingOff });
+      request.reply({ statusCode: 202, body: { ...listed, state: "pending: waiting for the nodes to configure it" } });
+    }).as("add");
+    cy.intercept("GET", "**/api/v1/celln-platform/backends*", (request) => request.reply({ body: posts ? [{ ...listed, state: "ready" }] : [] }));
+    cy.intercept("GET", "**/api/v1/celln-platform/profiles*", (request) => request.reply({ body: posts ? [...profiles, added] : profiles }));
+
+    openToolsStep();
+    cy.get('[role="dialog"]').contains("button", "Next").click();
+    cy.get('[data-testid="platform-model-route"] button[role=combobox]').first().click();
+    cy.get("[role=option]").contains("Custom").click();
+    cy.get('[data-testid="celln-provider-add-backend"]').within(() => {
+      cy.contains("label", "Model").find("input").type("qwen3");
+      cy.contains("label", "Chat endpoint").find("input").type("https://models.example/v1");
+      cy.get("input[type=password]").type("sk-test-credential-000000001");
+      cy.contains("summary", "Advanced: model parameters").click();
+      cy.get('[data-testid="celln-model-parameters"]').should("contain", "Celln allows 512 output tokens per request; a reasoning model can spend them all thinking and return nothing.");
+
+      // A reserved key: the precise rule inline, and nothing is posted.
+      cy.get('[data-testid="celln-model-parameters-json"]').type('{"max_tokens": 4096}', { parseSpecialCharSequences: false });
+      cy.get('[data-testid="celln-model-parameters-error"]').should("have.text", 'model parameters: "max_tokens" is reserved (Celln sets it on every request)');
+      cy.contains("button", "Add to the fleet").click();
+      cy.contains('[role="alert"]', "Fix the model parameters first.").should("be.visible");
+
+      // Not JSON: the checkbox cannot edit it, and nothing is posted.
+      cy.get('[data-testid="celln-model-parameters-json"]').clear().type('{"temperature": ', { parseSpecialCharSequences: false });
+      cy.get('[data-testid="celln-model-parameters-error"]').should("contain", "model parameters: not valid JSON");
+      cy.get('[data-testid="celln-disable-thinking"]').should("be.disabled");
+      cy.contains("button", "Add to the fleet").click();
+      cy.then(() => expect(posts).to.equal(0));
+
+      // The checkbox and the JSON edit the same object.
+      cy.get('[data-testid="celln-model-parameters-json"]').clear();
+      cy.get('[data-testid="celln-model-parameters-error"]').should("not.exist");
+      cy.get('[data-testid="celln-disable-thinking"]').should("not.be.checked").check();
+      cy.get('[data-testid="celln-model-parameters-json"]').invoke("val").then((text) => expect(JSON.parse(String(text))).to.deep.equal(thinkingOff));
+      cy.get('[data-testid="celln-model-parameters-json"]').clear().type('{"chat_template_kwargs": {"enable_thinking": false}, "top_k": 40}', { parseSpecialCharSequences: false });
+      cy.get('[data-testid="celln-disable-thinking"]').should("be.checked").uncheck();
+      cy.get('[data-testid="celln-model-parameters-json"]').invoke("val").then((text) => expect(JSON.parse(String(text))).to.deep.equal({ top_k: 40 }));
+      cy.get('[data-testid="celln-model-parameters-json"]').clear();
+      cy.get('[data-testid="celln-disable-thinking"]').check();
+      cy.contains("button", "Add to the fleet").click();
+    });
+    cy.wait("@add").its("request.body.parameters").should("deep.equal", thinkingOff);
+    cy.then(() => expect(posts).to.equal(1));
+
+    // Bound once ready; the fixed-model line says what the backend sends.
+    cy.get('[data-testid="fleet-backend-model"]', { timeout: 15000 }).should("contain", "Model: qwen3 — fixed by fleet backend custom");
+    cy.get('[data-testid="fleet-backend-parameters"]').should("contain", '{"chat_template_kwargs":{"enable_thinking":false}}')
+      .and("have.attr", "title", '{"chat_template_kwargs":{"enable_thinking":false}}');
+  });
+
+  it("lists a fleet backend's model parameters on the Agent's Harness tab and offers the thinking switch for llama-server", () => {
+    const thinkingOff = { chat_template_kwargs: { enable_thinking: false } };
+    cy.intercept("GET", "**/api/v1/agents/hermes*", { body: hermes });
+    cy.intercept("GET", "**/api/v1/celln-platform/backends*", {
+      body: [
+        { name: "native", provider: "deepseek", protocol: "openai-chat", endpoint: "https://api.deepseek.com/chat/completions", model: "deepseek-chat", allowInsecure: false, source: "install", profile: "celln-native-starter", state: "ready" },
+        { name: "qwen-quiet", provider: "llama-server", protocol: "openai-chat", endpoint: "http://framework:8080/v1/chat/completions", model: "qwen.gguf", allowInsecure: true, parameters: thinkingOff, source: "added", profile: "celln-native-starter-qwen-quiet", state: "ready" },
+      ],
+    });
+    cy.intercept("POST", "**/api/v1/celln-platform/backends*", (request) => {
+      expect(request.body).to.deep.include({ name: "qwen-2", provider: "llama-server", endpoint: "http://framework:8080", allowInsecure: true, parameters: thinkingOff });
+      request.reply({ statusCode: 202, body: { name: "qwen-2", provider: "llama-server", protocol: "openai-chat", endpoint: "http://framework:8080/v1/chat/completions", model: "qwen.gguf", allowInsecure: true, parameters: thinkingOff, source: "added", profile: "p", state: "pending: waiting for the nodes to configure it" } });
+    }).as("add");
+    cy.visit("/agents/hermes?tab=harness#token=test-token");
+    cy.get('[data-testid="celln-backend-qwen-quiet-parameters"]').should("contain", 'sends {"chat_template_kwargs":{"enable_thinking":false}}')
+      .and("have.attr", "title", '{"chat_template_kwargs":{"enable_thinking":false}}');
+    cy.get('[data-testid="celln-backend-native"]').should("not.contain", "sends");
+
+    cy.get('[data-testid="celln-add-backend"]').within(() => {
+      cy.contains("button", "Add a backend").click();
+      // DeepSeek takes no chat-template switch; only the JSON is offered.
+      cy.contains("summary", "Advanced: model parameters").click();
+      cy.get('[data-testid="celln-disable-thinking"]').should("not.exist");
+      cy.get("button[role=combobox]").click();
+    });
+    cy.get("[role=option]").contains("llama-server").click();
+    cy.get('[data-testid="celln-add-backend"]').within(() => {
+      cy.contains("label", "Name").find("input").clear().type("qwen-2");
+      cy.contains("label", "Chat endpoint").find("input").type("http://framework:8080");
+      cy.get('[data-testid="celln-disable-thinking"]').check();
+      cy.contains("button", "Add to the fleet").click();
+    });
+    cy.wait("@add");
+  });
 });
 
 // A namespace-native Celln runtime (no fleet backend) still asks for the key

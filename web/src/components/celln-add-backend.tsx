@@ -1,5 +1,7 @@
 import { useState } from "react";
 import { useAddCellnFleetBackend, useCellnFleetBackends } from "@/hooks/use-api";
+import { CellnModelParametersField, CellnModelParametersSummary } from "@/components/celln-model-parameters";
+import { parseModelParameters } from "@/lib/model-parameters";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -26,6 +28,7 @@ export function CellnAddBackend() {
   const [model, setModel] = useState("deepseek-chat");
   const [endpoint, setEndpoint] = useState("");
   const [credential, setCredential] = useState("");
+  const [parameters, setParameters] = useState("");
   const [error, setError] = useState("");
   const preset = PROVIDERS.find((p) => p.value === provider)!;
   const list = backends.data || [];
@@ -39,6 +42,7 @@ export function CellnAddBackend() {
 
   function submit() {
     setError("");
+    const parsedParameters = parseModelParameters(parameters);
     const body = {
       name: name.trim(),
       provider,
@@ -46,11 +50,14 @@ export function CellnAddBackend() {
       endpoint: endpoint.trim() || undefined,
       allowInsecure: endpoint.trim().toLowerCase().startsWith("http://") || undefined,
       credential: credential || undefined,
+      parameters: parsedParameters.parameters,
     };
+    // The precise rule is shown under the JSON field.
+    if (parsedParameters.error) return setError("Fix the model parameters first.");
     if (!body.name) return setError("Give the backend a name (a DNS label, e.g. claude).");
     if (preset.keyed && !credential) return setError(`${preset.label} needs an API key.`);
     if (provider === "llama-server" && !body.endpoint) return setError("llama-server needs its address, e.g. http://framework:8080; the model is detected when left blank.");
-    add.mutate(body, { onSuccess: () => { setOpen(false); setCredential(""); setName(""); } });
+    add.mutate(body, { onSuccess: () => { setOpen(false); setCredential(""); setName(""); setParameters(""); } });
   }
 
   if (backends.isError) return null; // no fleet on this cluster
@@ -68,6 +75,7 @@ export function CellnAddBackend() {
           {list.map((b) => (
             <li key={b.name} data-testid={`celln-backend-${b.name}`}>
               <span className="font-medium">{b.name}</span> — {b.provider} / {b.model} {b.source === "added" ? "(added)" : ""} · <span className={b.state === "ready" ? "text-green-600" : b.state.startsWith("error") ? "text-red-600" : "text-amber-600"}>{b.state}</span>
+              {b.parameters && <> · <CellnModelParametersSummary parameters={b.parameters} testId={`celln-backend-${b.name}-parameters`} /></>}
             </li>
           ))}
         </ul>
@@ -88,6 +96,7 @@ export function CellnAddBackend() {
           ) : (
             <label className="space-y-1 text-sm"><span>API key</span><Input type="password" value={credential} onChange={(e) => setCredential(e.target.value)} placeholder="published once to the fleet, never shown" /></label>
           )}
+          <CellnModelParametersField value={parameters} onChange={setParameters} showThinking={provider === "llama-server"} />
           {error && <p role="alert" className="text-xs text-red-600 sm:col-span-2">{error}</p>}
           <div className="sm:col-span-2">
             <Button type="button" size="sm" disabled={add.isPending} onClick={submit}>{add.isPending ? "Probing and recording…" : "Add to the fleet"}</Button>

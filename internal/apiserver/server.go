@@ -76,6 +76,9 @@ type Server struct {
 	authEnabled  bool                     // set by buildMux; gates pricing writes
 	version      string                   // build version, reported by /api/v1/cluster/identity
 	cellnCells   cellnCellsSource         // gateway `/v1/cells` client and its "unsupported" verdict
+	// completeCellnBackend finishes an added fleet backend in the background;
+	// nil runs completeCellnFleetBackend (tests replace it).
+	completeCellnBackend func(name string, facts cellninstall.FleetFacts, hasParameters bool)
 }
 
 // NewServer creates a new API server.

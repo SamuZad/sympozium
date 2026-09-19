@@ -1309,13 +1309,17 @@ export function OnboardingWizard({
 
         {/* ── Provider step ─────────────────────────────────────────── */}
         {step === "provider" && wrapperRuntime && (
-          <CellnProviderPicker
-            providers={PROVIDERS}
-            provider={form.provider}
-            selected={platformProfile}
-            onProvider={(provider) => setForm({ ...form, provider })}
-            onProfile={bindProfile}
-          />
+          // The add-a-fleet-backend form (with its model parameters open) is
+          // taller than the dialog; scroll it rather than clip its button.
+          <div className="max-h-[60vh] overflow-y-auto pr-1">
+            <CellnProviderPicker
+              providers={PROVIDERS}
+              provider={form.provider}
+              selected={platformProfile}
+              onProvider={(provider) => setForm({ ...form, provider })}
+              onProfile={bindProfile}
+            />
+          </div>
         )}
         {step === "provider" && !wrapperRuntime && (
           <div className="space-y-4">
