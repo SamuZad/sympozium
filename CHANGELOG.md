@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.10.81](https://github.com/sympozium-ai/sympozium/compare/v0.10.80...v0.10.81) (2026-09-19)
+
+
+### Features
+
+* **celln:** list fleet cells through the gateway, falling back to node reports ([48e35db](https://github.com/sympozium-ai/sympozium/commit/48e35db99dbd53d8aab51515895e079c8a4180c2))
+* **celln:** list fleet cells through the gateway, falling back to node reports ([35ef5eb](https://github.com/sympozium-ai/sympozium/commit/35ef5ebb1dded550cc5f1186eeb594c829d90ee9)), closes [#591](https://github.com/sympozium-ai/sympozium/issues/591)
+* **celln:** match Celln v0.5.22's conversation limits, and pin it ([730f4a6](https://github.com/sympozium-ai/sympozium/commit/730f4a6192254b76148ef196c990150ebe0bb7bb))
+* **celln:** match the widened enduring-conversation bounds ([a90b876](https://github.com/sympozium-ai/sympozium/commit/a90b87693e1decf0c08eb7600cce1b4828075ea7)), closes [#591](https://github.com/sympozium-ai/sympozium/issues/591)
+* **cli:** sympozium doctor and an install preflight for used machines ([d379a06](https://github.com/sympozium-ai/sympozium/commit/d379a06b0480b64b1605ea998202acd4f07bac6a))
+* **cli:** sympozium doctor and an install preflight for used machines ([d27db72](https://github.com/sympozium-ai/sympozium/commit/d27db72bf3940124b05c2da2d1cbfbb952d3cafe))
+* **web:** explain why a run failed, and what to do about it ([db2a023](https://github.com/sympozium-ai/sympozium/commit/db2a023577bff9bb174b46f1d1d9a0e7e4f182d1))
+* **web:** explain why a run failed, and what to do about it ([e2fa476](https://github.com/sympozium-ai/sympozium/commit/e2fa4768aacee5e2efe98582c44e0a4fadd9b3d9))
+* **web:** say which cluster the console is connected to ([9660d27](https://github.com/sympozium-ai/sympozium/commit/9660d27d65e9af3619f3801fc83a7940bd3dae9d))
+* **web:** say which cluster the console is connected to ([4217c10](https://github.com/sympozium-ai/sympozium/commit/4217c108ec6bdf17dde756c9db8e57c073759bcb)), closes [#591](https://github.com/sympozium-ai/sympozium/issues/591)
+
+
+### Bug Fixes
+
+* **release:** republish the Celln starter package when its inputs are unchanged ([9714173](https://github.com/sympozium-ai/sympozium/commit/9714173529693e7346f1e022bdcd3df78c4b621f))
+* **release:** republish the Celln starter package when its inputs are unchanged ([326490d](https://github.com/sympozium-ai/sympozium/commit/326490dd70bf0e55418cddbab1174caec9b5cc2d)), closes [#591](https://github.com/sympozium-ai/sympozium/issues/591)
+* **web:** make the Create Agent wizard fleet-aware ([91f659d](https://github.com/sympozium-ai/sympozium/commit/91f659d4a67a051b6c6de41ce432c4a920985fb2))
+* **web:** make the Create Agent wizard fleet-aware ([470e16d](https://github.com/sympozium-ai/sympozium/commit/470e16d68d75173cae564e40a9d37c8f590f6973)), closes [#591](https://github.com/sympozium-ai/sympozium/issues/591)
+
 ## [0.10.80](https://github.com/sympozium-ai/sympozium/compare/v0.10.79...v0.10.80) (2026-09-17)
 
 
