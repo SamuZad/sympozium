@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.10.83](https://github.com/sympozium-ai/sympozium/compare/v0.10.82...v0.10.83) (2026-09-19)
+
+
+### Features
+
+* **celln:** max output tokens per request for fleet backends ([97d8eca](https://github.com/sympozium-ai/sympozium/commit/97d8ecac4c25bdfb504c2d1cff971e8f8191c635))
+* **celln:** output tokens per request for fleet backends ([a6e8880](https://github.com/sympozium-ai/sympozium/commit/a6e8880932150aaa23885a59faaf193a824d6326))
+
+
+### Bug Fixes
+
+* **celln:** a failed first turn no longer ends the conversation ([b1dcbc9](https://github.com/sympozium-ai/sympozium/commit/b1dcbc9614a61569f74c3887560df92f725f9bdc))
+* **celln:** keep a conversation open after a failed initial turn ([096bbfc](https://github.com/sympozium-ai/sympozium/commit/096bbfcc936f323331833d2f8ab064b06dd83b5b))
+
 ## [0.10.82](https://github.com/sympozium-ai/sympozium/compare/v0.10.81...v0.10.82) (2026-09-19)
 
 
