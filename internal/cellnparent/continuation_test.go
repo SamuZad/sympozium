@@ -188,6 +188,29 @@ func TestAutomaticContinuationStalledOnlyWithoutFollowUp(t *testing.T) {
 		objects []*api.AgentRunTurn
 		stalled bool
 	}{name: "accepted follow-up allows one more continuation", run: accepted, stalled: false})
+	// The seeded resume turn is never follow-up work, whatever its outcome: a
+	// continuation whose resume turn FAILED and was then lost added nothing,
+	// so it must not be re-created. It stays open to the user while its parent
+	// is Ready (TurnReadiness); the message they send is the progress.
+	failedResume := continuation(ContinuationOriginAutomatic)
+	failedResume.Status.CellnParent.InitialTurn.Result = &api.CellnParentTurnResult{Succeeded: false, Answer: "Turn failed; no result committed"}
+	failedResumeThenMessage := failedResume.DeepCopy()
+	failedResumeThenMessage.Status.CellnParent.AcceptedTurns = 1
+	for _, extra := range []struct {
+		name    string
+		run     *api.AgentRun
+		stalled bool
+	}{
+		{"failed resume turn is not follow-up work", failedResume, true},
+		{"message accepted after a failed resume turn is progress", failedResumeThenMessage, false},
+	} {
+		cases = append(cases, struct {
+			name    string
+			run     *api.AgentRun
+			objects []*api.AgentRunTurn
+			stalled bool
+		}{name: extra.name, run: extra.run, stalled: extra.stalled})
+	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			builder := fake.NewClientBuilder().WithScheme(scheme)

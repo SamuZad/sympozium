@@ -88,14 +88,17 @@ export function CellnConversation({ run, observationUnavailable = false, retainE
     ? parentCondition.message || "Scoped parent admission or execution is not confirmed. No replacement work will be submitted."
     : lostDiagnosis
     ? showDiagnosis ? "" : lostDiagnosis.cause
-    : ready && initialFailed
-    ? "The initial turn failed. Sending is disabled; inspect the recorded failure before creating any new work."
     : ready && activeTurn
     ? "One turn is already active or awaiting reconciliation. It must have a committed result before another turn can begin."
     : ready && ceilingReached
     ? scoped
       ? "The loaded turn records reach the requested turn ceiling, including the initial turn. Sending is disabled; this is not host budget-usage telemetry."
       : "The requested turn ceiling is exhausted, including the initial turn. Refreshing this page does not restore the budget."
+    // A failed turn result leaves the parent's context intact (the owner still
+    // reports Ready), so a failed first turn is as survivable as a later one.
+    // The API applies the same rule (cellnparent.TurnReadiness).
+    : ready && initialFailed && turns.length === 0
+    ? "The first turn failed; the conversation is still open — send another message. The failed turn still counts toward the turn ceiling."
     : "";
   const completeHistory = Boolean(history.data) && !history.hasNextPage;
   // The lease runs from the single create attempt; after it no new turn is
@@ -114,9 +117,11 @@ export function CellnConversation({ run, observationUnavailable = false, retainE
       ? `This conversation's lease ended at ${leaseEnd.toLocaleString()}. Recorded answers remain; start a new conversation to continue.`
       : `Lease ends ${leaseEnd.toLocaleString()} (${formatRemaining(leaseEnd.getTime() - now)} left). Turns used: ${(parent?.acceptedTurns || 0) + 1} of ${requestedTurns}.`
     : "";
-  const canCompose = ready && !initialFailed && !activeTurn && !ceilingReached && !pending && !sending && completeHistory && !leaseExpired;
+  const canCompose = ready && !activeTurn && !ceilingReached && !pending && !sending && completeHistory && !leaseExpired;
   const bytes = new TextEncoder().encode(draft).length;
-  const initialConfirmed = scoped ? Boolean(scopedParent?.receiptDigest && scopedParent.output) : Boolean(parent?.initialTurn?.result?.succeeded);
+  // A committed initial result, succeeded or failed, opens the conversation;
+  // an uncommitted one does not.
+  const initialConfirmed = scoped ? Boolean(scopedParent?.receiptDigest && scopedParent.output) : Boolean(parent?.initialTurn?.result);
   const canSend = ready && initialConfirmed && !activeTurn && !pending && !sending && !history.isError && completeHistory &&
     !ceilingReached && !leaseExpired && draft.trim().length > 0 && bytes <= 2048 && !draft.includes("\0");
 

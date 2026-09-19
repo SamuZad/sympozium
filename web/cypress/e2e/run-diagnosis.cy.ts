@@ -148,7 +148,8 @@ describe("diagnoseRun", () => {
     expect(diagnosis).to.include({ kind: "turn-failed", title: "Turn failed: the answer was too long" });
     expect(diagnosis.code).to.contain("final answer exceeds limit");
     expect(diagnosis.cause).to.contain("answer size bound").and.not.contain("thinking");
-    expect(diagnosis.nextSteps.map((step) => step.label)).to.deep.equal(["Ask for a shorter answer", "Or use a fleet backend with fewer output tokens per request"]);
+    // The parent is Ready, so the conversation stays open after the failed first turn.
+    expect(diagnosis.nextSteps.map((step) => step.label)).to.deep.equal(["Ask for a shorter answer", "Or use a fleet backend with fewer output tokens per request", "Send another message"]);
     expect(diagnosis.nextSteps[1].detail).to.contain("Max output tokens per request").and.contain("lower value");
     expect(diagnosis.nextSteps[1].action).to.deep.include({ kind: "link", to: "/agents/hermes?tab=harness" });
   });
@@ -169,6 +170,39 @@ describe("diagnoseRun", () => {
     const diagnosis = diagnoseRun(run({ phase: "Pending", conditions: [condition("CellnParentReady", "AdmissionPending", message)] }))!;
     expect(diagnosis.cause).to.contain("system prompt differs from the persona");
     expect(diagnosis.nextSteps[0].action).to.deep.equal({ kind: "link", label: "Open the Agent's Chat tab", to: "/agents/hermes?tab=chat" });
+  });
+
+  it("a failed first turn offers Send another message only while the parent is Ready", () => {
+    const steps = diagnoseRun(turnFailed)!.nextSteps;
+    // The specific remedy still leads; the conversation is not a dead end.
+    expect(steps[0].label).to.equal("Ask for fewer actions per message");
+    expect(steps[0].detail).to.contain("send the next message below").and.not.contain("not accepting messages");
+    expect(steps[0].action).to.equal(undefined);
+    const send = steps.find((step) => step.label === "Send another message")!;
+    expect(send.detail).to.contain("The first turn failed; the conversation is still open — send another message").and.contain("turn limit");
+    // Parent not reported Ready, run not Running, or deleting: a new conversation, as before.
+    const closed: AgentRun[] = [
+      { ...turnFailed, status: { ...turnFailed.status, conditions: [] } } as AgentRun,
+      { ...turnFailed, status: { ...turnFailed.status, conditions: [condition("CellnParentReady", "Initializing", "Parent startup pending")] } } as AgentRun,
+      { ...turnFailed, status: { ...turnFailed.status, phase: "Failed" } } as AgentRun,
+      { ...turnFailed, metadata: { ...turnFailed.metadata, deletionTimestamp: "2026-09-19T10:00:00Z" } } as AgentRun,
+    ];
+    for (const subject of closed) {
+      const closedSteps = diagnoseRun(subject)!.nextSteps;
+      expect(closedSteps.some((step) => step.label === "Send another message")).to.equal(false);
+      expect(closedSteps[0].label).to.equal("Ask for fewer actions per message");
+      expect(closedSteps[0].detail).to.contain("this parent is not accepting messages");
+      expect(closedSteps[0].action).to.include({ kind: "link" });
+    }
+    // A lost parent keeps its own diagnosis, whatever the first turn's result.
+    const lost = { ...turnFailed, status: { ...turnFailed.status, phase: "Failed", conditions: [condition("CellnParentReady", "ContextLost", "parent context unavailable")] } } as AgentRun;
+    expect(diagnoseRun(lost)!.kind).to.equal("parent-lost");
+    // A later failed turn never gets the first-turn step, and a context overflow is not retried by resending.
+    const later = { ...turnFailed, status: { ...turnFailed.status, cellnParent: { ...turnFailed.status!.cellnParent!, initialTurn: initialOK } } } as AgentRun;
+    const laterSteps = diagnoseRun(later, [{ metadata: { name: "turn-1" }, spec: { runName: "r", runUID: "run-uid", message: "List everything" }, status: { execution: { ...initialOK, result: { succeeded: false, answer: LENGTH_ANSWER } } } }] as AgentRunTurn[])!.nextSteps;
+    expect(laterSteps.some((step) => step.label === "Send another message")).to.equal(false);
+    const overflow = { ...turnFailed, status: { ...turnFailed.status, cellnParent: { ...turnFailed.status!.cellnParent!, initialTurn: { ...initialOK, result: { succeeded: false, answer: "CELLN_HARNESS_ERROR context capacity exceeded" } } } } } as AgentRun;
+    expect(diagnoseRun(overflow)!.nextSteps.some((step) => step.label === "Send another message")).to.equal(false);
   });
 
   it("strips harness event JSON from the error line and truncates evidence", () => {
@@ -226,6 +260,8 @@ describe("Why did this fail panel", () => {
     cy.get('[data-testid="run-diagnosis"]').should("have.attr", "data-kind", "turn-failed");
     cy.get('[data-testid="run-diagnosis-cause"]').should("contain", "per-turn tool call limit");
     cy.get('[data-testid="run-diagnosis-step"]').first().should("contain", "Ask for fewer actions per message");
+    cy.get('[data-testid="run-diagnosis-steps"]').should("contain", "Send another message").and("contain", "the conversation is still open").and("not.contain", "not accepting messages");
+    cy.get('[data-testid="celln-turn-message"]').should("be.enabled");
     evidenceCollapsedThenShows("CELLN_HARNESS_ERROR tool call budget exhausted");
   });
 
