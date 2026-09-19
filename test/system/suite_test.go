@@ -155,7 +155,7 @@ func TestMain(m *testing.M) {
 
 	// Build the API server HTTP handler (no auth).
 	srv := apiserver.NewServer(k8sClient, nil, clientset, log)
-	mux = srv.Handler("")
+	mux = srv.Handler(nil)
 
 	// Ensure required namespaces exist (envtest doesn't create them).
 	for _, nsName := range []string{"default", "sympozium-system"} {
