@@ -76,6 +76,13 @@ Fractional sampling parameters, exponent notation and negative zero are explicit
 unsupported in this v1 model-body profile; no silent numeric conversion is used.
 This does not change the existing legacy Celln provider path.
 
+That profile is for the guest body only. A ModelConnection's `parameters`
+(operator policy, see `docs/guides/celln-model-authority.md`) are appended to
+the canonical guest body after it is digested and may hold fractional numbers;
+`maxOutputTokens` replaces the former fixed 512 bound per request. Top-level
+guest fields must be exact provider field names, and any key the connection
+pins refuses.
+
 The Go issuer/verifier now enforces the published decision schema, including the
 submitted raw shape. Gateway fixtures have full schema-valid identities rather
 than placeholder untyped budget/request hashes that a Rust receiver would reject.

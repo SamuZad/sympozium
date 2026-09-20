@@ -52,6 +52,7 @@ func TestGatewayChartRequiresExplicitTrustAndRestrictsIdentity(t *testing.T) {
 			}
 		case "NetworkPolicy":
 			ingress, _, _ := unstructured.NestedSlice(obj.Object, "spec", "ingress")
+			admitted := map[string]bool{}
 			for _, entry := range ingress {
 				peers, _, _ := unstructured.NestedSlice(entry.(map[string]interface{}), "from")
 				for _, peer := range peers {
@@ -59,7 +60,26 @@ func TestGatewayChartRequiresExplicitTrustAndRestrictsIdentity(t *testing.T) {
 					if p["namespaceSelector"] == nil || p["podSelector"] == nil {
 						t.Fatal("ingress does not conjoin namespace and pod identity")
 					}
+					namespace, _, _ := unstructured.NestedString(p, "namespaceSelector", "matchLabels", "kubernetes.io/metadata.name")
+					labels, _, _ := unstructured.NestedStringMap(p, "podSelector", "matchLabels")
+					if namespace == "" || len(labels) != 1 {
+						t.Fatalf("ingress peer is not one exact namespace and pod label: %v", p)
+					}
+					for key, value := range labels {
+						admitted[namespace+"/"+key+"="+value] = true
+					}
 				}
+			}
+			// Fleet dispatchers run in the celln-node DaemonSet pods
+			// (charts/sympozium/templates/celln-fleet.yaml).
+			want := []string{"sympozium-system/control-plane=controller-manager", "celln-system/app.kubernetes.io/name=celln-dispatcher", "celln-system/app.kubernetes.io/name=celln-router", "celln-system/app.kubernetes.io/name=celln-node"}
+			for _, peer := range want {
+				if !admitted[peer] {
+					t.Fatalf("gateway ingress does not admit %s: %v", peer, admitted)
+				}
+			}
+			if len(admitted) != len(want) {
+				t.Fatalf("gateway ingress admits unexpected peers: %v", admitted)
 			}
 		case "Deployment":
 			sa, _, _ := unstructured.NestedString(obj.Object, "spec", "template", "spec", "serviceAccountName")

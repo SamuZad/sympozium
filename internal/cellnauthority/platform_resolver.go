@@ -583,7 +583,13 @@ func resolveDecisionRoute(s platformSnapshot, required bool) (DecisionRouteBindi
 		}
 	}
 	uid := string(c.UID)
-	specDigest, err := digestJSON(c.Spec)
+	// The model gateway recomputes this digest from the live spec on every
+	// registration and invocation; both sides digest the spec's DigestView.
+	specView, err := c.Spec.DigestView()
+	if err != nil {
+		return empty, err
+	}
+	specDigest, err := digestJSON(specView)
 	if err != nil {
 		return empty, err
 	}
