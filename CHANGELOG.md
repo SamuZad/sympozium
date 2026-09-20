@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.10.85](https://github.com/sympozium-ai/sympozium/compare/v0.10.84...v0.10.85) (2026-09-20)
+
+
+### Features
+
+* **apiserver:** carry the mediation record into added backends and expose it ([d9b6416](https://github.com/sympozium-ai/sympozium/commit/d9b6416660d42eee1a0b6225a3aa8025218e1118))
+* **celln:** admit an Agent's own Secret-backed connection on the mediated path ([2e99bba](https://github.com/sympozium-ai/sympozium/commit/2e99bbae7c3fa1fad2a6264ef077222ccf56f189))
+* **celln:** admit an Agent's own Secret-backed connection on the mediated path ([b1a2973](https://github.com/sympozium-ai/sympozium/commit/b1a2973dd5bea92132ee06b02b3f3637ea88a886))
+* **celln:** declare which providers Agents may bring their own key for ([462f838](https://github.com/sympozium-ai/sympozium/commit/462f8387ca4cb71e75defcca80b00675be96539c))
+* **celln:** install mediated model access from the chart behind one switch ([aa471af](https://github.com/sympozium-ai/sympozium/commit/aa471af9c7f3c6e2faff5feeea9d5bfa2743995f))
+* **celln:** install mediated model access from the chart behind one switch ([4830920](https://github.com/sympozium-ai/sympozium/commit/483092018db093b42871a8b1759942212fdd5a59)), closes [#611](https://github.com/sympozium-ai/sympozium/issues/611)
+* **celln:** let the operator declare mediated routes at install ([c4a3b4b](https://github.com/sympozium-ai/sympozium/commit/c4a3b4b03cc233ddb012b64f7b5c97c28db626a9))
+* **doctor:** report mediated model access ([3043e0d](https://github.com/sympozium-ai/sympozium/commit/3043e0dd777885de76665d9cdd41fb54b26e8513))
+* **gateway:** per-connection request policy on ModelConnection ([240eab4](https://github.com/sympozium-ai/sympozium/commit/240eab4f8ad9cde403ca23422b3fdf4d8269f16a))
+* **gateway:** per-connection request policy on ModelConnection ([d841853](https://github.com/sympozium-ai/sympozium/commit/d84185368f4ee9f3acb8bb53f8743f5d2a2e811a))
+
+
+### Bug Fixes
+
+* **celln:** pin Celln v0.5.26 ([09dc2ea](https://github.com/sympozium-ai/sympozium/commit/09dc2eaf601fbd7dd7d8b76fd9e68e7a16161bec))
+* **celln:** pin Celln v0.5.26 (mediated native parents: scoped receiver, per-operation output cap, starter parent request) ([619e980](https://github.com/sympozium-ai/sympozium/commit/619e980e42316b7adeaa604df70b0f937cf7a39e))
+
 ## [0.10.84](https://github.com/sympozium-ai/sympozium/compare/v0.10.83...v0.10.84) (2026-09-20)
 
 
