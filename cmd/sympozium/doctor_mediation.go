@@ -112,7 +112,7 @@ func (d *doctor) checkMediation(ctx context.Context, rel *releaseInfo) doctorFin
 			return failed(check, err)
 		}
 		for _, route := range policy.Spec.Routes {
-			if route.Auth == "secret" {
+			if route.Auth == "secret" || route.Auth == "none" {
 				published = append(published, route)
 			}
 		}
@@ -140,7 +140,7 @@ func (d *doctor) checkMediation(ctx context.Context, rel *releaseInfo) doctorFin
 	}
 	routes := make([]string, 0, len(published))
 	for _, route := range published {
-		routes = append(routes, fmt.Sprintf("%s/%s (%s) at %s", route.Provider, strings.Join(route.Models, "+"), route.Protocol, strings.Join(route.EndpointOrigins, "+")))
+		routes = append(routes, fmt.Sprintf("%s/%s (%s, auth=%s) at %s", route.Provider, strings.Join(route.Models, "+"), route.Protocol, route.Auth, strings.Join(route.EndpointOrigins, "+")))
 	}
 	switch {
 	case f.Status == statusFail:
@@ -148,7 +148,7 @@ func (d *doctor) checkMediation(ctx context.Context, rel *releaseInfo) doctorFin
 	case len(routes) == 0:
 		f.Summary = "enabled; trust objects present and the model gateway is ready, but no Agent may bring its own key yet"
 	default:
-		f.Summary = fmt.Sprintf("enabled; trust objects present, the model gateway is ready and policy %s lets Agents bring their own key for: %s", policyName, strings.Join(routes, "; "))
+		f.Summary = fmt.Sprintf("enabled; trust objects present, the model gateway is ready and policy %s permits: %s", policyName, strings.Join(routes, "; "))
 	}
 	return f
 }

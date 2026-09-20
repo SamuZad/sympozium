@@ -779,6 +779,8 @@ celln:
     #     protocol: anthropic-messages        # or openai-chat
     #     models: [claude-sonnet-5]           # 1-32 exact names
     #     endpointOrigins: [https://api.anthropic.com]   # https://host, no port or path
+    # For keyless local models set auth: none and allowInsecure: true, and
+    # also list the exact HTTP origin (including port) in modelGateway.privateOrigins.
     routes: []
     # -- Parent request template for enduring scoped runs, read once when the
     # dispatcher starts. Empty uses scoped-parent-request.json in the first

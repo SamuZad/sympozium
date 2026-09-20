@@ -151,9 +151,9 @@ point a key, or the gateway's egress, at a host of its choosing. The route list
 is the operator's allow-list of destinations; the tenant only picks from it.
 
 Matching is **exact** on all four of provider, protocol, model and endpoint
-origin. There is no wildcard model, no origin prefix and no port: an origin is
-`https://host`. A plain-HTTP origin is refused everywhere, because a cluster
-Secret never crosses plain HTTP.
+origin. There is no wildcard model or origin prefix. Secret routes use
+`https://host` without a port: a cluster Secret never crosses plain HTTP.
+Explicitly keyless local routes can approve HTTP and ports as described below.
 
 With the installer (the flags only declare routes; mediation itself must be
 enabled by this install's values, or they are refused before anything changes):
@@ -325,6 +325,44 @@ A run of this Agent is resolved against the policy's `secret` routes. If it is
 refused `AUTH_ROUTE_MISMATCH`, compare the connection's provider, protocol,
 endpoint origin and the run's model with the routes `sympozium doctor` lists:
 all four must match one route.
+
+## Keyless local models
+
+For a local OpenAI-compatible server, declare `auth: none` explicitly. HTTP
+also requires `allowInsecure: true` on both the operator route and the tenant
+connection, and the exact origin in `modelGateway.privateOrigins`:
+
+```yaml
+celln:
+  mediation:
+    enabled: true
+    routes:
+      - provider: llama-server
+        protocol: openai-chat
+        auth: none
+        allowInsecure: true
+        models: [local-model]
+        endpointOrigins: [http://192.168.1.237:8080]
+modelGateway:
+  privateOrigins: [http://192.168.1.237:8080]
+```
+
+Merge these settings into the existing mediation values, upgrade with
+`helm upgrade --reuse-values`, then run `sympozium celln-mediation apply-routes`.
+Keep the existing routes in the values list if they are still needed. The
+equivalent installer route is
+`--celln-mediated-route provider=llama-server,protocol=openai-chat,auth=none,allowInsecure=true,origin=http://192.168.1.237:8080,models=local-model`;
+the gateway allow-list and network egress must also permit that destination.
+
+Create Agent → Celln offers the declared local provider and explains that no
+key is required. Its ModelConnection sets `allowInsecure: true` and has neither
+`secretRef` nor `credentialProfile`. No compatibility Secret is created. The
+gateway still enforces budgets and model parameters, but sends no credentials.
+
+HTTP DNS answers must all be loopback or private addresses; public, link-local,
+and mixed public/private answers are refused. Use an explicit LAN IP when the
+host name resolves to several address classes. Redirects remain disabled.
+Secret-backed HTTP routes remain forbidden.
 
 ## The enduring parent request
 

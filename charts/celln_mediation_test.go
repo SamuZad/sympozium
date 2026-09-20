@@ -187,6 +187,27 @@ func TestMediationRecordsTheDeclaredRoutes(t *testing.T) {
 	}
 }
 
+func TestKeylessMediatedRouteRequiresGatewayApproval(t *testing.T) {
+	values := append(mediationValues(), route(0, "llama-server", "openai-chat", "local", "http://framework:8080")...)
+	values = append(values, "celln.mediation.routes[0].auth=none", "celln.mediation.routes[0].allowInsecure=true")
+	if _, err := renderNativeParent(t, values); err == nil {
+		t.Fatal("private origin accepted without gateway approval")
+	}
+	values = append(values, "modelGateway.privateOrigins[0]=http://framework:8080")
+	r := decodeMediation(t, mustRender(t, values))
+	cm := r.configMaps["celln-system/"+cellninstall.MediationRecordConfigMap]
+	var record cellninstall.MediationRecord
+	if err := json.Unmarshal([]byte(cm.Data["mediation.json"]), &record); err != nil || len(record.Routes) != 1 {
+		t.Fatalf("record: %v %s", err, cm.Data["mediation.json"])
+	}
+	if route, err := record.Routes[0].PolicyRoute(); err != nil || route.Auth != "none" || !route.AllowInsecure {
+		t.Fatalf("keyless route lost in chart record: %+v %v", route, err)
+	}
+	if _, err := renderNativeParent(t, append(values, "celln.mediation.routes[0].auth=secret")); err == nil {
+		t.Fatal("Secret-bearing HTTP route accepted")
+	}
+}
+
 func container(t *testing.T, containers []corev1.Container, name string) corev1.Container {
 	t.Helper()
 	for _, c := range containers {

@@ -47,6 +47,8 @@ func TestCellnMediationReportsWhatAnAgentMayBringAKeyFor(t *testing.T) {
 	declared := `{"mediateBackends":true,"routes":[{"provider":"anthropic","protocol":"anthropic-messages","models":["claude-b","claude-a"],"endpointOrigins":["https://api.anthropic.com"]},{"provider":"openai","protocol":"openai-chat","models":["gpt"],"endpointOrigins":["https://api.openai.com"]}]}`
 	published := CellnMediatedRoute{Provider: "anthropic", Protocol: "anthropic-messages", Models: []string{"claude-a", "claude-b"}, EndpointOrigins: []string{"https://api.anthropic.com"}, Policy: "celln-fleet-trial", SecretKey: "ANTHROPIC_API_KEY"}
 	pending := CellnMediatedRoute{Provider: "openai", Protocol: "openai-chat", Models: []string{"gpt"}, EndpointOrigins: []string{"https://api.openai.com"}, SecretKey: "OPENAI_API_KEY"}
+	keyless := sympoziumv1alpha1.CellnExecutionPolicyRoute{Provider: "llama-server", Protocol: "openai-chat", Models: []string{"local"}, EndpointOrigins: []string{"http://framework:8080"}, Auth: "none", AllowInsecure: true}
+	keylessAPI := CellnMediatedRoute{Provider: "llama-server", Protocol: "openai-chat", Models: []string{"local"}, EndpointOrigins: []string{"http://framework:8080"}, Auth: "none", AllowInsecure: true, Policy: "celln-fleet-trial"}
 	for _, tc := range []struct {
 		name      string
 		namespace string
@@ -55,6 +57,8 @@ func TestCellnMediationReportsWhatAnAgentMayBringAKeyFor(t *testing.T) {
 		status    int
 		want      CellnMediation
 	}{
+		{name: "keyless route has no Secret key", namespace: "team-a", record: record(`{"routes":[]}`), routes: []sympoziumv1alpha1.CellnExecutionPolicyRoute{keyless}, status: http.StatusOK,
+			want: CellnMediation{Enabled: true, Routes: []CellnMediatedRoute{keylessAPI}, Pending: []CellnMediatedRoute{}}},
 		{name: "mediation off", namespace: "team-a", status: http.StatusOK, want: CellnMediation{Routes: []CellnMediatedRoute{}, Pending: []CellnMediatedRoute{}}},
 		{name: "enabled, nothing declared", namespace: "team-a", record: record(`{"mediateBackends":false,"routes":[]}`), status: http.StatusOK, want: CellnMediation{Enabled: true, Routes: []CellnMediatedRoute{}, Pending: []CellnMediatedRoute{}}},
 		{name: "declared and partly published", namespace: "team-a", record: record(declared), routes: []sympoziumv1alpha1.CellnExecutionPolicyRoute{anthropic}, status: http.StatusOK,

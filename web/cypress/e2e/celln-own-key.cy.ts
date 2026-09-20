@@ -49,6 +49,38 @@ function chooseProvider(label: string) {
 }
 
 describe("Create Agent → Celln: the Agent's own model backend", () => {
+  it("creates a keyless local model connection without reading or writing a Secret", () => {
+    const local = { ...gateway, provider: "llama-server", endpointOrigins: ["http://framework:8080"], auth: "none", allowInsecure: true, secretKey: "" };
+    stub({ enabled: true, mediateBackends: false, routes: [local], pending: [] });
+    cy.intercept("GET", "**/api/v1/celln-platform/key-secrets*", () => { throw new Error("keyless route listed Secrets"); });
+    cy.intercept("POST", "**/api/v1/model-connections*", (request) => {
+      expect(request.body).not.to.have.property("apiKey");
+      expect(request.body.spec).to.deep.equal({ provider: "llama-server", protocol: "openai-chat", endpoint: "http://framework:8080/v1/chat/completions", models: ["qwen3"], allowInsecure: true });
+      request.reply({ statusCode: 201, body: { metadata: { name: "mine-connection" }, spec: request.body.spec } });
+    }).as("connection");
+    cy.intercept("POST", "**/api/v1/celln-platform/wrappers*", { body: { runtime: "celln-native", created: [] } });
+    cy.intercept("POST", "**/api/v1/agents*", (request) => {
+      expect(request.body).not.to.have.any.keys("apiKey", "secretName");
+      expect(request.body.execution.modelConnectionRef).to.equal("mine-connection");
+      request.reply({ statusCode: 201, body: { metadata: { name: "mine" }, spec: {} } });
+    }).as("agent");
+    openProviderStep();
+    cy.get('[data-testid="celln-route-select"]').click();
+    cy.get('[role="option"]').first().click();
+    next();
+    cy.get('[data-testid="celln-keyless-route"]').should("contain", "No API key is required");
+    cy.get('[data-testid="celln-api-key"]').should("not.exist");
+    next();
+    next();
+    cy.get('[data-testid="celln-own-key-confirmation"]').should("contain", "keyless route");
+    dialog().contains("button", "YAML").click();
+    cy.get('[role="dialog"]').last().should("not.contain", "secretRef:").and("not.contain", "authRefs:").and("contain", "allowInsecure: true");
+    cy.get("body").type("{esc}");
+    dialog().contains("button", /Create\s*$/).click();
+    cy.wait(["@connection", "@agent"]);
+    cy.get('[role="dialog"]').should("not.exist");
+  });
+
   it("says what the operator must run when mediated model access is disabled", () => {
     stub({ enabled: false, mediateBackends: false, routes: [], pending: [] });
     openProviderStep();

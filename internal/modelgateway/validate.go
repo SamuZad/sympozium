@@ -103,6 +103,9 @@ func validateConnection(decision cellncapability.Decision, name string, connecti
 		return fail(ReasonRouteChanged, 403, err)
 	}
 	if decision.Route.Auth == "secret" {
+		if !strings.HasPrefix(origin, "https://") {
+			return fail(ReasonDestination, 403, nil)
+		}
 		if decision.Route.CredentialSource == nil || spec.SecretRef != decision.Route.CredentialSource.SecretName || spec.CredentialProfile != "" {
 			return fail(ReasonCredentialChanged, 403, nil)
 		}

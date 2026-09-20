@@ -65,6 +65,24 @@ func TestMediatedRoutePolicyRoute(t *testing.T) {
 	}
 }
 
+func TestKeylessMediatedRouteRequiresExplicitInsecureApproval(t *testing.T) {
+	route := MediatedRoute{Provider: "llama-server", Protocol: "openai-chat", Models: []string{"local"}, EndpointOrigins: []string{"http://framework:8080"}, Auth: "none"}
+	if _, err := route.PolicyRoute(); err == nil {
+		t.Fatal("HTTP accepted without explicit approval")
+	}
+	route.AllowInsecure = true
+	got, err := route.PolicyRoute()
+	if err != nil || got.Auth != "none" || !got.AllowInsecure || got.EndpointOrigins[0] != "http://framework:8080" {
+		t.Fatalf("keyless route: %+v %v", got, err)
+	}
+	for _, auth := range []string{"secret", "host-profile", "unknown"} {
+		route.Auth = auth
+		if _, err := route.PolicyRoute(); err == nil {
+			t.Fatalf("insecure route accepted with auth %s", auth)
+		}
+	}
+}
+
 func TestInstallPlatformMediatedRoutes(t *testing.T) {
 	ctx := context.Background()
 	dir, packageHash, principal := starterConfiguration(t)

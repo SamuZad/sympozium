@@ -13,7 +13,9 @@ Implemented so far:
 - Reservation-before-forwarding without automatic retry or redirect following.
 - Connect-time DNS answer validation and dialing of a validated literal IP;
   public/private mixed answers refuse unless the exact origin is approved.
-- Plain HTTP is confined to explicitly approved loopback destinations. HTTPS
+- Plain HTTP is confined to explicitly approved keyless destinations resolving
+  only to loopback or private IP addresses. Public, link-local and mixed DNS
+  answers are refused even for an approved origin. HTTPS
   always verifies certificates; tenant AllowInsecure does not disable TLS checks.
 - Bounded input/output, strict duplicate-key parsing, and reason-only HTTP errors.
 

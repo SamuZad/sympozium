@@ -40,7 +40,10 @@ data:
   {{- range $route := $m.routes | default list }}
   {{- $models := list }}
   {{- range $model := $route.models }}{{ $models = append $models (toString $model) }}{{ end }}
-  {{- $routes = append $routes (dict "provider" (toString $route.provider) "protocol" $route.protocol "models" $models "endpointOrigins" $route.endpointOrigins) }}
+  {{- $entry := dict "provider" (toString $route.provider) "protocol" $route.protocol "models" $models "endpointOrigins" $route.endpointOrigins }}
+  {{- if $route.auth }}{{ $_ := set $entry "auth" $route.auth }}{{ end }}
+  {{- if $route.allowInsecure }}{{ $_ := set $entry "allowInsecure" true }}{{ end }}
+  {{- $routes = append $routes $entry }}
   {{- end }}
   mediation.json: {{ toJson (dict "mediateBackends" ($m.mediateBackends | default false) "routes" $routes) | quote }}
 {{- if not $receiver.url }}

@@ -14,7 +14,7 @@ export const GUIDE_URL = "https://github.com/sympozium-ai/sympozium/blob/main/do
 
 /** Stable identity of a declared route, for select values. */
 export function routeId(route: CellnMediatedRoute): string {
-  return [route.policy || "", route.provider, route.protocol, ...route.endpointOrigins].join("|");
+  return [route.policy || "", route.provider, route.protocol, route.auth || "secret", ...route.endpointOrigins].join("|");
 }
 
 /** The standard request path of a protocol; an operator's gateway may differ. */
@@ -57,7 +57,8 @@ export function ownKeyConnectionSpec(selection: OwnKeySelection, secretRef?: str
     protocol: selection.route.protocol,
     endpoint: `${selection.origin}${selection.path.startsWith("/") ? "" : "/"}${selection.path}`,
     models: [selection.model],
-    ...(secretRef ? { secretRef } : {}),
+    ...(secretRef && selection.route.auth !== "none" ? { secretRef } : {}),
+    ...(selection.route.allowInsecure ? { allowInsecure: true } : {}),
     ...(selection.parameters && Object.keys(selection.parameters).length ? { parameters: selection.parameters } : {}),
     ...(selection.maxOutputTokens ? { maxOutputTokens: selection.maxOutputTokens } : {}),
   };
@@ -67,7 +68,7 @@ export function ownKeyConnectionSpec(selection: OwnKeySelection, secretRef?: str
 export function routeForConnection(connection: ModelConnection, model: string, routes: CellnMediatedRoute[]): CellnMediatedRoute | undefined {
   let origin = "";
   try { origin = new URL(connection.spec.endpoint).origin; } catch { /* matched as no route */ }
-  return routes.find((route) => route.provider === connection.spec.provider && route.protocol === connection.spec.protocol && route.endpointOrigins.includes(origin) && route.models.includes(model));
+  return routes.find((route) => (route.auth === "none") === !connection.spec.secretRef && route.provider === connection.spec.provider && route.protocol === connection.spec.protocol && route.endpointOrigins.includes(origin) && route.models.includes(model));
 }
 
 /**
@@ -127,10 +128,11 @@ export class OwnKeyError extends Error {
  */
 export async function prepareOwnKeyBackend(input: { connectionName: string; selection: OwnKeySelection; key: KeyChoice; profile: CellnPlatformProfile; agentName?: string; onConnectionSaved?: (connection: ModelConnection) => void }): Promise<{ connection: ModelConnection; runtime: string; steps: OwnKeyStep[] }> {
   const { connectionName, selection, key, profile } = input;
-  const creating = key.mode === "create";
-  const secretName = creating ? managedSecretName(connectionName, selection.route.provider) : key.secretName;
+  const keyless = selection.route.auth === "none";
+  const creating = !keyless && key.mode === "create";
+  const secretName = keyless ? "" : key.mode === "create" ? managedSecretName(connectionName, selection.route.provider) : key.secretName;
   const steps: OwnKeyStep[] = [
-    { step: "secret", object: `Secret ${secretName}`, state: creating ? "not-started" : "done", note: creating ? undefined : "existing Secret, linked" },
+    ...(!keyless ? [{ step: "secret" as const, object: `Secret ${secretName}`, state: creating ? "not-started" as const : "done" as const, note: creating ? undefined : "existing Secret, linked" }] : []),
     { step: "connection", object: `ModelConnection ${connectionName}`, state: "not-started" },
     { step: "runtime", object: `AgentRuntime ${profile.wrapper}`, state: "not-started" },
     ...(input.agentName ? [{ step: "agent" as const, object: `Agent ${input.agentName}`, state: "not-started" as const }] : []),
@@ -144,7 +146,7 @@ export async function prepareOwnKeyBackend(input: { connectionName: string; sele
   try {
     connection = await api.modelConnections.create({
       name: connectionName,
-      spec: ownKeyConnectionSpec(selection, creating ? undefined : key.secretName),
+      spec: ownKeyConnectionSpec(selection, creating ? undefined : secretName),
       apiKey: creating ? key.apiKey.trim() : undefined,
     });
   } catch (err) {
@@ -162,7 +164,8 @@ export async function prepareOwnKeyBackend(input: { connectionName: string; sele
   }
   if (creating) mark("secret", "done", "written");
   mark("connection", "done", "saved");
-  if (connection.metadata.name !== connectionName) steps[1].object = `ModelConnection ${connection.metadata.name}`;
+  const connectionStep = steps.find((entry) => entry.step === "connection");
+  if (connectionStep) connectionStep.object = `ModelConnection ${connection.metadata.name}`;
   if (creating && connection.spec.secretRef) steps[0].object = `Secret ${connection.spec.secretRef}`;
   // Drop the pasted key before the independently failing runtime step.
   input.onConnectionSaved?.(connection);

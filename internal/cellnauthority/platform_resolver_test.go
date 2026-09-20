@@ -152,6 +152,49 @@ func TestPlatformResolverAllowsExplicitPrivateTLSCredentialRoute(t *testing.T) {
 	}
 }
 
+func TestPlatformResolverKeylessLANRequiresPolicyApproval(t *testing.T) {
+	f := newPlatformFixture(t, "keyless-lan-route", true)
+	ctx := context.Background()
+	var connection api.ModelConnection
+	if err := f.client.Get(ctx, types.NamespacedName{Namespace: f.runKey.Namespace, Name: "model"}, &connection); err != nil {
+		t.Fatal(err)
+	}
+	connection.Spec.SecretRef = ""
+	connection.Spec.Endpoint = "http://192.168.1.237:8080/v1/chat/completions"
+	connection.Spec.AllowInsecure = true
+	if err := f.client.Update(ctx, &connection); err != nil {
+		t.Fatal(err)
+	}
+	var policies api.CellnExecutionPolicyList
+	if err := f.client.List(ctx, &policies); err != nil {
+		t.Fatal(err)
+	}
+	for i := range policies.Items {
+		policies.Items[i].Spec.Routes[0].Auth = "none"
+		policies.Items[i].Spec.Routes[0].EndpointOrigins = []string{"http://192.168.1.237:8080"}
+		if err := f.client.Update(ctx, &policies.Items[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	request := PlatformResolveRequest{ClusterID: "cluster", Now: f.now, AdmissionWindow: time.Minute, Operation: "execution.start"}
+	if _, err := f.resolver.Resolve(ctx, f.runKey, request); PlatformReason(err) != ReasonRouteMismatch {
+		t.Fatalf("tenant-only approval accepted: %v", err)
+	}
+	for i := range policies.Items {
+		policies.Items[i].Spec.Routes[0].AllowInsecure = true
+		if err := f.client.Update(ctx, &policies.Items[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	resolved, err := f.resolver.Resolve(ctx, f.runKey, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Decision.Route.Auth != "none" || resolved.Decision.Route.CredentialSource != nil {
+		t.Fatalf("unexpected keyless route: %+v", resolved.Decision.Route)
+	}
+}
+
 func platformRequest(f platformFixture) PlatformResolveRequest {
 	return PlatformResolveRequest{ClusterID: "cluster-test", Now: f.now, AdmissionWindow: 60 * time.Second}
 }

@@ -64,14 +64,23 @@ func TestMediationGuideExamplesAreValid(t *testing.T) {
 			agent = &api.Agent{}
 			strict(agent)
 		case head.Celln != nil && head.Celln.Mediation != nil && head.Celln.Mediation.Routes != nil:
-			// The values example: exactly the record's fields, strictly.
+			// Chart values may also opt into mediation and approve gateway origins.
 			var values struct {
 				Celln struct {
-					Mediation MediationRecord `json:"mediation"`
+					Mediation struct {
+						MediationRecord
+						Enabled bool `json:"enabled,omitempty"`
+					} `json:"mediation"`
 				} `json:"celln"`
+				ModelGateway *struct {
+					PrivateOrigins []string `json:"privateOrigins"`
+				} `json:"modelGateway,omitempty"`
 			}
 			strict(&values)
-			record = &values.Celln.Mediation
+			if record == nil {
+				record = &MediationRecord{}
+			}
+			record.Routes = append(record.Routes, values.Celln.Mediation.Routes...)
 		}
 	}
 	if secret == nil || connection == nil || runtime == nil || agent == nil || record == nil {

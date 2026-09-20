@@ -180,7 +180,7 @@ template that wires one of the three includes this.
 {{- fail (printf "celln.mediation.routes[%d] must be a route: provider, protocol, models, endpointOrigins" $i) -}}
 {{- end -}}
 {{- range $key, $_ := $route -}}
-{{- if not (has $key (list "provider" "protocol" "models" "endpointOrigins")) -}}
+{{- if not (has $key (list "provider" "protocol" "models" "endpointOrigins" "auth" "allowInsecure")) -}}
 {{- fail (printf "celln.mediation.routes[%d].%s is not a route field (provider, protocol, models, endpointOrigins)" $i $key) -}}
 {{- end -}}
 {{- end -}}
@@ -203,12 +203,30 @@ template that wires one of the three includes this.
 {{- fail (printf "celln.mediation.routes[%d].models must not repeat a model" $i) -}}
 {{- end -}}
 {{- $origins := $route.endpointOrigins | default list -}}
+{{- $auth := $route.auth | default "secret" -}}
+{{- if not (has $auth (list "secret" "none")) -}}
+{{- fail (printf "celln.mediation.routes[%d].auth must be secret or none" $i) -}}
+{{- end -}}
+{{- if and (hasKey $route "allowInsecure") (not (kindIs "bool" $route.allowInsecure)) -}}
+{{- fail (printf "celln.mediation.routes[%d].allowInsecure must be a boolean" $i) -}}
+{{- end -}}
+{{- $insecure := $route.allowInsecure | default false -}}
+{{- if and $insecure (ne $auth "none") -}}
+{{- fail (printf "celln.mediation.routes[%d].allowInsecure requires auth none; a Secret never crosses plain HTTP" $i) -}}
+{{- end -}}
 {{- if or (not (kindIs "slice" $origins)) (lt (len $origins) 1) (gt (len $origins) 16) -}}
 {{- fail (printf "celln.mediation.routes[%d].endpointOrigins must list 1-16 HTTPS origins" $i) -}}
 {{- end -}}
 {{- range $origin := $origins -}}
-{{- if not (regexMatch "^https://[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$" (toString $origin)) -}}
+{{- $pattern := "^https://[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$" -}}
+{{- if $insecure -}}
+{{- $pattern = "^https?://([A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?|\\[[0-9A-Fa-f:]+\\])(:[0-9]{1,5})?$" -}}
+{{- end -}}
+{{- if not (regexMatch $pattern (toString $origin)) -}}
 {{- fail (printf "celln.mediation.routes[%d].endpointOrigins: %q must be an https://host origin without port, path or credentials; a Secret never crosses plain HTTP" $i (toString $origin)) -}}
+{{- end -}}
+{{- if and $insecure (not (has $origin ($.Values.modelGateway.privateOrigins | default list))) -}}
+{{- fail (printf "celln.mediation.routes[%d]: an insecure keyless origin must also be listed in modelGateway.privateOrigins" $i) -}}
 {{- end -}}
 {{- end -}}
 {{- if ne (len ($origins | uniq)) (len $origins) -}}

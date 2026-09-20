@@ -89,7 +89,7 @@ export function CellnRouteStep({ mediation, isLoading, error, providers, selecte
       </div>
       {selected && (
         <p className="break-words text-xs text-muted-foreground" data-testid="celln-route-summary">
-          Declared by the operator in policy <code>{selected.policy}</code>: {selected.protocol} on {selected.endpointOrigins.join(", ")}, models {selected.models.join(", ")}. This Agent gets its own key and its own model connection; nothing is shared with another Agent.
+          Declared by the operator in policy <code>{selected.policy}</code>: {selected.protocol} on {selected.endpointOrigins.join(", ")}, models {selected.models.join(", ")}. {selected.auth === "none" ? "No key is required. This Agent gets its own model connection." : "This Agent gets its own key and its own model connection; nothing is shared with another Agent."}
         </p>
       )}
       <p className="text-xs text-muted-foreground">Only providers an operator declared for this namespace are listed. Another provider, model or endpoint needs a declared route first (<a className="underline" href={GUIDE_URL} target="_blank" rel="noreferrer">guide</a>).</p>
@@ -111,8 +111,9 @@ export function CellnKeyStep({ route, value, onChange, managedSecretName }: {
   managedSecretName: string;
 }) {
   const namespace = getNamespace();
-  const secrets = useCellnKeySecrets(route.secretKey, value.mode === "existing");
+  const secrets = useCellnKeySecrets(route.secretKey, route.auth !== "none" && value.mode === "existing");
   const [copied, setCopied] = useState(false);
+  if (route.auth === "none") return <p data-testid="celln-keyless-route" className="text-sm text-muted-foreground">No API key is required for this model endpoint. The gateway sends requests without credentials to the route approved by your operator.</p>;
   const command = `kubectl -n ${namespace} create secret generic <name> --from-literal=${route.secretKey}=<your key>`;
   const tab = (mode: KeyChoice["mode"], label: string) => (
     <button
