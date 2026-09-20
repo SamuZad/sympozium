@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	cap "github.com/sympozium-ai/sympozium/internal/cellncapability"
+	"github.com/sympozium-ai/sympozium/internal/cellninstall"
 	"github.com/sympozium-ai/sympozium/internal/cellnscoped"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -113,17 +114,76 @@ func TestMediationDisabledRendersNothing(t *testing.T) {
 	// Every mediation input present, only the switch off: the render must be
 	// the one an install without any of it gets, by default and on a fleet.
 	inputs := without(mediationValues()[len(fleetValues()):], "celln.mediation.enabled", "modelGateway.image", "modelGateway.egress")
-	inputs = append(inputs, "celln.mediation.enabled=false", "celln.mediation.receiver.url=https://node-a.example:9443", "modelGateway.namespaces[0]=team-a")
+	// mediateBackends=false and an empty route list are the defaults spelled out.
+	inputs = append(inputs, "celln.mediation.enabled=false", "celln.mediation.receiver.url=https://node-a.example:9443", "modelGateway.namespaces[0]=team-a", "celln.mediation.mediateBackends=false", "celln.mediation.routes=null")
 	for name, base := range map[string][]string{"defaults": nil, "fleet": fleetValues()} {
 		plain := stable(mustRender(t, base))
 		if got := stable(mustRender(t, append(slices.Clone(base), inputs...))); got != plain {
 			t.Fatalf("%s: disabled mediation changed the render", name)
 		}
-		for _, leak := range []string{"CELLN_SCOPED_CONFIG", "--scoped-", "celln-scoped", "celln-mediation", "model-gateway"} {
+		for _, leak := range []string{"CELLN_SCOPED_CONFIG", "--scoped-", "celln-scoped", "celln-mediation", "celln-mediated", "model-gateway"} {
 			if strings.Contains(plain, leak) {
 				t.Fatalf("%s: render without mediation mentions %q", name, leak)
 			}
 		}
+	}
+}
+
+// route is one celln.mediation.routes entry as --set values.
+func route(index int, provider, protocol, model, origin string) []string {
+	prefix := "celln.mediation.routes[" + string(rune('0'+index)) + "]."
+	return []string{prefix + "provider=" + provider, prefix + "protocol=" + protocol, prefix + "models[0]=" + model, prefix + "endpointOrigins[0]=" + strings.ReplaceAll(origin, ",", `\,`)}
+}
+
+// The chart records the operator's declaration where every platform installer
+// reads it; the installer's own values render exactly the record it reads back.
+func TestMediationRecordsTheDeclaredRoutes(t *testing.T) {
+	read := func(t *testing.T, values []string) cellninstall.MediationRecord {
+		t.Helper()
+		r := decodeMediation(t, mustRender(t, values))
+		cm, ok := r.configMaps["celln-system/"+cellninstall.MediationRecordConfigMap]
+		if !ok {
+			t.Fatal("no mediation record rendered")
+		}
+		var record cellninstall.MediationRecord
+		if err := json.Unmarshal([]byte(cm.Data["mediation.json"]), &record); err != nil {
+			t.Fatalf("record %q: %v", cm.Data["mediation.json"], err)
+		}
+		if err := cellninstall.ValidateMediatedRoutes(record.Routes); err != nil {
+			t.Fatalf("the installer refuses a record the chart rendered: %v", err)
+		}
+		for _, secret := range []string{"token", "key\"", "BEGIN"} {
+			if strings.Contains(cm.Data["mediation.json"], secret) {
+				t.Fatalf("record mentions %q: %s", secret, cm.Data["mediation.json"])
+			}
+		}
+		return record
+	}
+	// Enabled with nothing declared: the record exists (mediation is on) and
+	// offers nothing. No provider is on by default.
+	if got := read(t, mediationValues()); got.MediateBackends || len(got.Routes) != 0 {
+		t.Fatalf("a provider is on by default: %+v", got)
+	}
+	declared := []cellninstall.MediatedRoute{
+		{Provider: "anthropic", Protocol: "anthropic-messages", Models: []string{"claude-sonnet-5", "claude.opus:5"}, EndpointOrigins: []string{"https://api.anthropic.com"}},
+		{Provider: "openai", Protocol: "openai-chat", Models: []string{"org/gpt-5", "2025"}, EndpointOrigins: []string{"https://api.openai.com", "https://eu.api.openai.com"}},
+	}
+	values, err := cellninstall.MediationValues(true, declared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := read(t, append(mediationValues(), values...))
+	if !got.MediateBackends || !slices.EqualFunc(got.Routes, declared, func(a, b cellninstall.MediatedRoute) bool {
+		return a.Provider == b.Provider && a.Protocol == b.Protocol && slices.Equal(a.Models, b.Models) && slices.Equal(a.EndpointOrigins, b.EndpointOrigins)
+	}) {
+		t.Fatalf("record = %+v, want %+v", got, declared)
+	}
+	// Declaring routes changes nothing but the record.
+	plain, with := decodeMediation(t, mustRender(t, mediationValues())), decodeMediation(t, mustRender(t, append(mediationValues(), values...)))
+	delete(plain.configMaps, "celln-system/"+cellninstall.MediationRecordConfigMap)
+	delete(with.configMaps, "celln-system/"+cellninstall.MediationRecordConfigMap)
+	if mustJSON(t, plain.configMaps) != mustJSON(t, with.configMaps) || mustJSON(t, plain.daemonSets) != mustJSON(t, with.daemonSets) {
+		t.Fatal("declaring routes changed something besides the record; dispatchers would roll")
 	}
 }
 
@@ -370,7 +430,7 @@ func TestMediationWiresControllerDispatchersAndGatewayConsistently(t *testing.T)
 		}
 	}
 	slices.Sort(added)
-	if mustJSON(t, added) != `["sympozium-system/sympozium-celln-scoped-config","sympozium-system/test-sympozium-model-gateway-configuration"]` {
+	if mustJSON(t, added) != `["celln-system/celln-mediated-routes","sympozium-system/sympozium-celln-scoped-config","sympozium-system/test-sympozium-model-gateway-configuration"]` {
 		t.Fatalf("unexpected ConfigMaps: %v", added)
 	}
 	for _, leaked := range []string{"genPrivateKey", "genCA", "lookup"} {
@@ -412,6 +472,26 @@ func TestMediationRefusesIncompleteOrInconsistentInput(t *testing.T) {
 		"template elsewhere":  {append(slices.Clone(full), "celln.mediation.parentRequestFile=/etc/celln/parent.json"), "celln.mediation.parentRequestFile must be a file under the node state directory /var/lib/sympozium-celln/starter"},
 		"template traversal":  {append(slices.Clone(full), "celln.mediation.parentRequestFile=/var/lib/sympozium-celln/starter/../other/parent.json"), "celln.mediation.parentRequestFile must be"},
 		"duplicate namespace": {append(slices.Clone(full), "modelGateway.namespaces[0]=team-a", "modelGateway.namespaces[1]=team-a"), "modelGateway.namespaces must be unique namespace names"},
+		// Declared routes are inert without mediation, and saying so beats
+		// silently admitting nothing.
+		"routes while disabled":         {append(without(append(slices.Clone(full), route(0, "anthropic", "anthropic-messages", "claude-a", "https://api.anthropic.com")...), "celln.mediation.enabled"), "celln.mediation.enabled=false"), "require celln.mediation.enabled"},
+		"backends while disabled":       {append(fleetValues(), "celln.mediation.mediateBackends=true"), "require celln.mediation.enabled"},
+		"routes without any fleet":      {route(0, "anthropic", "anthropic-messages", "claude-a", "https://api.anthropic.com"), "require celln.mediation.enabled"},
+		"route: no provider":            {append(slices.Clone(full), route(0, "", "openai-chat", "gpt", "https://api.openai.com")...), "routes[0].provider must be"},
+		"route: unknown protocol":       {append(slices.Clone(full), route(0, "google", "gemini", "g", "https://g.example")...), "routes[0].protocol must be openai-chat or anthropic-messages"},
+		"route: no model":               {append(slices.Clone(full), "celln.mediation.routes[0].provider=openai", "celln.mediation.routes[0].protocol=openai-chat", "celln.mediation.routes[0].endpointOrigins[0]=https://api.openai.com"), "routes[0].models must list 1-32 exact model names"},
+		"route: empty model":            {append(slices.Clone(full), route(0, "openai", "openai-chat", "", "https://api.openai.com")...), "must be an exact model name"},
+		"route: wildcard model":         {append(slices.Clone(full), route(0, "openai", "openai-chat", "gpt-*", "https://api.openai.com")...), "there is no wildcard"},
+		"route: repeated model":         {append(append(slices.Clone(full), route(0, "openai", "openai-chat", "gpt", "https://api.openai.com")...), "celln.mediation.routes[0].models[1]=gpt"), "must not repeat a model"},
+		"route: no origin":              {append(slices.Clone(full), "celln.mediation.routes[0].provider=openai", "celln.mediation.routes[0].protocol=openai-chat", "celln.mediation.routes[0].models[0]=gpt"), "routes[0].endpointOrigins must list 1-16 HTTPS origins"},
+		"route: plain HTTP origin":      {append(slices.Clone(full), route(0, "openai", "openai-chat", "gpt", "http://api.openai.com")...), "a Secret never crosses plain HTTP"},
+		"route: origin with a port":     {append(slices.Clone(full), route(0, "openai", "openai-chat", "gpt", "https://api.openai.com:8443")...), "without port, path or credentials"},
+		"route: origin with a path":     {append(slices.Clone(full), route(0, "openai", "openai-chat", "gpt", "https://api.openai.com/v1")...), "without port, path or credentials"},
+		"route: origin with a user":     {append(slices.Clone(full), route(0, "openai", "openai-chat", "gpt", "https://key@api.openai.com")...), "without port, path or credentials"},
+		"route: wildcard origin":        {append(slices.Clone(full), route(0, "openai", "openai-chat", "gpt", "*")...), "without port, path or credentials"},
+		"route: second one is checked":  {append(append(slices.Clone(full), route(0, "openai", "openai-chat", "gpt", "https://api.openai.com")...), route(1, "anthropic", "anthropic-messages", "*", "https://api.anthropic.com")...), "routes[1].models"},
+		"route: misspelled field":       {append(append(slices.Clone(full), route(0, "openai", "openai-chat", "gpt", "https://api.openai.com")...), "celln.mediation.routes[0].origins[0]=https://api.openai.com"), "routes[0].origins is not a route field"},
+		"mediateBackends: not a switch": {append(slices.Clone(full), "celln.mediation.mediateBackends=some"), "celln.mediation.mediateBackends must be true or false"},
 	} {
 		raw, err := renderNativeParent(t, tc.values)
 		if err == nil {

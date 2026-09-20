@@ -21,6 +21,28 @@ data:
     "gateway" (dict "url" (include "sympozium.modelGatewayOrigin" .) "caFile" $ca "tokenFile" (printf "%s/gateway-token" $private))
     "issuer" (dict "name" $m.issuer.name "keyId" $m.issuer.keyId "privateKeyFile" (printf "%s/issuer.key" $private))
   ) | quote }}
+---
+# The operator's declaration of which providers an Agent may bring its own
+# key for, recorded once where every platform installer reads it (the CLI, the
+# API server completing an added backend, `sympozium celln-mediation
+# apply-routes`). Names and public origins only. Its presence also tells the
+# API server and `sympozium doctor` that mediation is enabled. Declaring
+# nothing renders an empty record: no provider is ever on by default.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: celln-mediated-routes
+  namespace: celln-system
+  labels:
+    app.kubernetes.io/part-of: sympozium
+data:
+  {{- $routes := list }}
+  {{- range $route := $m.routes | default list }}
+  {{- $models := list }}
+  {{- range $model := $route.models }}{{ $models = append $models (toString $model) }}{{ end }}
+  {{- $routes = append $routes (dict "provider" (toString $route.provider) "protocol" $route.protocol "models" $models "endpointOrigins" $route.endpointOrigins) }}
+  {{- end }}
+  mediation.json: {{ toJson (dict "mediateBackends" ($m.mediateBackends | default false) "routes" $routes) | quote }}
 {{- if not $receiver.url }}
 ---
 # The router does not forward /v1/scoped/*, and scoped state lives on the node

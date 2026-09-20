@@ -12,6 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -64,5 +65,35 @@ func TestCellnMediationBootstrapPrintsCredentialFreeValues(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "published new") {
 		t.Fatalf("unexpected report: %s", stderr.String())
+	}
+}
+
+// apply-routes takes no route input: it publishes only what the chart
+// recorded, and says why when there is nothing to work from.
+func TestCellnMediationApplyRoutesNeedsAFleetAndARecord(t *testing.T) {
+	previous := k8sClient
+	defer func() { k8sClient = previous }()
+	for _, tc := range []struct {
+		name    string
+		objects []client.Object
+		want    string
+	}{
+		{name: "no fleet", want: "no Celln fleet is installed"},
+		{name: "mediation off", objects: []client.Object{configureDaemonSet()}, want: "mediation is not enabled"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			k8sClient = preflightClient(t, tc.objects...)
+			cmd := newCellnMediationCmd()
+			var stdout bytes.Buffer
+			cmd.SetOut(&stdout)
+			cmd.SetErr(&stdout)
+			cmd.SetArgs([]string{"apply-routes"})
+			if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("apply-routes: %v", err)
+			}
+			if cmd.Flags().Lookup("route") != nil {
+				t.Fatal("apply-routes must not accept routes of its own")
+			}
+		})
 	}
 }

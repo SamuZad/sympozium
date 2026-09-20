@@ -164,7 +164,57 @@ template that wires one of the three includes this.
 */}}
 {{- define "sympozium.cellnMediation" -}}
 {{- $m := .Values.celln.mediation | default dict -}}
+{{- if and (not $m.enabled) (or $m.mediateBackends $m.routes) -}}
+{{- fail "celln.mediation.routes and celln.mediation.mediateBackends require celln.mediation.enabled: without mediation an Agent's own key is never used, so the declared routes would admit nothing; enable mediation or remove them" -}}
+{{- end -}}
 {{- if $m.enabled -}}
+{{- if not (kindIs "bool" ($m.mediateBackends | default false)) -}}
+{{- fail "celln.mediation.mediateBackends must be true or false" -}}
+{{- end -}}
+{{- $routes := $m.routes | default list -}}
+{{- if or (not (kindIs "slice" $routes)) (gt (len $routes) 32) -}}
+{{- fail "celln.mediation.routes must be a list of at most 32 routes: one execution policy carries no more" -}}
+{{- end -}}
+{{- range $i, $route := $routes -}}
+{{- if not (kindIs "map" $route) -}}
+{{- fail (printf "celln.mediation.routes[%d] must be a route: provider, protocol, models, endpointOrigins" $i) -}}
+{{- end -}}
+{{- range $key, $_ := $route -}}
+{{- if not (has $key (list "provider" "protocol" "models" "endpointOrigins")) -}}
+{{- fail (printf "celln.mediation.routes[%d].%s is not a route field (provider, protocol, models, endpointOrigins)" $i $key) -}}
+{{- end -}}
+{{- end -}}
+{{- if not (regexMatch "^[a-zA-Z0-9_-]{1,64}$" (toString ($route.provider | default ""))) -}}
+{{- fail (printf "celln.mediation.routes[%d].provider must be 1-64 letters, digits, underscores or hyphens" $i) -}}
+{{- end -}}
+{{- if not (has ($route.protocol | default "") (list "openai-chat" "anthropic-messages")) -}}
+{{- fail (printf "celln.mediation.routes[%d].protocol must be openai-chat or anthropic-messages" $i) -}}
+{{- end -}}
+{{- $models := $route.models | default list -}}
+{{- if or (not (kindIs "slice" $models)) (lt (len $models) 1) (gt (len $models) 32) -}}
+{{- fail (printf "celln.mediation.routes[%d].models must list 1-32 exact model names: a route without a model admits nothing" $i) -}}
+{{- end -}}
+{{- range $model := $models -}}
+{{- if not (regexMatch "^[^*[:space:]]([^*\\r\\n]{0,126}[^*[:space:]])?$" (toString $model)) -}}
+{{- fail (printf "celln.mediation.routes[%d].models: %q must be an exact model name of at most 128 bytes; there is no wildcard" $i (toString $model)) -}}
+{{- end -}}
+{{- end -}}
+{{- if ne (len ($models | uniq)) (len $models) -}}
+{{- fail (printf "celln.mediation.routes[%d].models must not repeat a model" $i) -}}
+{{- end -}}
+{{- $origins := $route.endpointOrigins | default list -}}
+{{- if or (not (kindIs "slice" $origins)) (lt (len $origins) 1) (gt (len $origins) 16) -}}
+{{- fail (printf "celln.mediation.routes[%d].endpointOrigins must list 1-16 HTTPS origins" $i) -}}
+{{- end -}}
+{{- range $origin := $origins -}}
+{{- if not (regexMatch "^https://[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$" (toString $origin)) -}}
+{{- fail (printf "celln.mediation.routes[%d].endpointOrigins: %q must be an https://host origin without port, path or credentials; a Secret never crosses plain HTTP" $i (toString $origin)) -}}
+{{- end -}}
+{{- end -}}
+{{- if ne (len ($origins | uniq)) (len $origins) -}}
+{{- fail (printf "celln.mediation.routes[%d].endpointOrigins must not repeat an origin" $i) -}}
+{{- end -}}
+{{- end -}}
 {{- $fleet := .Values.celln.fleet | default dict -}}
 {{- if not (and .Values.celln.enabled $fleet.enabled) -}}
 {{- fail "celln.mediation requires celln.enabled and celln.fleet.enabled: the scoped receiver runs in the fleet's celln-node dispatchers" -}}

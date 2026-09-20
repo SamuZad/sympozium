@@ -139,7 +139,9 @@ func TestGatewayChartMediationSampleRendersWithoutAClaim(t *testing.T) {
 			}
 		}
 	}
-	if kinds["Secret"] != 0 || kinds["PersistentVolumeClaim"] != 0 || kinds["Deployment"] != 1 || kinds["ConfigMap"] != 2 || kinds["Role"] != 1 || kinds["RoleBinding"] != 1 {
+	// ConfigMaps: the controller's scoped configuration, the gateway's
+	// configuration and the operator's declared mediated routes.
+	if kinds["Secret"] != 0 || kinds["PersistentVolumeClaim"] != 0 || kinds["Deployment"] != 1 || kinds["ConfigMap"] != 3 || kinds["Role"] != 1 || kinds["RoleBinding"] != 1 {
 		t.Fatalf("unexpected mediated resources: %v", kinds)
 	}
 }
