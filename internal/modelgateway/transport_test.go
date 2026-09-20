@@ -110,12 +110,12 @@ func TestProviderRequestRefusals(t *testing.T) {
 		`{"model":"m","messages":[],"max_tokens":1,"endpoint":"https://evil.example"}`,
 		`{"model":"m","messages":[],"max_tokens":1,"max_completion_tokens":1}`,
 	} {
-		if _, _, _, err := validateProviderRequest("openai-chat", "m", []byte(raw), 512); err == nil {
+		if _, _, _, _, err := validateProviderRequest("openai-chat", "m", []byte(raw), 512, requestPolicy{}); err == nil {
 			t.Fatalf("accepted %s", raw)
 		}
 	}
 	for _, protocol := range []string{"openai-chat", "anthropic-messages"} {
-		if _, _, _, err := validateProviderRequest(protocol, "m", []byte(`{"model":"m","messages":[{"role":"user","content":"hello"}],"max_tokens":1}`), 512); err != nil {
+		if _, _, _, _, err := validateProviderRequest(protocol, "m", []byte(`{"model":"m","messages":[{"role":"user","content":"hello"}],"max_tokens":1}`), 512, requestPolicy{}); err != nil {
 			t.Fatal(err)
 		}
 	}

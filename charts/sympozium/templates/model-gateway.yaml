@@ -148,6 +148,14 @@ spec:
           podSelector:
             matchLabels:
               app.kubernetes.io/name: celln-router
+        # The installed fleet runs its dispatcher inside the celln-node
+        # DaemonSet pods (celln-fleet.yaml), which carry this label instead.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: celln-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: celln-node
       ports:
         - protocol: TCP
           port: 8443

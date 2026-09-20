@@ -26,10 +26,7 @@ const (
 // used by the installer, the chart values and the API: 0 means Celln's default
 // (DefaultModelMaxOutputTokens), anything else must be within Celln's range.
 func ValidateModelMaxOutputTokens(tokens int64) error {
-	if tokens != 0 && (tokens < MinModelMaxOutputTokens || tokens > MaxModelMaxOutputTokens) {
-		return fmt.Errorf("max output tokens per request must be %d–%d (omit it for the default %d), got %d", MinModelMaxOutputTokens, MaxModelMaxOutputTokens, DefaultModelMaxOutputTokens, tokens)
-	}
-	return nil
+	return api.ValidateRequestOutputTokens(tokens)
 }
 
 // NormalModelMaxOutputTokens folds the default into "unset", so a backend
@@ -44,10 +41,7 @@ func NormalModelMaxOutputTokens(tokens int64) int64 {
 
 // EffectiveModelMaxOutputTokens is the cap Celln applies.
 func EffectiveModelMaxOutputTokens(tokens int64) int64 {
-	if tokens == 0 {
-		return DefaultModelMaxOutputTokens
-	}
-	return tokens
+	return api.EffectiveRequestOutputTokens(tokens)
 }
 
 // TurnOutputTokensFor is what one turn of a backend reserves from its parent's
