@@ -498,6 +498,13 @@ func parseMediatedRoutes(specs []string) ([]cellninstall.MediatedRoute, error) {
 				route.Provider = value
 			case "protocol":
 				route.Protocol = value
+			case "auth":
+				route.Auth = value
+			case "allowInsecure":
+				if value != "true" && value != "false" {
+					return nil, fmt.Errorf("--celln-mediated-route: allowInsecure must be true or false")
+				}
+				route.AllowInsecure = value == "true"
 			case "origin", "origins":
 				route.EndpointOrigins = append(route.EndpointOrigins, strings.Split(value, "+")...)
 			case "model", "models":

@@ -17,7 +17,7 @@ import (
 // are the ones the resolver will match (the namespace's live policies), not
 // the declaration, so a client never offers a route a run would be refused.
 
-// CellnMediatedRoute is one auth "secret" route. A ModelConnection matches it
+// CellnMediatedRoute is one auth "secret" or "none" route. A ModelConnection matches it
 // only with exactly this provider and protocol, one of these models and an
 // endpoint on one of these origins.
 type CellnMediatedRoute struct {
@@ -27,8 +27,20 @@ type CellnMediatedRoute struct {
 	EndpointOrigins []string `json:"endpointOrigins"`
 	// Policy is the execution policy carrying the route; empty on a pending one.
 	Policy string `json:"policy,omitempty"`
-	// SecretKey is the fixed key the provider Secret must hold for Protocol.
-	SecretKey string `json:"secretKey"`
+	// SecretKey is the fixed key the provider Secret must hold, empty for auth none.
+	SecretKey     string `json:"secretKey"`
+	Auth          string `json:"auth,omitempty"`
+	AllowInsecure bool   `json:"allowInsecure,omitempty"`
+}
+
+func mediatedAPIRoute(route api.CellnExecutionPolicyRoute, policy string) CellnMediatedRoute {
+	out := CellnMediatedRoute{Provider: route.Provider, Protocol: route.Protocol, Models: route.Models, EndpointOrigins: route.EndpointOrigins, Policy: policy, AllowInsecure: route.AllowInsecure}
+	if route.Auth == "none" {
+		out.Auth = "none"
+	} else {
+		out.SecretKey = connectionSecretKey(route.Protocol)
+	}
+	return out
 }
 
 // CellnMediation is the answer of GET /api/v1/celln-platform/mediation.
@@ -39,7 +51,7 @@ type CellnMediation struct {
 	// MediateBackends reports that the operator also offers every HTTPS fleet
 	// backend's route to an Agent's own key.
 	MediateBackends bool `json:"mediateBackends"`
-	// Routes are the secret routes the namespace's policies carry now.
+	// Routes are the mediated routes the namespace's policies carry now.
 	Routes []CellnMediatedRoute `json:"routes"`
 	// Pending are routes the operator declared that no policy in the cluster
 	// carries yet; `sympozium celln-mediation apply-routes` (or the
@@ -74,8 +86,8 @@ func (s *Server) getCellnMediation(w http.ResponseWriter, r *http.Request) {
 		}
 		seen[a.Policy.Name] = true
 		for _, route := range a.Policy.Spec.Routes {
-			if route.Auth == "secret" {
-				out.Routes = append(out.Routes, CellnMediatedRoute{Provider: route.Provider, Protocol: route.Protocol, Models: route.Models, EndpointOrigins: route.EndpointOrigins, Policy: a.Policy.Name, SecretKey: connectionSecretKey(route.Protocol)})
+			if route.Auth == "secret" || route.Auth == "none" {
+				out.Routes = append(out.Routes, mediatedAPIRoute(route, a.Policy.Name))
 			}
 		}
 	}
@@ -94,7 +106,7 @@ func (s *Server) getCellnMediation(w http.ResponseWriter, r *http.Request) {
 		if !slices.ContainsFunc(policies.Items, func(policy api.CellnExecutionPolicy) bool {
 			return slices.ContainsFunc(policy.Spec.Routes, func(have api.CellnExecutionPolicyRoute) bool { return reflect.DeepEqual(have, route) })
 		}) {
-			out.Pending = append(out.Pending, CellnMediatedRoute{Provider: route.Provider, Protocol: route.Protocol, Models: route.Models, EndpointOrigins: route.EndpointOrigins, SecretKey: connectionSecretKey(route.Protocol)})
+			out.Pending = append(out.Pending, mediatedAPIRoute(route, ""))
 		}
 	}
 	writeJSON(w, out)

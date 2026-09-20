@@ -1175,7 +1175,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// explicitly keyless Agents a scoped compatibility value; the built-in
 	// runner and genuinely authenticated providers retain their existing
 	// credential behavior.
-	if req.RuntimeRef != "" && req.APIKey == "" && req.SecretName == "" && inst.Spec.Agents.Default.BaseURL != "" {
+	if req.RuntimeRef != "" && (req.Execution == nil || req.Execution.Backend != "celln") && req.APIKey == "" && req.SecretName == "" && inst.Spec.Agents.Default.BaseURL != "" {
 		secretAutoCreated = true
 		req.SecretName = defaultProviderSecretName(req.Name, "harness-local")
 		secret := &corev1.Secret{

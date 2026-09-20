@@ -200,3 +200,18 @@ func TestCreateOwnKeyConnectionFixesTheSecretKeyByProtocol(t *testing.T) {
 		}
 	}
 }
+
+func TestCreateKeylessCellnAgentDoesNotCreateCompatibilitySecret(t *testing.T) {
+	connection := &api.ModelConnection{ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "local"}, Spec: api.ModelConnectionSpec{Provider: "llama-server", Protocol: "openai-chat", Endpoint: "http://framework:8080/v1/chat/completions", AllowInsecure: true, Models: []string{"local"}}}
+	srv := keySecretServer(t, connection)
+	res := httptest.NewRecorder()
+	body := `{"name":"local-agent","provider":"llama-server","model":"local","runtimeRef":"celln-native","execution":{"backend":"celln","executionLifecycle":"enduring","modelConnectionRef":"local","model":"local","cellnSelection":{"runtimeRef":"celln-native","toolRefs":[]},"enduring":{"leaseSeconds":600,"maxTurns":2,"maxModelRequests":12,"maxOutputTokens":6144}}}`
+	srv.Handler(nil).ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/api/v1/agents?namespace=team-a", strings.NewReader(body)))
+	if res.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", res.Code, res.Body.String())
+	}
+	var secrets corev1.SecretList
+	if err := srv.client.List(context.Background(), &secrets); err != nil || len(secrets.Items) != 0 {
+		t.Fatalf("keyless agent created Secrets: %d %v", len(secrets.Items), err)
+	}
+}

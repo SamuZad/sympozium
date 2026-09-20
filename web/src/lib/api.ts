@@ -201,6 +201,8 @@ export interface CellnNodeCells {
  * endpoint on one of these origins.
  */
 export interface CellnMediatedRoute {
+  auth?: "secret" | "none";
+  allowInsecure?: boolean;
   provider: string;
   protocol: "openai-chat" | "anthropic-messages";
   models: string[];

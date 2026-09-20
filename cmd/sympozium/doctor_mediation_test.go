@@ -57,7 +57,7 @@ func TestDoctorMediation(t *testing.T) {
 		{name: "no fleet", status: statusPass, want: []string{"no Celln fleet is installed"}},
 		{name: "disabled", objects: []client.Object{configureDaemonSet()}, status: statusPass, want: []string{"disabled", "ScopedDispatchDisabled"}},
 		{name: "enabled and coherent", objects: with([]client.Object{configureDaemonSet(), record(declared), gateway(1), policy(anthropic)}, defaults), status: statusPass,
-			want: []string{"enabled", "celln-fleet-starter", "anthropic/claude-a (anthropic-messages) at https://api.anthropic.com"}, absent: []string{"AUTH_ROUTE_MISMATCH"}},
+			want: []string{"enabled", "celln-fleet-starter", "anthropic/claude-a (anthropic-messages, auth=secret) at https://api.anthropic.com"}, absent: []string{"AUTH_ROUTE_MISMATCH"}},
 		{name: "enabled without any route", objects: with([]client.Object{configureDaemonSet(), record(nothing), gateway(1), policy()}, defaults), status: statusWarn,
 			want: []string{"Agents with their own key will be refused AUTH_ROUTE_MISMATCH; declare a route with --celln-mediated-route", "sympozium install --celln-fleet"}},
 		{name: "declared but not published", objects: with([]client.Object{configureDaemonSet(), record(declared), gateway(1), policy()}, defaults), status: statusWarn,

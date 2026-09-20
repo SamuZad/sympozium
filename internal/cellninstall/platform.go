@@ -87,21 +87,32 @@ type PlatformOptions struct {
 }
 
 // MediatedRoute is one gateway-mediated model route the operator allows a
-// namespace's own Secret-backed ModelConnection to use.
+// namespace's own Secret-backed or keyless ModelConnection to use.
 type MediatedRoute struct {
 	Provider        string   `json:"provider"`
 	Protocol        string   `json:"protocol"`
 	Models          []string `json:"models"`
 	EndpointOrigins []string `json:"endpointOrigins"`
+	// Auth defaults to secret; none explicitly declares a keyless endpoint.
+	Auth          string `json:"auth,omitempty"`
+	AllowInsecure bool   `json:"allowInsecure,omitempty"`
 }
 
 var mediatedProviderPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 
-// PolicyRoute validates the route and returns it as an auth "secret" policy
-// route with sorted, exact models and origins. An origin must be an HTTPS
-// origin (scheme and host, no port, path, query or credentials): the CRD
-// refuses anything else for a Secret route, and refusing here says why.
+// PolicyRoute validates exact models and origins. Secret routes require HTTPS;
+// keyless routes may explicitly approve HTTP and ports with AllowInsecure.
 func (r MediatedRoute) PolicyRoute() (api.CellnExecutionPolicyRoute, error) {
+	auth := r.Auth
+	if auth == "" {
+		auth = "secret"
+	}
+	if auth != "secret" && auth != "none" {
+		return api.CellnExecutionPolicyRoute{}, fmt.Errorf("mediated route: auth must be secret or none")
+	}
+	if r.AllowInsecure && auth != "none" {
+		return api.CellnExecutionPolicyRoute{}, fmt.Errorf("mediated route: allowInsecure requires auth none; a Secret never crosses plain HTTP")
+	}
 	if !mediatedProviderPattern.MatchString(r.Provider) {
 		return api.CellnExecutionPolicyRoute{}, fmt.Errorf("mediated route: provider %q must be 1-64 letters, digits, underscores or hyphens", r.Provider)
 	}
@@ -120,12 +131,15 @@ func (r MediatedRoute) PolicyRoute() (api.CellnExecutionPolicyRoute, error) {
 		}
 	}
 	for i, origin := range origins {
-		parsed, err := api.ModelEndpointOrigin(origin + "/")
+		parsed, err := api.ModelEndpointOriginInsecure(origin+"/", r.AllowInsecure)
 		if err != nil || parsed != origin || (i > 0 && origins[i-1] == origin) {
+			if r.AllowInsecure {
+				return api.CellnExecutionPolicyRoute{}, fmt.Errorf("mediated route %s: endpoint origin %q must be a unique HTTP(S) origin without path, query or credentials", r.Provider, origin)
+			}
 			return api.CellnExecutionPolicyRoute{}, fmt.Errorf("mediated route %s: endpoint origin %q must be a unique https://host origin without port, path or credentials; a Secret never crosses plain HTTP", r.Provider, origin)
 		}
 	}
-	return api.CellnExecutionPolicyRoute{Provider: r.Provider, Protocol: r.Protocol, Models: models, EndpointOrigins: origins, Auth: "secret"}, nil
+	return api.CellnExecutionPolicyRoute{Provider: r.Provider, Protocol: r.Protocol, Models: models, EndpointOrigins: origins, Auth: auth, AllowInsecure: r.AllowInsecure}, nil
 }
 
 // mediatedPolicyRoutes are the auth "secret" routes a scope's policy carries

@@ -45,7 +45,7 @@ export function CellnAgentConnection({ agent }: { agent: Agent }) {
       </div>
     );
   }
-  if (!connection.spec.secretRef) {
+  if (connection.spec.credentialProfile) {
     return (
       <div className="space-y-1 rounded-md border p-3 text-xs text-muted-foreground" data-testid="agent-model-backend">
         <Label>Model backend</Label>
@@ -128,7 +128,7 @@ export function CellnAgentConnection({ agent }: { agent: Agent }) {
         <dt className="text-muted-foreground">Provider</dt><dd>{connection.spec.provider} <span className="text-muted-foreground">({connection.spec.protocol})</span></dd>
         <dt className="text-muted-foreground">Model</dt><dd className="font-mono">{model}</dd>
         <dt className="text-muted-foreground">Endpoint origin</dt><dd className="break-all font-mono" title={connection.spec.endpoint}>{origin(connection.spec.endpoint)}</dd>
-        <dt className="text-muted-foreground">Secret</dt><dd><code data-testid="agent-model-backend-secret">{connection.spec.secretRef}</code> <span className="text-muted-foreground">holding {secretKey}; the value is never shown</span></dd>
+        <dt className="text-muted-foreground">Secret</dt><dd>{connection.spec.secretRef ? <><code data-testid="agent-model-backend-secret">{connection.spec.secretRef}</code> <span className="text-muted-foreground">holding {secretKey}; the value is never shown</span></> : "Not required — keyless route"}</dd>
         <dt className="text-muted-foreground">Connection</dt><dd><code>{connection.metadata.name}</code></dd>
         <dt className="text-muted-foreground">Parameters</dt><dd>{connection.spec.parameters && Object.keys(connection.spec.parameters).length ? <CellnModelParametersSummary parameters={connection.spec.parameters} testId="agent-model-backend-parameters" /> : <span className="text-muted-foreground">none</span>}</dd>
         <dt className="text-muted-foreground">Max output tokens</dt><dd data-testid="agent-model-backend-tokens">{connection.spec.maxOutputTokens || DEFAULT_MAX_OUTPUT_TOKENS} per request{connection.spec.maxOutputTokens ? "" : " (default)"}</dd>
@@ -142,10 +142,10 @@ export function CellnAgentConnection({ agent }: { agent: Agent }) {
       {editing && (
         <div className="space-y-3 border-t pt-3">
           <CellnModelParametersField value={parameters} onChange={setParameters} showThinking={offersThinkingSwitch(connection.spec)} maxOutputTokens={maxOutputTokens} onMaxOutputTokensChange={setMaxOutputTokens} />
-          <label className="flex items-center gap-2 text-xs">
+          {connection.spec.secretRef && <label className="flex items-center gap-2 text-xs">
             <input type="checkbox" data-testid="agent-model-backend-replace-key" checked={replaceKey} onChange={(e) => setReplaceKey(e.target.checked)} />
             Replace the key
-          </label>
+          </label>}
           {replaceKey && <CellnKeyStep route={keyRoute} value={key} onChange={setKey} managedSecretName={managedSecretName(connection.metadata.name, connection.spec.provider)} />}
           <p className="text-xs text-amber-500" data-testid="agent-model-backend-route-changed">
             A conversation already running on this Agent is pinned to the connection as it was. After a change to the parameters, the output-token limit or the Secret it names, the model gateway refuses that conversation's next request (MODEL_ROUTE_CHANGED): start a new conversation. The provider, model and endpoint cannot be edited; create another Agent for those.

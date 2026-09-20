@@ -48,6 +48,17 @@ func TestParseMediatedRoutes(t *testing.T) {
 	}
 }
 
+func TestParseKeylessMediatedRoute(t *testing.T) {
+	routes, err := parseMediatedRoutes([]string{"provider=llama-server,protocol=openai-chat,auth=none,allowInsecure=true,origin=http://framework:8080,models=local"})
+	if err != nil || len(routes) != 1 || routes[0].Auth != "none" || !routes[0].AllowInsecure {
+		t.Fatalf("keyless route: %+v %v", routes, err)
+	}
+	values, err := cellninstall.MediationValues(false, routes)
+	if err != nil || !strings.Contains(strings.Join(values, "\n"), "auth=none") || !strings.Contains(strings.Join(values, "\n"), "allowInsecure=true") {
+		t.Fatalf("keyless values: %v %v", values, err)
+	}
+}
+
 // The flags declare routes and nothing else: they are refused before any
 // cluster change unless this install enables mediation, and they never turn a
 // provider on by themselves.

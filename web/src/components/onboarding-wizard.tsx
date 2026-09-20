@@ -681,7 +681,7 @@ export function OnboardingWizard({
   const [cellnParameters, setCellnParameters] = useState("");
   const [cellnMaxOutputTokens, setCellnMaxOutputTokens] = useState("");
   const [cellnFailure, setCellnFailure] = useState<{ error: string; steps: OwnKeyStep[] } | null>(null);
-  const cellnSecretName = !cellnRoute ? "" : cellnKey.mode === "existing" ? cellnKey.secretName : managedSecretName(modelConnectionName(form.name), cellnRoute.provider);
+  const cellnSecretName = !cellnRoute || cellnRoute.auth === "none" ? "" : cellnKey.mode === "existing" ? cellnKey.secretName : managedSecretName(modelConnectionName(form.name), cellnRoute.provider);
   const cellnProfile = cellnRoute ? profileForRoute(cellnRoute, platformProfiles.data || []) : undefined;
   const cellnParsedParameters = parseModelParameters(cellnParameters);
   const cellnParsedTokens = parseMaxOutputTokens(cellnMaxOutputTokens);
@@ -796,7 +796,7 @@ export function OnboardingWizard({
       case "plane":
         return true;
       case "apikey":
-        if (celln) return keyChoiceReady(cellnKey);
+        if (celln) return cellnRoute?.auth === "none" || keyChoiceReady(cellnKey);
         if (form.modelConnectionRef) return true;
         if (
           form.provider === "ollama" ||
@@ -2071,7 +2071,7 @@ export function OnboardingWizard({
                   <p className="text-sm">This Agent's own model backend</p>
                   <p>Provider: {cellnRoute.provider} ({cellnRoute.protocol}), declared in policy <code>{cellnRoute.policy}</code></p>
                   <p>Endpoint: <span className="break-all font-mono">{cellnOrigin}{cellnPath}</span></p>
-                  <p>Key: {cellnKey.mode === "create"
+                  <p>Key: {cellnRoute.auth === "none" ? "Not required — keyless route" : cellnKey.mode === "create"
                     ? <>a new Secret <code>{cellnSecretName}</code> holding <code>{cellnRoute.secretKey}</code></>
                     : <>existing Secret <code>{cellnKey.secretName}</code> (<code>{cellnRoute.secretKey}</code>)</>}</p>
                   <p>Model connection: <code>{modelConnectionName(form.name)}</code>{cellnParsedTokens.maxOutputTokens ? `, up to ${cellnParsedTokens.maxOutputTokens} output tokens per request` : ""}{cellnParsedParameters.parameters ? ", with model parameters" : ""}</p>

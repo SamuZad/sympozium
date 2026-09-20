@@ -101,6 +101,12 @@ func MediationValues(mediateBackends bool, routes []MediatedRoute) ([]string, er
 	for i, route := range routes {
 		prefix := fmt.Sprintf("celln.mediation.routes[%d].", i)
 		values = append(values, prefix+"provider="+strvalsEscape(route.Provider), prefix+"protocol="+route.Protocol)
+		if route.Auth != "" {
+			values = append(values, prefix+"auth="+route.Auth)
+		}
+		if route.AllowInsecure {
+			values = append(values, prefix+"allowInsecure=true")
+		}
 		for j, model := range route.Models {
 			values = append(values, fmt.Sprintf("%smodels[%d]=%s", prefix, j, strvalsEscape(model)))
 		}
