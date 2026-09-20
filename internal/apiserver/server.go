@@ -198,6 +198,7 @@ func (s *Server) buildMux(frontendFS fs.FS, expected *tokenReader) http.Handler 
 	mux.HandleFunc("GET /api/v1/cluster-celln-tools", s.listClusterCellnTools)
 	mux.HandleFunc("GET /api/v1/celln-platform/profiles", s.listCellnPlatformProfiles)
 	mux.HandleFunc("POST /api/v1/celln-platform/wrappers", s.ensureCellnPlatformWrappers)
+	mux.HandleFunc("GET /api/v1/celln-platform/mediation", s.getCellnMediation)
 	mux.HandleFunc("GET /api/v1/celln-platform/backends", s.listCellnFleetBackends)
 	mux.HandleFunc("GET /api/v1/celln-platform/cells", s.listCellnFleetCells)
 	mux.HandleFunc("POST /api/v1/celln-platform/backends", s.addCellnFleetBackend)
@@ -599,20 +600,32 @@ func (s *Server) listCellnPlatformProfiles(w http.ResponseWriter, r *http.Reques
 }
 
 // ensureCellnPlatformWrappers creates the namespace's wrapper objects for an
-// authorised profile on first use. Existing objects are never modified.
+// authorised profile on first use. Existing objects are never modified. With
+// runtimeOnly it creates the AgentRuntime alone: all an Agent with its own
+// Secret-backed ModelConnection needs, leaving the backend's shared Agent and
+// host-profile connection out of the namespace.
 func (s *Server) ensureCellnPlatformWrappers(w http.ResponseWriter, r *http.Request) {
 	ns := r.URL.Query().Get("namespace")
 	if ns == "" {
 		ns = "default"
 	}
 	var req struct {
-		Profile string `json:"profile"`
+		Profile     string `json:"profile"`
+		RuntimeOnly bool   `json:"runtimeOnly,omitempty"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil || req.Profile == "" {
 		http.Error(w, "profile is required", http.StatusBadRequest)
 		return
 	}
-	wrappers, err := cellnplatform.EnsureWrappers(r.Context(), s.client, ns, req.Profile)
+	var wrappers cellnplatform.Wrappers
+	var err error
+	if req.RuntimeOnly {
+		// The same authorisation as the full set: only a profile one of the
+		// namespace's policies admits gets a wrapper.
+		wrappers, err = s.ensureCellnRuntimeWrapper(r.Context(), ns, req.Profile)
+	} else {
+		wrappers, err = cellnplatform.EnsureWrappers(r.Context(), s.client, ns, req.Profile)
+	}
 	if err != nil {
 		if k8serrors.IsNotFound(err) || strings.Contains(err.Error(), "no execution policy admits") {
 			http.Error(w, err.Error(), http.StatusForbidden)
@@ -622,6 +635,28 @@ func (s *Server) ensureCellnPlatformWrappers(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	writeJSON(w, wrappers)
+}
+
+// ensureCellnRuntimeWrapper is EnsureRuntimeWrapper answered in the shape of
+// the full set: the agent and connection stay empty because none is created.
+func (s *Server) ensureCellnRuntimeWrapper(ctx context.Context, namespace, profileName string) (cellnplatform.Wrappers, error) {
+	var profile sympoziumv1alpha1.CellnRuntimeProfile
+	if err := s.client.Get(ctx, types.NamespacedName{Name: profileName}, &profile); err != nil {
+		return cellnplatform.Wrappers{}, err
+	}
+	names := cellnplatform.WrapperNames(cellnplatform.Backend(&profile))
+	out := cellnplatform.Wrappers{Backend: names.Backend, Runtime: names.Runtime, Created: []string{}}
+	var existing sympoziumv1alpha1.AgentRuntime
+	missing := k8serrors.IsNotFound(s.client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: names.Runtime}, &existing))
+	runtime, err := cellnplatform.EnsureRuntimeWrapper(ctx, s.client, namespace, profileName)
+	if err != nil {
+		return cellnplatform.Wrappers{}, err
+	}
+	out.Runtime = runtime
+	if missing {
+		out.Created = append(out.Created, runtime)
+	}
+	return out, nil
 }
 
 // InstallDefaultRuntimesResponse records an idempotent installation of the
