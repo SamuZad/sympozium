@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.10.86](https://github.com/sympozium-ai/sympozium/compare/v0.10.85...v0.10.86) (2026-09-20)
+
+
+### Features
+
+* **apiserver:** list key Secrets by name and grant a Celln Agent its connection's Secret ([3299376](https://github.com/sympozium-ai/sympozium/commit/3299376642106e9897e79f2ecd5e834dc41a682e))
+* **celln:** mediate explicitly approved keyless local models ([0110107](https://github.com/sympozium-ai/sympozium/commit/01101076bdc560400c13d0bec5dd534a656db69b))
+* **celln:** mediate explicitly approved keyless local models ([4576074](https://github.com/sympozium-ai/sympozium/commit/45760747d2d58c543d78b1bd3056f2f36151be0e))
+* **console:** create Celln agents with their own provider, key and model ([9eeaa15](https://github.com/sympozium-ai/sympozium/commit/9eeaa152f69311b0ab9428d212ed58cd97b46abc))
+* **console:** give Celln agents their own provider, key and model ([af67a57](https://github.com/sympozium-ai/sympozium/commit/af67a579be2f6522675fcc93d7c4a2eddf547b98))
+
+
+### Bug Fixes
+
+* **celln:** pin v0.5.27 for installed mediated runs ([e0e593f](https://github.com/sympozium-ai/sympozium/commit/e0e593f000f827d300af19be6f79e145987ccdd8))
+* **celln:** pin v0.5.27 for installed mediated runs ([5404447](https://github.com/sympozium-ai/sympozium/commit/5404447de6037e5c66108daeddf9088b983cf484))
+
 ## [0.10.85](https://github.com/sympozium-ai/sympozium/compare/v0.10.84...v0.10.85) (2026-09-20)
 
 
