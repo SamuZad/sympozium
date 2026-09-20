@@ -44,6 +44,12 @@ func TestMediationGuideExamplesAreValid(t *testing.T) {
 				t.Fatalf("%s example: %v\n%s", head.Kind, err, block)
 			}
 		}
+		// Decoding into the Go types accepts an object the API server would
+		// refuse for a missing required field, so hold every custom-resource
+		// example to its generated CRD as well.
+		if crd := crdFileFor[head.Kind]; crd != "" {
+			requireCRDFields(t, head.Kind, crd, block)
+		}
 		switch {
 		case head.Kind == "Secret":
 			secret = &corev1.Secret{}
@@ -110,4 +116,63 @@ func TestMediationGuideExamplesAreValid(t *testing.T) {
 	if runtime.Spec.CellnProfileRef == nil || runtime.Spec.CellnProfileRef.Name != PlatformProfileName("starter", "native") {
 		t.Fatalf("runtime wrapper example: %+v", runtime.Spec)
 	}
+}
+
+var crdFileFor = map[string]string{
+	"Agent":           "sympozium.ai_agents.yaml",
+	"AgentRuntime":    "sympozium.ai_agentruntimes.yaml",
+	"ModelConnection": "sympozium.ai_modelconnections.yaml",
+}
+
+// requireCRDFields fails when the example omits a field its CRD's schema
+// marks required, at any depth the example reaches.
+func requireCRDFields(t *testing.T, kind, file, example string) {
+	t.Helper()
+	raw, err := os.ReadFile("../../config/crd/bases/" + file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var crd struct {
+		Spec struct {
+			Versions []struct {
+				Schema struct {
+					OpenAPIV3Schema map[string]any `json:"openAPIV3Schema"`
+				} `json:"schema"`
+			} `json:"versions"`
+		} `json:"spec"`
+	}
+	if err := yaml.Unmarshal(raw, &crd); err != nil || len(crd.Spec.Versions) == 0 {
+		t.Fatalf("%s: unreadable CRD: %v", file, err)
+	}
+	var object map[string]any
+	if err := yaml.Unmarshal([]byte(example), &object); err != nil {
+		t.Fatal(err)
+	}
+	var walk func(path string, schema map[string]any, value any)
+	walk = func(path string, schema map[string]any, value any) {
+		switch typed := value.(type) {
+		case map[string]any:
+			if required, ok := schema["required"].([]any); ok {
+				for _, name := range required {
+					if _, present := typed[name.(string)]; !present {
+						t.Errorf("%s example omits required %s.%s; the API server would refuse it", kind, path, name)
+					}
+				}
+			}
+			properties, _ := schema["properties"].(map[string]any)
+			for name, child := range typed {
+				if sub, ok := properties[name].(map[string]any); ok {
+					walk(path+"."+name, sub, child)
+				}
+			}
+		case []any:
+			if items, ok := schema["items"].(map[string]any); ok {
+				for _, child := range typed {
+					walk(path+"[]", items, child)
+				}
+			}
+		}
+	}
+	// metadata is the API machinery's; the CRD only constrains the rest.
+	walk(strings.ToLower(kind[:1])+kind[1:], crd.Spec.Versions[0].Schema.OpenAPIV3Schema, object)
 }

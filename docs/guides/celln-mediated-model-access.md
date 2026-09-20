@@ -286,6 +286,7 @@ metadata:
   name: celln-native
   namespace: team-a
 spec:
+  image: ""                     # required by the API; a fleet profile supplies the executable
   cellnProfileRef:
     name: celln-native-starter
     revision: "<the profile's spec.revision>"
@@ -304,6 +305,9 @@ metadata:
   name: my-agent
   namespace: team-a
 spec:
+  agents:
+    default:
+      model: claude-sonnet-5    # required by the API; the run's model is spec.execution.model
   runtimeRef: celln-native
   authRefs:
     - provider: anthropic
