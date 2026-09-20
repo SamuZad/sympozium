@@ -1,0 +1,46 @@
+{{- if include "sympozium.cellnMediation" . }}
+{{- $m := .Values.celln.mediation }}
+{{- $receiver := $m.receiver | default dict }}
+{{- $private := "/run/sympozium/celln-scoped" }}
+{{- $ca := "/etc/sympozium/celln-scoped-trust/ca.crt" }}
+# The controller's scoped dispatch configuration (CELLN_SCOPED_CONFIG). Paths
+# and public identities only: the signing key and both transport tokens stay
+# in the operator's Secret and reach the manager as owner-only files.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sympozium-celln-scoped-config
+  namespace: {{ include "sympozium.namespace" . }}
+  labels:
+    {{- include "sympozium.labels" . | nindent 4 }}
+data:
+  config.json: {{ toJson (dict
+    "clusterId" $m.clusterId
+    "preparationNamespace" ($m.preparationNamespace | default (include "sympozium.namespace" .))
+    "receiver" (dict "url" (include "sympozium.cellnScopedReceiverOrigin" .) "caFile" $ca "tokenFile" (printf "%s/receiver-token" $private))
+    "gateway" (dict "url" (include "sympozium.modelGatewayOrigin" .) "caFile" $ca "tokenFile" (printf "%s/gateway-token" $private))
+    "issuer" (dict "name" $m.issuer.name "keyId" $m.issuer.keyId "privateKeyFile" (printf "%s/issuer.key" $private))
+  ) | quote }}
+{{- if not $receiver.url }}
+---
+# The router does not forward /v1/scoped/*, and scoped state lives on the node
+# that prepared it, so this Service is a correct receiver only while one
+# celln-node pod exists. Set celln.mediation.receiver.url otherwise.
+apiVersion: v1
+kind: Service
+metadata:
+  name: celln-scoped-receiver
+  namespace: celln-system
+  labels:
+    app.kubernetes.io/name: celln-scoped-receiver
+    app.kubernetes.io/part-of: sympozium
+spec:
+  selector:
+    app.kubernetes.io/name: celln-node
+  ports:
+    - name: https
+      port: {{ int ($receiver.port | default 9443) }}
+      targetPort: scoped-https
+      protocol: TCP
+{{- end }}
+{{- end }}
