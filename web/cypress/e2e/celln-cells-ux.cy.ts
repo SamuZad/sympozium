@@ -378,7 +378,7 @@ describe("Create Agent on a fleet with several backends", () => {
       cy.contains("summary", "Advanced: model parameters and output tokens").click();
       cy.get('[data-testid="celln-max-output-tokens"]').should("have.attr", "placeholder", "512").and("have.attr", "min", "256").and("have.attr", "max", "4096").and("have.value", "");
       cy.get('[data-testid="celln-max-output-tokens-guidance"]').should("contain", "512 suits chat with thinking disabled.")
-        .and("contain", "A reasoning model left thinking needs 2048–4096, which costs 4–8× the tokens per turn and may exceed the 60-second turn limit on a slow local model.");
+        .and("contain", "A reasoning model left thinking needs 2048–4096, which costs 4–8× the tokens per turn. The turn limit grows with it: 60 seconds at 512, 4 minutes at 2048, 5 minutes at most.");
       cy.get('[data-testid="celln-turn-reservation"]').should("have.text", "one turn reserves 3072 tokens (6 requests)");
 
       // Out of range: the rule inline, no computed line, and nothing is posted.

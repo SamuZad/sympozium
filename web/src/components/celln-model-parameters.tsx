@@ -67,7 +67,7 @@ export function CellnModelParametersField({ value, onChange, showThinking, maxOu
         </label>
         <p className="text-muted-foreground" data-testid="celln-max-output-tokens-guidance">
           <span className="block">{DEFAULT_MAX_OUTPUT_TOKENS} suits chat with thinking disabled.</span>
-          <span className="block">A reasoning model left thinking needs 2048–4096, which costs 4–8× the tokens per turn and may exceed the 60-second turn limit on a slow local model.</span>
+          <span className="block">A reasoning model left thinking needs 2048–4096, which costs 4–8× the tokens per turn. The turn limit grows with it: 60 seconds at 512, 4 minutes at 2048, 5 minutes at most.</span>
         </p>
         <p className="text-muted-foreground">
           {MIN_MAX_OUTPUT_TOKENS}–{MAX_MAX_OUTPUT_TOKENS}. Anything but {DEFAULT_MAX_OUTPUT_TOKENS} needs a Celln release newer than v0.5.23 and a starter package built by it on the fleet nodes, and cannot be changed after the fleet backend is added.

@@ -137,9 +137,17 @@ describe("diagnoseRun", () => {
       const thinking = steps.findIndex((candidate) => candidate.label === "Use a fleet backend with thinking disabled");
       const raise = steps[thinking + 1];
       expect(raise.label).to.equal("Or use a fleet backend with more output tokens per request");
-      expect(raise.detail).to.contain("Max output tokens per request").and.contain("2048–4096").and.contain("4–8×").and.contain("60-second turn limit").and.contain("newer than v0.5.23");
+      expect(raise.detail).to.contain("Max output tokens per request").and.contain("2048–4096").and.contain("4–8×").and.contain("4 minutes at 2048").and.contain("newer than v0.5.23");
       expect(raise.action).to.deep.include({ kind: "link", to: "/agents/hermes?tab=harness" });
     }
+  });
+
+  it("diagnoses a turn stopped at its time limit", () => {
+    const failed = { ...turnFailed, status: { ...turnFailed.status, cellnParent: { ...turnFailed.status!.cellnParent!, initialTurn: { ...initialOK, result: { succeeded: false, answer: "Turn failed; no result committed: child timed out" } } } } } as AgentRun;
+    const diagnosis = diagnoseRun(failed)!;
+    expect(diagnosis).to.include({ kind: "turn-failed", title: "Turn failed: the turn ran out of time" });
+    expect(diagnosis.cause).to.contain("60 seconds").and.contain("longer on one that allows more");
+    expect(diagnosis.nextSteps.map((step) => step.label)).to.include.members(["Ask for less in one message", "Use a fleet backend with thinking disabled", "If the backend already allows more output tokens"]);
   });
 
   it("diagnoses an over-long answer: ask for less, or lower the backend's output tokens", () => {
