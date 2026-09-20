@@ -169,3 +169,34 @@ func TestPatchCellnAgentFollowsItsConnectionSecret(t *testing.T) {
 		t.Fatalf("Secret without the key accepted: %d %s", res.Code, res.Body.String())
 	}
 }
+
+// What the console's "Create a new key" sends: the key lands in a Secret of the
+// Agent's namespace under the name the protocol fixes, the connection carries
+// this Agent's parameters and output-token bound, and the answer names the
+// Secret without ever returning the key.
+func TestCreateOwnKeyConnectionFixesTheSecretKeyByProtocol(t *testing.T) {
+	for protocol, key := range map[string]string{"anthropic-messages": "ANTHROPIC_API_KEY", "openai-chat": "OPENAI_API_KEY"} {
+		srv := keySecretServer(t)
+		res := httptest.NewRecorder()
+		body := `{"name":"mine-connection","apiKey":"` + keySecretValue + `","spec":{"provider":"my-provider","protocol":"` + protocol + `","endpoint":"https://llm.example.com/v1/messages","models":["m"],"parameters":{"temperature":0.2},"maxOutputTokens":2048}}`
+		srv.Handler(nil).ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/api/v1/model-connections?namespace=team-a", strings.NewReader(body)))
+		if res.Code != http.StatusCreated || strings.Contains(res.Body.String(), keySecretValue) || !strings.Contains(res.Body.String(), `"secretRef":"mine-connection-my-provider-key"`) {
+			t.Fatalf("%s: %d %s", protocol, res.Code, res.Body.String())
+		}
+		var secret corev1.Secret
+		if err := srv.client.Get(context.Background(), types.NamespacedName{Namespace: "team-a", Name: "mine-connection-my-provider-key"}, &secret); err != nil {
+			t.Fatal(err)
+		}
+		// The fake client keeps StringData; a real API server folds it into Data.
+		if len(secret.StringData)+len(secret.Data) != 1 || secret.StringData[key]+string(secret.Data[key]) != keySecretValue {
+			t.Fatalf("%s: Secret keys data=%v stringData=%v, want only %s", protocol, secret.Data, secret.StringData, key)
+		}
+		var connection api.ModelConnection
+		if err := srv.client.Get(context.Background(), types.NamespacedName{Namespace: "team-a", Name: "mine-connection"}, &connection); err != nil {
+			t.Fatal(err)
+		}
+		if connection.Spec.MaxOutputTokens != 2048 || connection.Spec.Parameters == nil || connection.Spec.CredentialProfile != "" {
+			t.Fatalf("%s: connection %+v", protocol, connection.Spec)
+		}
+	}
+}

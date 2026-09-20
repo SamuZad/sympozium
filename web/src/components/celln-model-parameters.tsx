@@ -2,9 +2,10 @@ import { useState } from "react";
 import { DEFAULT_MAX_OUTPUT_TOKENS, MAX_MAX_OUTPUT_TOKENS, MIN_MAX_OUTPUT_TOKENS, compactModelParameters, describeTurnReservation, parseMaxOutputTokens, parseModelParameters, thinkingDisabled, withThinkingDisabled, type ModelParameters } from "@/lib/model-parameters";
 
 /**
- * The "Advanced" part of an add-a-fleet-backend form: the model parameters and
- * the output tokens one request may produce. The JSON text is the one value of
- * the parameters: the "Disable thinking" checkbox reads and rewrites the same
+ * The "Advanced" part of an Agent's model connection: the model parameters
+ * (ModelConnection spec.parameters) and the output tokens one request may
+ * produce (spec.maxOutputTokens). The JSON text is the one value of the
+ * parameters: the "Disable thinking" checkbox reads and rewrites the same
  * object, so the two never disagree.
  */
 export function CellnModelParametersField({ value, onChange, showThinking, maxOutputTokens, onMaxOutputTokensChange }: { value: string; onChange: (text: string) => void; showThinking: boolean; maxOutputTokens: string; onMaxOutputTokensChange: (text: string) => void }) {
@@ -17,7 +18,7 @@ export function CellnModelParametersField({ value, onChange, showThinking, maxOu
       <summary className="cursor-pointer select-none text-sm">Advanced: model parameters and output tokens</summary>
       <div className="mt-2 space-y-2">
         <p className="text-muted-foreground">
-          A JSON object the fleet sends with every model request of this fleet backend. The agent cannot see or change it, and it cannot be changed after the fleet backend is added. Needs a Celln release newer than v0.5.22 on the fleet nodes.
+          A JSON object the model gateway merges into every model request of this Agent. It belongs to this Agent's model connection alone; the agent cannot see it, and a request that tries to set one of its keys is refused.
         </p>
         {showThinking && (
           <label className="flex items-start gap-2">
@@ -34,7 +35,7 @@ export function CellnModelParametersField({ value, onChange, showThinking, maxOu
             />
             <span>
               <span className="text-foreground">Disable thinking (reasoning models)</span>
-              <span className="block text-muted-foreground">Celln allows 512 output tokens per request; a reasoning model can spend them all thinking and return nothing.</span>
+              <span className="block text-muted-foreground">A request may produce {DEFAULT_MAX_OUTPUT_TOKENS} output tokens by default; a reasoning model can spend them all thinking and return nothing.</span>
             </span>
           </label>
         )}
@@ -70,7 +71,7 @@ export function CellnModelParametersField({ value, onChange, showThinking, maxOu
           <span className="block">A reasoning model left thinking needs 2048–4096, which costs 4–8× the tokens per turn. The turn limit grows with it: 60 seconds at 512, 4 minutes at 2048, 5 minutes at most.</span>
         </p>
         <p className="text-muted-foreground">
-          {MIN_MAX_OUTPUT_TOKENS}–{MAX_MAX_OUTPUT_TOKENS}. Anything but {DEFAULT_MAX_OUTPUT_TOKENS} needs a Celln release newer than v0.5.23 and a starter package built by it on the fleet nodes, and cannot be changed after the fleet backend is added.
+          {MIN_MAX_OUTPUT_TOKENS}–{MAX_MAX_OUTPUT_TOKENS}, blank for {DEFAULT_MAX_OUTPUT_TOKENS}. The limit is this Agent's own and the model gateway enforces it: a request that asks for more is refused. You can change it later on the Agent's Harness tab.
         </p>
         {tokens.error
           ? <p role="alert" className="break-words text-red-500" data-testid="celln-max-output-tokens-error">{tokens.error}</p>
@@ -80,7 +81,7 @@ export function CellnModelParametersField({ value, onChange, showThinking, maxOu
   );
 }
 
-/** The object the text holds, valid for the fleet or not; undefined when it is not a JSON object. */
+/** The object the text holds, valid or not; undefined when it is not a JSON object. */
 function currentObject(text: string): ModelParameters | undefined {
   if (!text.trim()) return {};
   try {
@@ -91,7 +92,7 @@ function currentObject(text: string): ModelParameters | undefined {
   }
 }
 
-/** A backend's output cap per request, shown only when it is not the default. */
+/** A connection's output cap per request, shown only when it is not the default. */
 export function CellnMaxOutputTokensSummary({ maxOutputTokens, testId }: { maxOutputTokens?: number; testId?: string }) {
   if (!maxOutputTokens || maxOutputTokens === DEFAULT_MAX_OUTPUT_TOKENS) return null;
   return (
@@ -101,13 +102,7 @@ export function CellnMaxOutputTokensSummary({ maxOutputTokens, testId }: { maxOu
   );
 }
 
-/** The API's warning about an added backend: the fleet's ceilings pay for fewer of its turns. */
-export function CellnBackendWarning({ warning, testId }: { warning?: string; testId?: string }) {
-  if (!warning) return null;
-  return <p role="status" className="break-words rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-xs text-amber-700 dark:text-amber-400 sm:col-span-2" data-testid={testId}>Added, with a warning: {warning}</p>;
-}
-
-/** A backend's parameters on one line, truncated, with the whole object as the tooltip. */
+/** A connection's parameters on one line, truncated, with the whole object as the tooltip. */
 export function CellnModelParametersSummary({ parameters, testId }: { parameters?: ModelParameters; testId?: string }) {
   const text = compactModelParameters(parameters);
   if (!text) return null;

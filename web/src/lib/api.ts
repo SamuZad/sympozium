@@ -141,25 +141,6 @@ export interface Agent {
 }
 
 /** A native profile the current namespace's execution policy admits. */
-/** One model backend of the Celln fleet and, for one added through the API, how far it got. */
-export interface CellnFleetBackend {
-  name: string;
-  provider: string;
-  protocol: string;
-  endpoint: string;
-  model: string;
-  allowInsecure: boolean;
-  /** What the fleet merges into every model request of this backend; absent when none. */
-  parameters?: Record<string, unknown>;
-  /** Output tokens one model request may produce; absent when it is the default 512. A turn reserves 6 requests of it. */
-  maxOutputTokens?: number;
-  /** On the answer to an add: the fleet's ceilings pay for fewer turns on this backend than the usual session. */
-  warning?: string;
-  source: "install" | "added";
-  profile: string;
-  state: string;
-}
-
 /** One cell as `celln ps -a` reports it on a fleet node, joined to its run. */
 export interface CellnCell {
   id: string;
@@ -213,19 +194,38 @@ export interface CellnNodeCells {
   parents: CellnNodeParent[];
 }
 
-export interface AddCellnFleetBackendRequest {
-  name: string;
+/**
+ * One provider route the operator declared for Agents that bring their own
+ * key (GET /api/v1/celln-platform/mediation). A ModelConnection matches it
+ * only with exactly this provider and protocol, one of these models and an
+ * endpoint on one of these origins.
+ */
+export interface CellnMediatedRoute {
   provider: string;
-  model?: string;
-  endpoint?: string;
-  protocol?: string;
-  allowInsecure?: boolean;
-  credential?: string;
-  skipPreflight?: boolean;
-  /** A JSON object the fleet merges into every model request (lib/model-parameters.ts has the rules). */
-  parameters?: Record<string, unknown>;
-  /** Output tokens one model request may produce, 256–4096; omit for the default 512. */
-  maxOutputTokens?: number;
+  protocol: "openai-chat" | "anthropic-messages";
+  models: string[];
+  endpointOrigins: string[];
+  /** The execution policy carrying the route; absent on a pending one. */
+  policy?: string;
+  /** The fixed key name the provider Secret must hold for this protocol. */
+  secretKey: string;
+}
+
+export interface CellnMediation {
+  enabled: boolean;
+  mediateBackends: boolean;
+  /** Routes the namespace's policies carry now: what a run is matched against. */
+  routes: CellnMediatedRoute[];
+  /** Declared routes no policy carries yet (sympozium celln-mediation apply-routes). */
+  pending: CellnMediatedRoute[];
+}
+
+/** A Secret in the namespace that already holds a model key. Names only, never values. */
+export interface CellnKeySecret {
+  name: string;
+  key: string;
+  /** Created by the console for a model connection. */
+  managed?: boolean;
 }
 
 export interface CellnPlatformProfile {
@@ -1177,7 +1177,7 @@ export interface CapabilitiesResponse {
 
 export interface ModelConnection {
   metadata: ObjectMeta;
-  spec: { provider: string; protocol: "openai-chat" | "anthropic-messages"; endpoint: string; credentialProfile?: string; secretRef?: string; models: string[]; disabled?: boolean; allowInsecure?: boolean };
+  spec: { provider: string; protocol: "openai-chat" | "anthropic-messages"; endpoint: string; credentialProfile?: string; secretRef?: string; models: string[]; disabled?: boolean; allowInsecure?: boolean; parameters?: Record<string, unknown>; maxOutputTokens?: number };
 }
 
 export interface AgentExecutionDefaults {
@@ -1643,10 +1643,11 @@ export const api = {
 
   cellnPlatform: {
     profiles: () => apiFetch<CellnPlatformProfile[]>("/api/v1/celln-platform/profiles"),
-    ensureWrappers: (profile: string) => apiFetch<CellnPlatformWrappers>("/api/v1/celln-platform/wrappers", { method: "POST", body: JSON.stringify({ profile }) }),
-    backends: () => apiFetch<CellnFleetBackend[]>("/api/v1/celln-platform/backends", { skipNamespace: true }),
+    /** The AgentRuntime wrapper alone: all an Agent with its own key needs from the fleet. */
+    ensureRuntime: (profile: string) => apiFetch<CellnPlatformWrappers>("/api/v1/celln-platform/wrappers", { method: "POST", body: JSON.stringify({ profile, runtimeOnly: true }) }),
+    mediation: () => apiFetch<CellnMediation>("/api/v1/celln-platform/mediation"),
+    keySecrets: (key: string) => apiFetch<CellnKeySecret[]>(`/api/v1/celln-platform/key-secrets?key=${encodeURIComponent(key)}`),
     cells: () => apiFetch<CellnNodeCells[]>("/api/v1/celln-platform/cells", { skipNamespace: true }),
-    addBackend: (body: AddCellnFleetBackendRequest) => apiFetch<CellnFleetBackend>("/api/v1/celln-platform/backends", { method: "POST", body: JSON.stringify(body), skipNamespace: true, retryNetwork: false }),
   },
 
   cellnTools: {

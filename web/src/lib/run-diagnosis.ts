@@ -2,13 +2,14 @@
 // run already carries into one plain explanation and what to do about it. Pure
 // and browser-only — it reads nothing the API has not already returned, and it
 // is the single source for failure wording in the console.
-import type { AgentRun, AgentRunTurn, CellnPlatformProfile, Condition } from "@/lib/api";
+import type { AgentRun, AgentRunTurn, CellnMediation, CellnPlatformProfile, Condition } from "@/lib/api";
 
 export type DiagnosisSeverity = "error" | "warning" | "info";
 
 export type DiagnosisKind =
   | "admission-refused"
   | "admission-pending"
+  | "mediation-disabled"
   | "continuation-withheld"
   | "parent-lost"
   | "create-refused"
@@ -43,6 +44,8 @@ export interface Diagnosis {
 export interface DiagnosisContext {
   /** Fleet runtime profiles (api.cellnPlatform.profiles) — lets a tool refusal name the tool. */
   profiles?: CellnPlatformProfile[];
+  /** Provider routes declared for the run's namespace (api.cellnPlatform.mediation) — lets a route refusal say whether any route matches. */
+  mediation?: CellnMediation;
 }
 
 const EVIDENCE_LIMIT = 600;
@@ -76,22 +79,28 @@ function newConversationStep(run: AgentRun, detail: string): DiagnosisStep {
   return { label: "Start a new conversation", detail, action: { kind: "link", label: "Open the Agent's Chat tab", to: agentTab(run, "chat") } };
 }
 
-/** The remedy for a reasoning model that returns nothing: a fleet backend that sends the provider's "no thinking" parameter. */
+// A Celln Agent owns its model backend, so the remedies below edit THIS
+// Agent's model connection (Agent → Harness → Model backend → Edit). A
+// conversation already running stays pinned to the connection as it was.
+const CONNECTION_EDIT = "Agent → Harness → Model backend → Edit";
+const NEW_CONVERSATION = "The change applies to new conversations: one already running is pinned to the old settings and the gateway refuses its next request (MODEL_ROUTE_CHANGED), so start a new conversation afterwards.";
+
+/** The remedy for a reasoning model that returns nothing: send the provider's "no thinking" parameter. */
 function thinkingOffStep(run: AgentRun): DiagnosisStep {
-  return harnessStep(run, "Use a fleet backend with thinking disabled",
-    "On the Harness tab, add a fleet backend for the same server and tick “Disable thinking (reasoning models)” under “Advanced: model parameters” (it sends {\"chat_template_kwargs\":{\"enable_thinking\":false}} with every request; other providers take their own switch in the JSON parameters). Parameters of an existing fleet backend cannot change, so add it under a new name and move the Agent to it.");
+  return harnessStep(run, "Disable thinking on this Agent's model connection",
+    `${CONNECTION_EDIT}, then tick “Disable thinking (reasoning models)” under “Advanced: model parameters” (it sends {"chat_template_kwargs":{"enable_thinking":false}} with every request; other providers take their own switch in the JSON parameters). ${NEW_CONVERSATION}`);
 }
 
-/** The other remedy for a reasoning model that returns nothing: a fleet backend that allows more output tokens per request. */
+/** The other remedy for a reasoning model that returns nothing: more output tokens per request. */
 function raiseOutputTokensStep(run: AgentRun): DiagnosisStep {
-  return harnessStep(run, "Or use a fleet backend with more output tokens per request",
-    "To keep the model thinking, add a fleet backend for the same server with “Max output tokens per request” raised under “Advanced” (2048–4096 for a reasoning model; the default is 512). A turn reserves 6 requests of it, so it costs 4–8× the tokens per turn, and buys fewer turns under the fleet's ceilings. The turn's time limit grows with it (60 seconds at 512, 4 minutes at 2048, 5 minutes at most) on a fleet whose Celln is newer than v0.5.24. It needs a fleet on a Celln newer than v0.5.23, and an existing fleet backend cannot change, so add it under a new name and move the Agent to it.");
+  return harnessStep(run, "Or raise this Agent's max output tokens per request",
+    `To keep the model thinking, ${CONNECTION_EDIT} and raise “Max output tokens per request” (2048–4096 for a reasoning model; the default is 512). A turn reserves 6 requests of it, so it costs 4–8× the tokens per turn and buys fewer turns under the policy's ceilings; the turn's time limit grows with it (60 seconds at 512, 4 minutes at 2048, 5 minutes at most). ${NEW_CONVERSATION}`);
 }
 
-/** The remedy for an answer longer than the answer size bound when the backend's output cap was raised. */
+/** The remedy for an answer longer than the answer size bound when the connection's output cap was raised. */
 function lowerOutputTokensStep(run: AgentRun): DiagnosisStep {
-  return harnessStep(run, "Or use a fleet backend with fewer output tokens per request",
-    "A fleet backend whose “Max output tokens per request” was raised lets the model write more than an answer may hold. On the Harness tab, add a fleet backend for the same server with a lower value (the default 512 always fits) and move the Agent to it; an existing fleet backend cannot change.");
+  return harnessStep(run, "Or lower this Agent's max output tokens per request",
+    `A raised “Max output tokens per request” lets the model write more than an answer may hold. ${CONNECTION_EDIT} and lower it (the default 512 always fits). ${NEW_CONVERSATION}`);
 }
 
 const replaceRunStep: DiagnosisStep = {
@@ -119,6 +128,20 @@ interface AuthFacts {
   /** Tools the run borrows that the fleet profile does not lend. */
   unknownTools: string[];
   profile?: CellnPlatformProfile;
+  /** What the run asked for, and what the operator declared, for AUTH_ROUTE_MISMATCH. */
+  route?: RouteFacts;
+}
+
+interface RouteFacts {
+  provider: string;
+  protocol: string;
+  model: string;
+  origin: string;
+  connection: string;
+  /** Known only once the namespace's declared routes were read. */
+  declared?: boolean;
+  mediationEnabled?: boolean;
+  offered: string[];
 }
 
 /**
@@ -162,7 +185,7 @@ export const AUTH_REASONS: Record<string, AuthEntry> = {
       { label: "Creating runs through the API?", detail: `Send spec.systemPrompt exactly as the profile${profile ? ` "${profile.name}"` : ""} returns it from /api/v1/celln-platform/profiles — no edits, no extra whitespace.` },
       replaceRunStep,
     ] : [
-      harnessStep(run, "Re-select the fleet backend", "Agent → Harness. Choosing the backend again rebinds the Agent to the profile's current revision, model route and tools."),
+      harnessStep(run, "Check what the Agent asks for", "Agent → Harness. The runtime, lifecycle, tools and conversation budget must be ones the profile and policy grant; an Agent created before the fleet moved to a new package keeps the old profile revision, and creating it again (Create Agent → Celln) binds the current one."),
       { label: "Check the policy still permits this", detail: "The CellnExecutionPolicy selecting this namespace must allow the runtime profile revision and the enduring lifecycle (kubectl get cellnexecutionpolicy -o yaml)." },
       replaceRunStep,
     ],
@@ -174,19 +197,28 @@ export const AUTH_REASONS: Record<string, AuthEntry> = {
       : "Nothing currently authorises this run: no execution policy selects its namespace, or the Agent, runtime or runtime profile it depends on is missing.",
     steps: (run) => [
       { label: "Make a policy select this namespace", detail: `Label namespace "${run.metadata.namespace || "default"}" so a CellnExecutionPolicy's namespaceSelector matches it, or widen the selector (kubectl get cellnexecutionpolicy -o yaml).` },
-      harnessStep(run, "Check the Agent's backend still exists", "Agent → Harness. If the runtime or its profile was removed, choose a fleet backend again to recreate the wrappers."),
+      harnessStep(run, "Check the Agent's runtime still exists", "Agent → Harness. If the AgentRuntime wrapper or its fleet profile was removed, Create Agent → Celln creates the wrapper in this namespace again."),
       waitStep,
     ],
   },
   AUTH_ROUTE_MISMATCH: {
     title: "Admission refused: the model route is not permitted",
-    cause: ({ detail }) => detail
-      ? `The run's model route is not one the fleet policy permits: ${detail}.`
-      : "The run's model connection and model are not the exact route the fleet policy permits, or the connection is disabled or does not list that model.",
-    steps: (run, { profile }) => [
-      harnessStep(run, "Choose a model the profile offers", profile
-        ? `Agent → Harness. The profile "${profile.name}" runs ${profile.model} on ${profile.provider}; the run must use that route through its model connection, with no inline override.`
-        : "Agent → Harness. Pick the fleet backend again so the Agent uses the profile's own model connection and model, with no inline override."),
+    cause: ({ detail, route }) => {
+      const asked = route ? `${route.provider} (${route.protocol}), model ${route.model || "unset"}, on ${route.origin || "an unreadable endpoint"}` : "";
+      if (/does not grant the model connection's Secret/i.test(detail)) return `The run names model connection ${route?.connection || "of another owner"}, whose Secret this Agent was not given: ${detail}.`;
+      if (route?.declared === false) return `The run asks for ${asked}, and no route an operator declared for this namespace matches it exactly${route.mediationEnabled === false ? " (mediated model access is disabled on this cluster)" : ""}. ${route.offered.length ? `Declared: ${route.offered.join("; ")}.` : "No provider is declared for this namespace."}`;
+      if (detail) return `The run's model route is not one the policy permits: ${detail}.`;
+      return route?.declared
+        ? `The run asks for ${asked}, which an operator declared, so the route itself is allowed. What is left: the connection ${route.connection} is disabled, invalid or no longer lists that model, it changed after the run was created, or the run names a connection whose Secret the Agent was not given (authRefs).`
+        : `The run's model connection and model${asked ? ` (${asked})` : ""} are not the exact route the policy permits: provider, protocol, model and endpoint origin must all match one declared route, the connection must be enabled and list the model, and the Agent must be given the connection's Secret.`;
+    },
+    steps: (run, { route, detail }) => [
+      ...(route?.declared === false ? [
+        { label: "Declare the route, or pick a declared one", detail: `An operator declares it with: sympozium install --celln-fleet … --celln-mediated-route provider=${route.provider},protocol=${route.protocol},origin=${route.origin || "https://…"},models=${route.model || "…"} (or celln.mediation.routes in the values, then sympozium celln-mediation apply-routes). Matching is exact on all four; sympozium doctor lists what is declared. Otherwise create the Agent on a provider and model that are declared (Create Agent → Celln offers only those).` },
+      ] : []),
+      ...(route?.declared !== false || /does not grant/i.test(detail) ? [
+        harnessStep(run, "Run on this Agent's own connection", "Agent → Harness → Model backend shows the connection and Secret this Agent owns. A run must name that connection (the Chat tab does); a run that names another Agent's Secret-backed connection is refused unless this Agent's authRefs list that Secret."),
+      ] : []),
       replaceRunStep,
     ],
   },
@@ -295,15 +327,65 @@ function diagnoseAdmission(run: AgentRun, condition: Condition, context: Diagnos
       cause: "No operator-prepared parent registration with current grants matches this run yet, so nothing has started.",
       evidence,
       nextSteps: [
-        { label: "Check that this Agent runs on a fleet backend", detail: "A run is admitted either by fleet policy or by a parent registration prepared for it on a node. If neither exists, it waits here.", action: { kind: "link", label: "Open the Agent's Harness tab", to: agentTab(run, "harness") } },
+        { label: "Check that this Agent runs on the Celln fleet", detail: "A run is admitted either by fleet policy or by a parent registration prepared for it on a node. If neither exists, it waits here.", action: { kind: "link", label: "Open the Agent's Harness tab", to: agentTab(run, "harness") } },
         waitStep,
       ],
     };
   }
+  return refusedDiagnosis(run, refusal, evidence, context);
+}
+
+function refusedDiagnosis(run: AgentRun, refusal: { code: string; detail: string }, evidence: string[], context: DiagnosisContext): Diagnosis {
   const profile = profileFor(run, context.profiles);
-  const facts: AuthFacts = { ...refusal, profile, unknownTools: refusal.code === "AUTH_TOOL_UNKNOWN" ? unknownTools(run, refusal.detail, profile) : [] };
+  const facts: AuthFacts = { ...refusal, profile, unknownTools: refusal.code === "AUTH_TOOL_UNKNOWN" ? unknownTools(run, refusal.detail, profile) : [], route: refusal.code === "AUTH_ROUTE_MISMATCH" ? routeFacts(run, context.mediation) : undefined };
   const entry = AUTH_REASONS[refusal.code] || defaultAuthEntry(refusal.code);
   return { kind: "admission-refused", severity: "error", code: refusal.code, title: entry.title, cause: entry.cause(facts), evidence, nextSteps: entry.steps(run, facts) };
+}
+
+/** The route a run asked for (the controller freezes it into spec.model) against the namespace's declared routes. */
+function routeFacts(run: AgentRun, mediation: CellnMediation | undefined): RouteFacts | undefined {
+  const model = run.spec.model;
+  if (!model?.connectionRef) return undefined;
+  let origin = "";
+  try { origin = model.baseURL ? new URL(model.baseURL).origin : ""; } catch { /* reported as unreadable */ }
+  const facts: RouteFacts = { provider: model.provider || "", protocol: model.protocol || "", model: model.model || "", origin, connection: model.connectionRef, offered: [] };
+  // Without the frozen route there is nothing to compare; say only what is known.
+  if (!mediation || !facts.provider || !facts.protocol || !origin) return facts;
+  return {
+    ...facts,
+    mediationEnabled: mediation.enabled,
+    declared: mediation.routes.some((route) => route.provider === facts.provider && route.protocol === facts.protocol && route.models.includes(facts.model) && route.endpointOrigins.includes(origin)),
+    offered: mediation.routes.map((route) => `${route.provider} (${route.protocol}) ${route.models.join(", ")} on ${route.endpointOrigins.join(", ")}`),
+  };
+}
+
+// ── Gateway-mediated (scoped) runs ───────────────────────────────────────────
+
+/**
+ * A run on an Agent's own key is executed by the scoped receiver and reports
+ * through the CellnScopedExecution condition (internal/controller/celln_scoped.go).
+ * A policy refusal there carries the reason code only: the controller never
+ * shares the resolver's sentence on this path.
+ */
+const SCOPED_BOILERPLATE = /scoped authority refused before receiver enrollment; no native execution started/i;
+
+function diagnoseScoped(run: AgentRun, scoped: Condition, context: DiagnosisContext): Diagnosis | null {
+  const evidence = [truncate(conditionText(scoped)), run.status?.error ? truncate(`status.error: ${run.status.error}`) : ""].filter(Boolean);
+  if (scoped.reason === "ScopedDispatchDisabled") {
+    return {
+      kind: "mediation-disabled", severity: "warning", code: "ScopedDispatchDisabled", title: "Waiting: mediated model access is not enabled",
+      cause: "This Agent brings its own provider key, which only the model gateway may use. The controller has no scoped receiver configured (celln.mediation.enabled is off), so the run is held and nothing was started; it is never sent to a fleet backend instead.",
+      evidence,
+      nextSteps: [
+        { label: "Enable mediated model access", detail: "An operator bootstraps the trust (sympozium celln-mediation bootstrap), enables celln.mediation.enabled with the model gateway, and declares the providers Agents may bring a key for (--celln-mediated-route). See docs/guides/celln-mediated-model-access.md; sympozium doctor reports “Mediated model access”." },
+        waitStep,
+      ],
+    };
+  }
+  if (scoped.reason !== "AdmissionRefused") return null;
+  const refusal = parseAdmissionRefusal(scoped.message);
+  if (!refusal) return null;
+  return refusedDiagnosis(run, { code: refusal.code, detail: SCOPED_BOILERPLATE.test(refusal.detail) ? "" : refusal.detail }, evidence, context);
 }
 
 // ── Lost parents ─────────────────────────────────────────────────────────────
@@ -402,6 +484,37 @@ const sendAnotherStep: DiagnosisStep = {
 };
 
 export const HARNESS_ERRORS: HarnessEntry[] = [
+  // The model gateway's refusals (internal/modelgateway/types.go). The gateway
+  // answers the worker's model request with the bare reason code.
+  {
+    match: /MODEL_ROUTE_CHANGED/,
+    title: "Turn failed: this Agent's model connection changed mid-conversation",
+    cause: "The conversation is pinned to the Agent's model connection as it was when the run was admitted. The connection has since been edited (parameters, max output tokens, the Secret it names, its endpoint or models), disabled or deleted, so the model gateway refuses every further request of this conversation instead of silently moving it to the new settings.",
+    resendPointless: true,
+    steps: (run) => [
+      newConversationStep(run, "A new conversation is admitted against the connection as it is now. Nothing of this one is lost: recorded answers stay on this run."),
+      harnessStep(run, "Check the connection is what you intend", "Agent → Harness → Model backend shows the provider, model, Secret name, parameters and max output tokens new conversations will use."),
+    ],
+  },
+  {
+    match: /MODEL_CREDENTIAL_SOURCE_CHANGED/,
+    title: "Turn failed: this Agent's key Secret was replaced or emptied",
+    cause: "The conversation is pinned to the exact Secret object that held the Agent's key. That Secret was deleted and created again, emptied, or the connection now names another one, so the model gateway refuses this conversation's requests. (Updating the key inside the same Secret does not end a conversation.)",
+    resendPointless: true,
+    steps: (run) => [
+      harnessStep(run, "Make sure the Agent has a usable key", "Agent → Harness → Model backend → Edit → Replace the key: paste a new key, or link a Secret that holds it under the protocol's fixed key name."),
+      newConversationStep(run, "A new conversation pins the Secret as it is now."),
+    ],
+  },
+  {
+    match: /MODEL_AUTH_FORBIDDEN/,
+    title: "Turn failed: the model gateway refused the request",
+    cause: "The request asked for more output tokens than this Agent's model connection allows per request (or than the turn was funded for), or it tried to set a request field that the connection's parameters pin. The gateway refuses rather than trimming the request. It answers the same for a run it has no registration for.",
+    steps: (run, closed) => [
+      harnessStep(run, "Check the connection's limits", `${CONNECTION_EDIT}: “Max output tokens per request” is the most one request may ask for (512 unless raised), and a key under “Parameters (JSON)” cannot also be set by the agent's request. ${NEW_CONVERSATION}`),
+      retryStep(run, closed, "Then send the message again", "Nothing was committed, so the turn is not replayed automatically."),
+    ],
+  },
   {
     match: /tool call budget exhausted/i,
     title: "Turn failed: too many tool calls for one turn",
@@ -415,7 +528,7 @@ export const HARNESS_ERRORS: HarnessEntry[] = [
     // Newer Celln releases say which of the two it was.
     match: /final answer is empty: the model used its whole output budget/i,
     title: "Turn failed: the model spent its output budget before answering",
-    cause: "The model used the whole output budget of a request without writing an answer, so no result was committed. Celln allows 512 output tokens per model request; a reasoning model (Qwen, DeepSeek-R1 and the like) can spend them all thinking and return nothing.",
+    cause: "The model used the whole output budget of a request without writing an answer, so no result was committed. A request may produce 512 output tokens unless this Agent's model connection raises it; a reasoning model (Qwen, DeepSeek-R1 and the like) can spend them all thinking and return nothing.",
     steps: (run, closed) => [
       thinkingOffStep(run),
       raiseOutputTokensStep(run),
@@ -426,7 +539,7 @@ export const HARNESS_ERRORS: HarnessEntry[] = [
     // A Celln newer than v0.5.23 names the over-long answer on its own.
     match: /final answer exceeds/i,
     title: "Turn failed: the answer was too long",
-    cause: "The agent's final answer exceeded the turn's answer size bound, so no result was committed. A fleet backend that allows many output tokens per request lets the model write more than an answer may hold.",
+    cause: "The agent's final answer exceeded the turn's answer size bound, so no result was committed. A model connection that allows many output tokens per request lets the model write more than an answer may hold.",
     steps: (run, closed) => [
       retryStep(run, closed, "Ask for a shorter answer", "Ask for a summary, a fixed number of bullet points, or one part at a time."),
       lowerOutputTokensStep(run),
@@ -435,7 +548,7 @@ export const HARNESS_ERRORS: HarnessEntry[] = [
   {
     match: /final answer is empty/i,
     title: "Turn failed: the answer was empty or too long",
-    cause: "The agent's final answer was empty or exceeded the turn's answer size bound, so no result was committed. An empty answer usually means a reasoning model spent the request's whole output budget (512 tokens on Celln) thinking.",
+    cause: "The agent's final answer was empty or exceeded the turn's answer size bound, so no result was committed. An empty answer usually means a reasoning model spent the request's whole output budget (512 tokens unless the Agent's model connection raises it) thinking.",
     steps: (run, closed) => [
       retryStep(run, closed, "Ask for a shorter answer", "Ask for a summary, a fixed number of bullet points, or one part at a time."),
       thinkingOffStep(run),
@@ -446,11 +559,11 @@ export const HARNESS_ERRORS: HarnessEntry[] = [
   {
     match: /child timed out/i,
     title: "Turn failed: the turn ran out of time",
-    cause: "The worker cell was stopped at the turn's time limit before the model finished, so no result was committed. The limit covers every model request and tool call of the turn: 60 seconds on a fleet backend with the default 512 output tokens per request, longer on one that allows more. A slow local model, or a reasoning model thinking at length, runs past it.",
+    cause: "The worker cell was stopped at the turn's time limit before the model finished, so no result was committed. The limit covers every model request and tool call of the turn: 60 seconds with the default 512 output tokens per request, longer when the Agent's model connection allows more. A slow local model, or a reasoning model thinking at length, runs past it.",
     steps: (run, closed) => [
       retryStep(run, closed, "Ask for less in one message", "A shorter answer, or one tool action per message, finishes sooner."),
       thinkingOffStep(run),
-      { label: "If the backend already allows more output tokens", detail: "Its turn limit only grows with the cap on a fleet whose Celln is newer than v0.5.24. On an older fleet every turn has 60 seconds whatever the cap; move the fleet to a current release, then add the backend again under a new name." },
+      { label: "If the connection already allows more output tokens", detail: "The turn limit only grows with the cap on a fleet whose Celln is newer than v0.5.24. On an older fleet every turn has 60 seconds whatever the cap; an operator moves the fleet to a current release." },
     ],
   },
   {
@@ -512,6 +625,10 @@ export function diagnoseRun(run: AgentRun, turns: AgentRunTurn[] = [], context: 
 
   if (!parent && notReady?.reason === "AdmissionPending") return diagnoseAdmission(run, notReady, context);
 
+  const scoped = conditions.find((condition) => condition.type === "CellnScopedExecution" && condition.status === "False");
+  const scopedDiagnosis = scoped ? diagnoseScoped(run, scoped, context) : null;
+  if (scopedDiagnosis) return scopedDiagnosis;
+
   const withheld = conditions.find((condition) => condition.type === "CellnContinuation" && condition.status === "False" && condition.reason === "LostBeforeFollowUp");
   const ownerStatus = notReady?.reason && LOST_STATUSES.has(notReady.reason) ? notReady.reason
     : parent?.ownerOutcome && LOST_STATUSES.has(parent.ownerOutcome.status) ? parent.ownerOutcome.status : undefined;
@@ -548,6 +665,11 @@ export function diagnoseRun(run: AgentRun, turns: AgentRunTurn[] = [], context: 
   if (phase !== "Failed" && phase !== "Refused") return null;
   const firstFalse = conditions.find((condition) => condition.status === "False");
   const error = run.status?.error?.trim();
+  // A one-shot run has no turn record; a gateway refusal can only be in its error.
+  const gateway = error ? HARNESS_ERRORS.find((entry) => /MODEL_/.test(entry.match.source) && entry.match.test(error)) : undefined;
+  if (gateway && error) {
+    return { kind: "run-failed", severity: "error", code: gateway.match.source, title: gateway.title.replace(/^Turn failed/, "Run failed"), cause: gateway.cause, evidence: [truncate(`status.error: ${error}`)], nextSteps: gateway.steps(run, true) };
+  }
   return {
     kind: "run-failed", severity: "error", title: phase === "Refused" ? "Run refused" : "Run failed",
     cause: error ? truncate(error, 240) : firstFalse?.message ? truncate(firstFalse.message, 240) : "The run ended in failure without recording a reason.",

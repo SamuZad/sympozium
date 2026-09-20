@@ -3,7 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { AlertTriangle, ChevronDown, ChevronRight, Info, XCircle } from "lucide-react";
 import type { AgentRun, AgentRunTurn } from "@/lib/api";
 import { diagnoseRun, type Diagnosis, type DiagnosisStep } from "@/lib/run-diagnosis";
-import { useCellnPlatformProfiles, useContinueRun, useParentTurns } from "@/hooks/use-api";
+import { useCellnMediation, useCellnPlatformProfiles, useContinueRun, useParentTurns } from "@/hooks/use-api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -17,12 +17,15 @@ const severityStyle = {
 
 /**
  * The run's diagnosis. Fleet profiles are fetched only for an admission
- * refusal, where they let the explanation name the tool or ceiling at fault.
+ * refusal, where they let the explanation name the tool or ceiling at fault,
+ * and the declared provider routes only for a route refusal.
  */
 export function useRunDiagnosis(run: AgentRun, turns?: AgentRunTurn[]): Diagnosis | null {
   const base = useMemo(() => diagnoseRun(run, turns), [run, turns]);
   const profiles = useCellnPlatformProfiles(base?.kind === "admission-refused");
-  return useMemo(() => (profiles.data ? diagnoseRun(run, turns, { profiles: profiles.data }) : base), [base, profiles.data, run, turns]);
+  // The declared routes let a route refusal say whether anything matches.
+  const mediation = useCellnMediation(base?.code === "AUTH_ROUTE_MISMATCH");
+  return useMemo(() => (profiles.data || mediation.data ? diagnoseRun(run, turns, { profiles: profiles.data, mediation: mediation.data }) : base), [base, profiles.data, mediation.data, run, turns]);
 }
 
 /** Self-contained panel for pages that do not already hold the turn history. */
