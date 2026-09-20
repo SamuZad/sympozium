@@ -1006,7 +1006,9 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if req.Execution.Backend == "celln" {
-			resolvedModel, err := modelconnection.Resolve(r.Context(), s.client, ns, sympoziumv1alpha1.ModelSpec{ConnectionRef: req.Execution.ModelConnectionRef, Model: req.Model})
+			// Only the provider is read here. An Agent may own a Secret-backed
+			// connection; which path may execute it is decided per run.
+			resolvedModel, err := modelconnection.ResolveMediated(r.Context(), s.client, ns, sympoziumv1alpha1.ModelSpec{ConnectionRef: req.Execution.ModelConnectionRef, Model: req.Model})
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
@@ -1582,7 +1584,16 @@ func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
 	if req.CellnSelection != nil {
 		run.Spec.CellnSelection = req.CellnSelection.DeepCopy()
 		run.Spec.Model = sympoziumv1alpha1.ModelSpec{Provider: req.Provider, Model: req.Model, ConnectionRef: req.ModelConnectionRef}
-		run.Spec.Model, err = modelconnection.Resolve(r.Context(), s.client, ns, run.Spec.Model)
+		// A shared-catalogue selection (no namespaced toolRefs) is resolved by
+		// the platform resolver, whose route auth picks the path: a Secret-backed
+		// or credential-free connection runs gateway-mediated and is frozen
+		// without any credential reference. A legacy namespaced selection has no
+		// gateway and keeps requiring a host credential profile.
+		resolveConnection := modelconnection.Resolve
+		if len(req.CellnSelection.ToolRefs) == 0 {
+			resolveConnection = modelconnection.ResolveMediated
+		}
+		run.Spec.Model, err = resolveConnection(r.Context(), s.client, ns, run.Spec.Model)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return

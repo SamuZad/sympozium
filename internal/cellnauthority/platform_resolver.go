@@ -541,6 +541,12 @@ func resolveDecisionRoute(s platformSnapshot, required bool) (DecisionRouteBindi
 	auth := "none"
 	if c.Spec.SecretRef != "" {
 		auth = "secret"
+		// The run author names the connection; the Agent owner grants the key.
+		// Without this a run could borrow any Secret-backed connection in its
+		// namespace, a credential its Agent was never given.
+		if !agentGrantsConnectionSecret(s.Agent, c) {
+			return empty, deny(ReasonRouteMismatch, "Agent %q does not grant the model connection's Secret; add it to the Agent's authRefs or select the connection in the Agent's execution defaults", s.Agent.Name)
+		}
 	}
 	if c.Spec.CredentialProfile != "" {
 		// An owner-installed credential profile is an explicit operator route
@@ -607,6 +613,57 @@ func resolveDecisionRoute(s platformSnapshot, required bool) (DecisionRouteBindi
 	return route, nil
 }
 
+// agentGrantsConnectionSecret is the Agent-owned allow-list applied to a
+// Secret-backed connection, the same rule the pod and harness paths apply to
+// spec.model.authSecretRef: the Secret is listed in the Agent's authRefs (an
+// empty provider grants it for any provider), or the Agent's own execution
+// defaults select this connection, which is the Agent owner naming it.
+func agentGrantsConnectionSecret(agent api.Agent, connection *api.ModelConnection) bool {
+	if execution := agent.Spec.Execution; execution != nil && execution.ModelConnectionRef != "" && execution.ModelConnectionRef == connection.Name {
+		return true
+	}
+	for _, ref := range agent.Spec.AuthRefs {
+		if ref.Secret == connection.Spec.SecretRef && (ref.Provider == "" || strings.EqualFold(ref.Provider, connection.Spec.Provider)) {
+			return true
+		}
+	}
+	return false
+}
+
+// mediatedRequestOutputTokens is the per-request output bound a gateway-mediated
+// connection (auth secret or none) states for itself, when it differs from the
+// default every worker already asks for. Zero means nothing changes: a
+// host-profile route, no connection, or a connection at the default (unset, or
+// spelled out as 512) is sized and prepared byte-for-byte as before. It is
+// derived from the connection spec alone, which the decision binds by digest,
+// so every turn of a run derives the same value.
+func mediatedRequestOutputTokens(connection *api.ModelConnection) int64 {
+	if connection == nil || connection.Spec.CredentialProfile != "" {
+		return 0
+	}
+	if bound := connection.Spec.RequestOutputTokens(); bound != api.DefaultRequestOutputTokens {
+		return bound
+	}
+	return 0
+}
+
+// mediatedTurnAllowance is what one turn reserves on a gateway-mediated route
+// whose connection raises or lowers the per-request output bound: the worker's
+// model requests per turn, each of up to that bound. The receiver requires
+// min(profile json.maxTurns, turn requests) x bound to fit the turn cap; this
+// reserves turn requests x bound, which is never less.
+func mediatedTurnAllowance(s platformSnapshot) (requests, outputTokens int64, ok bool) {
+	bound := mediatedRequestOutputTokens(s.Connection)
+	if bound == 0 {
+		return 0, 0, false
+	}
+	requests = api.TurnModelRequests
+	if native := s.Profile.Spec.Native; native != nil && native.TurnModelRequests > 0 {
+		requests = native.TurnModelRequests
+	}
+	return requests, requests * bound, true
+}
+
 // OneShotParentGraceSeconds is added to a native one-shot's turn allowance so
 // the parent's lease also covers its admission and startup.
 const OneShotParentGraceSeconds int64 = 120
@@ -655,7 +712,16 @@ func resolveBudget(s platformSnapshot, request PlatformResolveRequest, modelRequ
 		parentDeadline = request.Now.Unix() + lease
 	}
 	turnCap := runCap
-	if native := s.Profile.Spec.Native; native != nil && native.TurnModelRequests > 0 && native.TurnOutputTokens > 0 {
+	if requests, outputTokens, mediated := mediatedTurnAllowance(s); modelRequired && mediated {
+		// The guest may ask for the connection's bound on every request of a
+		// turn, so a turn reserves requests x bound. A budget that cannot pay
+		// for one such turn is refused here, by number, rather than admitted
+		// into a turn the owner or gateway would cut short.
+		if runCap.Requests < requests || runCap.OutputTokens < outputTokens {
+			return DecisionBudgetBinding{}, deny(ReasonLimitRange, "one turn on this model connection needs %d model requests and %d output tokens (%d requests x %d per request) but the run budget allows %d requests and %d output tokens", requests, outputTokens, requests, s.Connection.Spec.RequestOutputTokens(), runCap.Requests, runCap.OutputTokens)
+		}
+		turnCap = DecisionCap{Requests: requests, OutputTokens: outputTokens}
+	} else if native := s.Profile.Spec.Native; native != nil && native.TurnModelRequests > 0 && native.TurnOutputTokens > 0 {
 		// A native profile's per-turn allowance is what the owner enforces for
 		// every turn; the run's total still caps the sum.
 		turnCap.Requests = min(turnCap.Requests, native.TurnModelRequests)
