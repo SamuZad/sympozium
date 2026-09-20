@@ -297,30 +297,17 @@ func (s *Server) completeCellnFleetBackend(name string, facts cellninstall.Fleet
 	case <-time.After(cellninstall.FleetCredentialPropagationGrace):
 	}
 	record("configuring: installing its profile and wrappers")
-	clusterID, err := cellninstall.ClusterIdentity(ctx, s.client)
+	// The options come from the cluster's own record, the operator's mediation
+	// declaration included, so an added backend neither drops nor forgets it.
+	options, err := cellninstall.PlatformOptionsFromCluster(ctx, s.client, facts, configuration, filepath.Join(dir, "installation"), systemNamespace)
 	if err != nil {
 		fail(err)
 		return
 	}
-	_, policyName, _ := cellninstall.PlatformCatalogueNames(facts.Scope)
-	var policy api.CellnExecutionPolicy
-	if err := s.client.Get(ctx, types.NamespacedName{Name: policyName}, &policy); err != nil {
-		fail(err)
-		return
-	}
-	namespace, err := cellninstall.InstallNamespaceFor(ctx, s.client, facts.Scope)
-	if err != nil {
-		fail(err)
-		return
-	}
-	if namespace == "" {
-		namespace = "default"
-	}
-	options := cellninstall.PlatformOptions{Namespace: namespace, ConfigurationDir: configuration, OutputDir: filepath.Join(dir, "installation"), Scope: facts.Scope, ClusterID: clusterID, PackageHash: facts.PackageHash, Principal: facts.Principal, ControllerNamespace: systemNamespace, Authorise: cellninstall.AuthoriseModeOf(&policy)}
 	if err := cellninstall.InstallPlatform(ctx, s.client, options); err != nil {
 		fail(err)
 		return
 	}
 	record("ready")
-	slog.Info("celln.backend.added", "backend", name, "scope", facts.Scope, "namespace", namespace)
+	slog.Info("celln.backend.added", "backend", name, "scope", facts.Scope, "namespace", options.Namespace)
 }

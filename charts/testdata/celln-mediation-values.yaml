@@ -9,6 +9,13 @@ celln:
     clusterId: evaluation-cluster
     issuer:
       keyId: mediation-2026-09
+    # The providers an Agent may bring its own key for; none unless declared.
+    # Exact provider, protocol, model and https://host origin, no wildcard.
+    routes:
+      - provider: anthropic
+        protocol: anthropic-messages
+        models: [claude-sonnet-5]
+        endpointOrigins: [https://api.anthropic.com]
 modelGateway:
   # Build images/model-gateway and pin its digest.
   image: ghcr.io/sympozium-ai/sympozium/model-gateway@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa

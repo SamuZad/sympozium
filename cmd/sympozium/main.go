@@ -1312,6 +1312,9 @@ layers (enduring native parents); it requires the operator-reviewed
 				}
 				fleet.enabled = enabled
 			}
+			if !fleet.enabled && (fleet.mediateBackends || len(fleet.mediatedRouteSpecs) != 0) {
+				return fmt.Errorf("--celln-mediated-route and --celln-mediate-backends extend a Celln fleet's execution policy; this install has no fleet (pass --celln-fleet)")
+			}
 			if fleet.enabled {
 				if noCelln || cellnHostInstaller || cellnNative || len(cellnBackends) != 0 {
 					return fmt.Errorf("--celln-fleet replaces the single dispatcher and cannot combine with --no-celln, --celln-host-installer, --celln-native or --celln-backend")

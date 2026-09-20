@@ -10,7 +10,7 @@ import (
 )
 
 func newCellnMediationCmd() *cobra.Command {
-	cmd := &cobra.Command{Use: "celln-mediation", Short: "Prepare the operator trust for mediated Celln model access (chart value celln.mediation)"}
+	cmd := &cobra.Command{Use: "celln-mediation", Short: "Prepare the operator trust and publish the declared routes for mediated Celln model access (chart value celln.mediation)"}
 	var (
 		clusterID, systemNamespace, release, valuesOut string
 		gatewayHosts, receiverHosts                    []string
@@ -55,5 +55,27 @@ func newCellnMediationCmd() *cobra.Command {
 	bootstrap.Flags().StringVar(&valuesOut, "values-out", "", "Write the chart values to this file instead of stdout")
 	_ = bootstrap.MarkFlagRequired("cluster-id")
 	cmd.AddCommand(bootstrap)
+	var applyNamespace string
+	apply := &cobra.Command{
+		Use: "apply-routes", Args: cobra.NoArgs, SilenceUsage: true,
+		Short: "Add the declared mediated routes (celln.mediation.routes, .mediateBackends) to the installed fleet's execution policy",
+		Long: "Reads the operator's declaration the chart recorded in ConfigMap celln-system/" + cellninstall.MediationRecordConfigMap + " and runs the installer's idempotent platform step for the installed fleet, which appends the declared auth \"secret\" routes to the scope's CellnExecutionPolicy. " +
+			"Use it after declaring routes with Helm alone; 'sympozium install --celln-fleet' and an added backend do the same. It takes no route input of its own, never removes a route and restarts nothing.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			dir, err := os.MkdirTemp("", "celln-mediated-routes-")
+			if err != nil {
+				return err
+			}
+			defer os.RemoveAll(dir)
+			record, err := cellninstall.ApplyMediationRecord(cmd.Context(), k8sClient, dir, applyNamespace)
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintln(cmd.OutOrStdout(), mediationSummary(record))
+			return err
+		},
+	}
+	apply.Flags().StringVar(&applyNamespace, "system-namespace", "sympozium-system", "Control-plane namespace of the Sympozium release")
+	cmd.AddCommand(apply)
 	return cmd
 }

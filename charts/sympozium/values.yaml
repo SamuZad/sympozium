@@ -763,6 +763,23 @@ celln:
       # host name must be in the receiver certificate).
       url: ""
       port: 9443
+    # -- Also offer every HTTPS fleet backend's provider, protocol, origin and
+    # model to an Agent's own key. Plain-HTTP and port-bearing backends are
+    # never offered: a cluster Secret does not cross them.
+    mediateBackends: false
+    # -- The providers an Agent may bring its own key for; none by default.
+    # Matching is EXACT on provider, protocol, model and origin (no wildcard),
+    # and only the operator declares routes: an endpoint a tenant wrote is not
+    # authorisation. Recorded in ConfigMap celln-system/celln-mediated-routes
+    # and appended to the scope's policy by the next `sympozium install
+    # --celln-fleet`, added backend, or `sympozium celln-mediation
+    # apply-routes`; removing an entry here never removes a published route.
+    # Requires `enabled`. Example:
+    #   - provider: anthropic
+    #     protocol: anthropic-messages        # or openai-chat
+    #     models: [claude-sonnet-5]           # 1-32 exact names
+    #     endpointOrigins: [https://api.anthropic.com]   # https://host, no port or path
+    routes: []
     # -- Parent request template for enduring scoped runs, read once when the
     # dispatcher starts. Empty uses scoped-parent-request.json in the first
     # backend's starter configuration on the node. When the file is absent the

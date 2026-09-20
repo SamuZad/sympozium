@@ -136,6 +136,192 @@ admit your pod in the `celln-node-ingress` NetworkPolicy):
 curl --cacert ca.crt -X POST https://celln-scoped-receiver.celln-system.svc:9443/v1/scoped/read -d '{}'
 ```
 
+## 5. Declare which providers Agents may bring a key for
+
+Enabling mediation admits **nothing** by itself. The resolver matches an Agent's
+`ModelConnection` against the `auth: secret` routes of the scope's
+`CellnExecutionPolicy`, and refuses everything else with `AUTH_ROUTE_MISMATCH`.
+No provider is on by default; the operator declares each one.
+
+Why the operator, and not the Agent's owner: a `ModelConnection` is written by a
+tenant, and a tenant-authored endpoint is not authorisation. If the connection
+alone decided where a namespace's Secret may be sent, anything that can write a
+`ModelConnection` (including a prompt-injected agent with that permission) could
+point a key, or the gateway's egress, at a host of its choosing. The route list
+is the operator's allow-list of destinations; the tenant only picks from it.
+
+Matching is **exact** on all four of provider, protocol, model and endpoint
+origin. There is no wildcard model, no origin prefix and no port: an origin is
+`https://host`. A plain-HTTP origin is refused everywhere, because a cluster
+Secret never crosses plain HTTP.
+
+With the installer (the flags only declare routes; mediation itself must be
+enabled by this install's values, or they are refused before anything changes):
+
+```bash
+sympozium install --celln-fleet ... \
+  --set celln.mediation.enabled=true --set celln.mediation.clusterId=my-cluster ... \
+  --celln-mediated-route provider=anthropic,protocol=anthropic-messages,origin=https://api.anthropic.com,models=claude-sonnet-5+claude-opus-5 \
+  --celln-mediated-route provider=openai,protocol=openai-chat,origin=https://api.openai.com,models=gpt-5
+```
+
+`models` and `origin` take several values joined with `+` (or repeat the key).
+`--celln-mediate-backends` additionally offers every HTTPS backend of the fleet
+(its provider, protocol, origin and model) to an Agent's own key; plain-HTTP and
+port-bearing backends are never offered. A model name that itself contains `+`
+or `,` can only be declared through values.
+
+With values (`celln.mediation.routes` is refused unless `celln.mediation.enabled`
+is true: a route declared while mediation is off would admit nothing and only
+look like it does):
+
+```yaml
+celln:
+  mediation:
+    mediateBackends: false
+    routes:
+      - provider: anthropic
+        protocol: anthropic-messages     # or openai-chat
+        models: [claude-sonnet-5, claude-opus-5]
+        endpointOrigins: [https://api.anthropic.com]
+```
+
+```bash
+helm upgrade sympozium charts/sympozium -n sympozium-system --reuse-values -f routes-values.yaml
+sympozium celln-mediation apply-routes
+```
+
+The chart validates every route the way the installer does and records the
+declaration in ConfigMap `celln-system/celln-mediated-routes` (names and public
+origins only). That record is the single source every platform installer reads:
+`sympozium install --celln-fleet`, the API server when it completes an added
+backend, and `sympozium celln-mediation apply-routes`, which does nothing but
+publish the record into the installed scope's policy. After a Helm-only change
+run `apply-routes`; the installer does the same step itself.
+
+A policy only ever grows. Removing a route from the values stops later installs
+from adding it, but never removes a published route from under running Agents;
+to withdraw one, edit the `CellnExecutionPolicy` deliberately. Note that
+`sympozium install` does not reuse the previous release's values: pass the
+mediation values (`--set`) again on a rerun, or mediation is switched off.
+
+`sympozium doctor` reports the state ("Mediated model access"): disabled, or
+enabled with the five bootstrap objects present, the gateway ready and the
+routes the policy carries; it warns when no route is published or a declared
+one is not in the policy yet. The console reads the same through
+`GET /api/v1/celln-platform/mediation?namespace=<ns>`:
+
+```json
+{"enabled": true, "mediateBackends": false,
+ "routes":  [{"provider": "anthropic", "protocol": "anthropic-messages", "models": ["claude-opus-5", "claude-sonnet-5"],
+              "endpointOrigins": ["https://api.anthropic.com"], "policy": "celln-fleet-starter", "secretKey": "ANTHROPIC_API_KEY"}],
+ "pending": []}
+```
+
+`routes` are the ones the namespace's policies carry now (what a run is matched
+against); `pending` are declared routes no policy carries yet.
+
+## 6. Give an Agent its own key
+
+Everything below lives in the Agent's namespace (`team-a` here), which must be
+one the scope's policy admits and, with `modelGateway.namespaces` set, one the
+gateway may read.
+
+**The Secret.** The key name is fixed by the connection's protocol:
+`ANTHROPIC_API_KEY` for `anthropic-messages`, `OPENAI_API_KEY` for `openai-chat`
+(whatever the provider is called). Only the gateway reads it.
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: my-anthropic-key
+  namespace: team-a
+stringData:
+  ANTHROPIC_API_KEY: "<your key>"
+```
+
+**The ModelConnection.** Provider, protocol, the endpoint's origin and every
+model you intend to run must match one declared route exactly. `parameters`
+and `maxOutputTokens` (256-4096 per request, default 512) are optional.
+
+```yaml
+apiVersion: sympozium.ai/v1alpha1
+kind: ModelConnection
+metadata:
+  name: my-anthropic
+  namespace: team-a
+spec:
+  provider: anthropic
+  protocol: anthropic-messages
+  endpoint: https://api.anthropic.com/v1/messages
+  secretRef: my-anthropic-key
+  models: [claude-sonnet-5]
+  maxOutputTokens: 2048
+```
+
+**The runtime wrapper.** The Agent's `runtimeRef` names an `AgentRuntime` in its
+namespace that binds a fleet runtime profile by `cellnProfileRef`. A namespace
+that has used a fleet backend before already has one (`celln-native` for the
+default backend, `celln-<backend>` otherwise). Otherwise ask the API server for
+the runtime alone; it is created only for a profile the namespace's policy
+admits, and neither the backend's shared Agent nor its host-profile connection
+is added:
+
+```bash
+curl -X POST "$SYMPOZIUM_API/api/v1/celln-platform/wrappers?namespace=team-a" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"profile": "celln-native-starter", "runtimeOnly": true}'
+# {"backend":"native","runtime":"celln-native","agent":"","connection":"","created":["celln-native"]}
+```
+
+`GET /api/v1/celln-platform/profiles?namespace=team-a` lists the profile names.
+What it creates is this object (shown for reference; the revision must be the
+profile's exact one, so prefer the API):
+
+```yaml
+apiVersion: sympozium.ai/v1alpha1
+kind: AgentRuntime
+metadata:
+  name: celln-native
+  namespace: team-a
+spec:
+  cellnProfileRef:
+    name: celln-native-starter
+    revision: "<the profile's spec.revision>"
+  supportOwner: celln-platform
+```
+
+**The Agent.** `authRefs` is the Agent owner's grant that this Secret may be
+used for this Agent (selecting the connection in `spec.execution` grants it
+too); `spec.execution.modelConnectionRef` makes its runs use the connection.
+The mediated path is chat only, so the selection lends no tools.
+
+```yaml
+apiVersion: sympozium.ai/v1alpha1
+kind: Agent
+metadata:
+  name: my-agent
+  namespace: team-a
+spec:
+  runtimeRef: celln-native
+  authRefs:
+    - provider: anthropic
+      secret: my-anthropic-key
+  execution:
+    backend: celln
+    modelConnectionRef: my-anthropic
+    model: claude-sonnet-5
+    cellnSelection:
+      runtimeRef: celln-native
+      toolRefs: []
+```
+
+A run of this Agent is resolved against the policy's `secret` routes. If it is
+refused `AUTH_ROUTE_MISMATCH`, compare the connection's provider, protocol,
+endpoint origin and the run's model with the routes `sympozium doctor` lists:
+all four must match one route.
+
 ## The enduring parent request
 
 Enduring scoped runs need `--scoped-parent-request-file`. Celln's
