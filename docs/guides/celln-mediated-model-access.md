@@ -12,13 +12,18 @@ exactly what it rendered before this feature existed.
 
 Mediation leaves the fleet's own configuration alone: `celln.fleet.backends`,
 the host profiles and `celln.fleet.modelCredentialsSecret` are rendered and
-configured on every node exactly as before. What changes is which path the
-controller picks. Once `CELLN_SCOPED_CONFIG` is set, the scoped receiver owns
-**every new enduring Celln catalogue selection** and every shared one-shot
-selection (`internal/controller/celln_scoped.go`); those runs no longer start
-as fleet parents on a host-profile backend. Runs already bound to a fleet
-parent keep their binding. Treat the switch as a routing change for new native
-runs, not as an addition beside the host-profile path.
+configured on every node exactly as before, and the two paths run side by side
+on one controller. Each run takes the path of its resolved model route
+(`internal/controller/celln_scoped.go`):
+
+- a connection with a host `credentialProfile` (a fleet backend, policy auth
+  `host-profile`) starts as a fleet parent exactly as it does today, and its
+  follow-up turns go to that parent;
+- an Agent's own connection with a `secretRef` (policy auth `secret`), or a
+  credential-free one, goes through the scoped receiver and the gateway.
+
+A `secret` run on a controller without mediation is held with the reason
+`ScopedDispatchDisabled`; it is never sent to a fleet parent.
 
 ## What the one switch wires
 

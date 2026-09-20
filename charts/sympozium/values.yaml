@@ -724,10 +724,10 @@ celln:
   # gateway to the same issuer, keys, tokens and CA. Requires celln.fleet, and
   # modelGateway.image/egress/database. All key material is operator-provided
   # by `sympozium celln-mediation bootstrap`; nothing is generated or rendered
-  # from values. Once on, the controller sends every NEW enduring Celln
-  # catalogue selection (and shared one-shots) down this path instead of a
-  # fleet parent on a host-profile backend; the fleet's own configuration is
-  # untouched. See docs/guides/celln-mediated-model-access.md.
+  # from values. Runs take the path of their model route: an Agent's own
+  # Secret-backed (or credential-free) connection goes down this path, while
+  # fleet backends (host-profile) keep starting fleet parents as before.
+  # See docs/guides/celln-mediated-model-access.md.
   mediation:
     enabled: false
     # -- Operator-chosen cluster identity bound into every signed decision.
