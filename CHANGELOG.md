@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.10.87](https://github.com/sympozium-ai/sympozium/compare/v0.10.86...v0.10.87) (2026-09-20)
+
+
+### Bug Fixes
+
+* **celln:** pin v0.5.28 for isolated starter runtimes ([4985084](https://github.com/sympozium-ai/sympozium/commit/4985084513216ba1e26ed4a723ad4ea230f749cf))
+* **celln:** pin v0.5.28 for isolated starter runtimes ([0dc600f](https://github.com/sympozium-ai/sympozium/commit/0dc600f0a438edf9d26487e698b3290003be0d63))
+
 ## [0.10.86](https://github.com/sympozium-ai/sympozium/compare/v0.10.85...v0.10.86) (2026-09-20)
 
 
