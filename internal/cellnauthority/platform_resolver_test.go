@@ -66,7 +66,7 @@ func newPlatformFixture(t *testing.T, namespace string, model bool) platformFixt
 		return api.CellnImmutableRef{Hash: "blake3:" + strings.Repeat(ch, 64)}
 	}
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace, UID: types.UID(namespace + "-uid"), Labels: map[string]string{"sympozium.ai/celln-tenant": "enabled"}}}
-	agent := &api.Agent{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: "agent", UID: types.UID(namespace + "-agent"), Generation: 1}, Spec: api.AgentSpec{RuntimeRef: "runtime"}}
+	agent := &api.Agent{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: "agent", UID: types.UID(namespace + "-agent"), Generation: 1}, Spec: api.AgentSpec{RuntimeRef: "runtime", AuthRefs: []api.SecretRef{{Provider: "openai", Secret: "model-secret"}}}}
 	wrapperLimits := &api.AgentRuntimeCellnLimits{TimeoutMillis: 90000, MemoryBytes: 96 << 20, TaskBytes: 1024, OutputBytes: 32768, Workspace: "none"}
 	runtimeWrapper := &api.AgentRuntime{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: "runtime", UID: types.UID(namespace + "-runtime"), Generation: 1}, Spec: api.AgentRuntimeSpec{CellnProfileRef: &api.CellnRuntimeProfileRef{Name: "json-agent-v1", Revision: "v1"}, CellnLimits: wrapperLimits}}
 	profile := &api.CellnRuntimeProfile{ObjectMeta: metav1.ObjectMeta{Name: "json-agent-v1", UID: "profile-uid", Generation: 1}, Spec: api.CellnRuntimeProfileSpec{

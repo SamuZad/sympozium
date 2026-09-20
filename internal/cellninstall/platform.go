@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -71,6 +72,93 @@ type PlatformOptions struct {
 	// catalogue objects are replaced or removed and every namespace's
 	// platform wrappers are rebound; zero means nothing is replaced.
 	Replacing FleetPublication
+	// MediateBackends additionally admits every HTTPS backend's provider,
+	// protocol, origin and model with a namespace's own key (auth "secret"), so
+	// an Agent may bring its own credential for a model the fleet already
+	// serves. A plain-HTTP backend is skipped: a cluster Secret never crosses it.
+	MediateBackends bool
+	// MediatedRoutes are further operator-declared routes an Agent's own
+	// Secret-backed ModelConnection may use through the model gateway; they
+	// need not match any fleet backend (for example anthropic,
+	// anthropic-messages, https://api.anthropic.com). They are the operator's
+	// allow-list, never derived from anything a tenant wrote, and are matched
+	// exactly: there is no wildcard model or origin.
+	MediatedRoutes []MediatedRoute
+}
+
+// MediatedRoute is one gateway-mediated model route the operator allows a
+// namespace's own Secret-backed ModelConnection to use.
+type MediatedRoute struct {
+	Provider        string   `json:"provider"`
+	Protocol        string   `json:"protocol"`
+	Models          []string `json:"models"`
+	EndpointOrigins []string `json:"endpointOrigins"`
+}
+
+var mediatedProviderPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
+
+// PolicyRoute validates the route and returns it as an auth "secret" policy
+// route with sorted, exact models and origins. An origin must be an HTTPS
+// origin (scheme and host, no port, path, query or credentials): the CRD
+// refuses anything else for a Secret route, and refusing here says why.
+func (r MediatedRoute) PolicyRoute() (api.CellnExecutionPolicyRoute, error) {
+	if !mediatedProviderPattern.MatchString(r.Provider) {
+		return api.CellnExecutionPolicyRoute{}, fmt.Errorf("mediated route: provider %q must be 1-64 letters, digits, underscores or hyphens", r.Provider)
+	}
+	if r.Protocol != "openai-chat" && r.Protocol != "anthropic-messages" {
+		return api.CellnExecutionPolicyRoute{}, fmt.Errorf("mediated route %s: protocol must be openai-chat or anthropic-messages", r.Provider)
+	}
+	if len(r.Models) == 0 || len(r.Models) > 32 || len(r.EndpointOrigins) == 0 || len(r.EndpointOrigins) > 16 {
+		return api.CellnExecutionPolicyRoute{}, fmt.Errorf("mediated route %s: 1-32 models and 1-16 endpoint origins are required", r.Provider)
+	}
+	models, origins := slices.Clone(r.Models), slices.Clone(r.EndpointOrigins)
+	slices.Sort(models)
+	slices.Sort(origins)
+	for i, model := range models {
+		if model == "" || len(model) > 128 || strings.TrimSpace(model) != model || strings.ContainsAny(model, "*\x00\r\n") || (i > 0 && models[i-1] == model) {
+			return api.CellnExecutionPolicyRoute{}, fmt.Errorf("mediated route %s: models must be unique exact identifiers of at most 128 bytes (no wildcard)", r.Provider)
+		}
+	}
+	for i, origin := range origins {
+		parsed, err := api.ModelEndpointOrigin(origin + "/")
+		if err != nil || parsed != origin || (i > 0 && origins[i-1] == origin) {
+			return api.CellnExecutionPolicyRoute{}, fmt.Errorf("mediated route %s: endpoint origin %q must be a unique https://host origin without port, path or credentials; a Secret never crosses plain HTTP", r.Provider, origin)
+		}
+	}
+	return api.CellnExecutionPolicyRoute{Provider: r.Provider, Protocol: r.Protocol, Models: models, EndpointOrigins: origins, Auth: "secret"}, nil
+}
+
+// mediatedPolicyRoutes are the auth "secret" routes a scope's policy carries
+// besides its backends' host-profile routes, without duplicates.
+func mediatedPolicyRoutes(o PlatformOptions, backends []backendConfiguration) ([]api.CellnExecutionPolicyRoute, error) {
+	var routes []api.CellnExecutionPolicyRoute
+	add := func(route api.CellnExecutionPolicyRoute) {
+		if !slices.ContainsFunc(routes, func(r api.CellnExecutionPolicyRoute) bool { return reflect.DeepEqual(r, route) }) {
+			routes = append(routes, route)
+		}
+	}
+	if o.MediateBackends {
+		for _, b := range backends {
+			if !strings.HasPrefix(b.origin, "https://") {
+				continue
+			}
+			route, err := MediatedRoute{Provider: b.configured.Model.Provider, Protocol: b.protocol, Models: []string{b.configured.Model.Model}, EndpointOrigins: []string{b.origin}}.PolicyRoute()
+			if err != nil {
+				// An HTTPS backend on a private port is a host-profile route the
+				// operator approved as insecure; it is not offered to Secrets.
+				continue
+			}
+			add(route)
+		}
+	}
+	for _, declared := range o.MediatedRoutes {
+		route, err := declared.PolicyRoute()
+		if err != nil {
+			return nil, err
+		}
+		add(route)
+	}
+	return routes, nil
 }
 
 // PlatformCatalogueNames are the cluster-scoped objects one scope publishes:
@@ -262,6 +350,16 @@ func InstallPlatform(ctx context.Context, store client.Client, o PlatformOptions
 		objects = append(objects, profile)
 		runtimeRefs = append(runtimeRefs, api.CellnExecutionPolicyRuntime{Ref: api.CellnRuntimeProfileRef{Name: profileName, Revision: cat.Worker.Revision}})
 		routes = append(routes, api.CellnExecutionPolicyRoute{Provider: b.configured.Model.Provider, Protocol: b.protocol, Models: []string{b.configured.Model.Model}, EndpointOrigins: []string{b.origin}, Auth: "host-profile", AllowInsecure: b.insecure})
+	}
+	// Operator-declared gateway-mediated routes follow the backends' own, so a
+	// scope installed without them carries exactly the policy it always did.
+	mediated, err := mediatedPolicyRoutes(o, backends)
+	if err != nil {
+		return err
+	}
+	routes = append(routes, mediated...)
+	if len(routes) > 32 {
+		return fmt.Errorf("a scope's policy carries at most 32 routes; %d backends and %d mediated routes were requested", len(backends), len(mediated))
 	}
 	policyTools := make([]api.CellnExecutionPolicyTool, 0, len(first.cat.Tools))
 	clusterRefs := make([]api.ClusterCellnToolRef, 0, len(first.cat.Tools))
