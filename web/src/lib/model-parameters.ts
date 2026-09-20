@@ -1,7 +1,7 @@
-// Model parameters of a Celln fleet backend: a bounded JSON object the Celln
-// host merges into every provider request; the guest never sees it. These are
-// the rules of cellninstall.ValidateModelParameters (Go), which the API applies
-// again; keep the two in step.
+// Model parameters of an Agent's ModelConnection (spec.parameters): a bounded
+// JSON object the model gateway merges into every provider request; the guest
+// never sees it. These are the rules of api/v1alpha1 ValidateModelParameters
+// (Go), which the API applies again; keep the two in step.
 
 export type ModelParameters = Record<string, unknown>;
 
@@ -12,7 +12,7 @@ const MAX_STRING_BYTES = 256;
 const MAX_ARRAY_ITEMS = 8;
 const MAX_BYTES = 2048;
 
-/** Request fields Celln owns; a parameter may not set them. */
+/** Request fields the gateway owns; a parameter may not set them. */
 export const RESERVED_MODEL_PARAMETERS = ["model", "messages", "system", "stream", "stream_options", "max_tokens", "max_completion_tokens", "n", "tools", "tool_choice", "functions", "function_call", "parallel_tool_calls", "user"];
 
 /** What a llama-server (or another chat-template server) takes to answer without a reasoning phase. */
@@ -48,13 +48,13 @@ function objectError(object: ModelParameters, path: string, depth: number): stri
   return null;
 }
 
-/** The first rule the object breaks, or null when the fleet accepts it. */
+/** The first rule the object breaks, or null when the API accepts it. */
 export function validateModelParameters(parameters: unknown): string | null {
   if (!isObject(parameters)) return "model parameters: a JSON object is required";
   const keys = Object.keys(parameters);
   if (keys.length > MAX_KEYS) return `model parameters: at most ${MAX_KEYS} top-level keys, got ${keys.length}`;
   const reserved = keys.sort().find((key) => RESERVED_MODEL_PARAMETERS.includes(key));
-  if (reserved) return `model parameters: "${reserved}" is reserved (Celln sets it on every request)`;
+  if (reserved) return `model parameters: "${reserved}" is reserved (the gateway sets it on every request)`;
   const error = objectError(parameters, "", 1);
   if (error) return `model parameters: ${error}`;
   const size = bytes(JSON.stringify(parameters));
@@ -97,9 +97,9 @@ export function compactModelParameters(parameters: ModelParameters | undefined):
   return parameters && Object.keys(parameters).length ? JSON.stringify(parameters) : "";
 }
 
-// Output tokens one model request of a fleet backend may produce
-// (cellninstall.ValidateModelMaxOutputTokens in Go, which the API applies
-// again). A turn reserves TURN_MODEL_REQUESTS requests of it.
+// Output tokens one model request through a connection may produce
+// (spec.maxOutputTokens; api/v1alpha1 ValidateRequestOutputTokens in Go, which
+// the API applies again). A turn reserves TURN_MODEL_REQUESTS requests of it.
 export const DEFAULT_MAX_OUTPUT_TOKENS = 512;
 export const MIN_MAX_OUTPUT_TOKENS = 256;
 export const MAX_MAX_OUTPUT_TOKENS = 4096;
@@ -107,7 +107,7 @@ const TURN_MODEL_REQUESTS = 6;
 
 /**
  * Reads the "Max output tokens per request" field. Blank keeps the default;
- * the default itself is sent as nothing, so the backend is configured exactly
+ * the default itself is sent as nothing, so the connection is saved exactly
  * as one that never named it.
  */
 export function parseMaxOutputTokens(text: string): { maxOutputTokens?: number; error?: string } {

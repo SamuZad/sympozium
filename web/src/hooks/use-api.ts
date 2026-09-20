@@ -85,6 +85,16 @@ export function useCellnPlatformProfiles(enabled = true) {
   return useQuery({ queryKey: ["celln-platform-profiles"], queryFn: api.cellnPlatform.profiles, enabled });
 }
 
+/** Provider routes the operator declared for Agents that bring their own key. */
+export function useCellnMediation(enabled = true) {
+  return useQuery({ queryKey: ["celln-mediation"], queryFn: api.cellnPlatform.mediation, enabled, retry: false });
+}
+
+/** Names of Secrets in the namespace that already hold the given model key. */
+export function useCellnKeySecrets(key: string, enabled = true) {
+  return useQuery({ queryKey: ["celln-key-secrets", key], queryFn: () => api.cellnPlatform.keySecrets(key), enabled: enabled && !!key, retry: false });
+}
+
 export function useInstallDefaultRuntimes() {
   const qc = useQueryClient();
   return useMutation({
@@ -260,17 +270,6 @@ export function useContinueRun() {
   });
 }
 
-export function useCellnFleetBackends(enabled = true) {
-  return useQuery({
-    queryKey: ["celln-fleet-backends"],
-    queryFn: api.cellnPlatform.backends,
-    enabled,
-    retry: false,
-    // Poll faster while an added backend is still being configured.
-    refetchInterval: (query) => (query.state.data?.some((b) => b.state !== "ready" && !b.state.startsWith("error")) ? 3000 : 15000),
-  });
-}
-
 /** Every fleet node's Celln cells (`celln ps -a`), refreshed while shown. */
 export function useCellnFleetCells(enabled = true) {
   return useQuery({
@@ -279,19 +278,6 @@ export function useCellnFleetCells(enabled = true) {
     enabled,
     retry: false,
     refetchInterval: 2000,
-  });
-}
-
-export function useAddCellnFleetBackend() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: api.cellnPlatform.addBackend,
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["celln-fleet-backends"] });
-      qc.invalidateQueries({ queryKey: ["celln-platform-profiles"] });
-      toast.success("Fleet backend recorded; the fleet's nodes are configuring it");
-    },
-    onError: toastError,
   });
 }
 

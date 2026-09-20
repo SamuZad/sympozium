@@ -1,8 +1,8 @@
 // Intercepted browser contract tests plus a table over the pure diagnosis
 // function (this repo has no unit-test runner): not live Celln evidence.
 // Fixtures are statuses observed on a real cluster.
-import { AUTH_REASONS, diagnoseRun, harnessError, parseAdmissionRefusal } from "../../src/lib/run-diagnosis";
-import type { AgentRun, AgentRunTurn, CellnPlatformProfile } from "../../src/lib/api";
+import { AUTH_REASONS, HARNESS_ERRORS, diagnoseRun, harnessError, parseAdmissionRefusal } from "../../src/lib/run-diagnosis";
+import type { AgentRun, AgentRunTurn, CellnMediation, CellnPlatformProfile } from "../../src/lib/api";
 
 const REFUSAL_TAIL = "Ask the operator to authorise this namespace, runtime profile, tools and model route; do not create a replacement run.";
 const LOST_MESSAGE = "owner=ContextLost reachedReady=true admittedAge=33s incarnation=blake3:1f0c launchProfile=blake3:77ab; parent context unavailable; no automatic reconstruction";
@@ -118,14 +118,17 @@ describe("diagnoseRun", () => {
     });
   }
 
-  it("names the thinking-disabled fleet backend as the remedy for an empty answer", () => {
+  it("names disabling thinking on this Agent's model connection as the remedy for an empty answer", () => {
     for (const answer of [LENGTH_ANSWER, BUDGET_SPENT_ANSWER]) {
       const failed = { ...turnFailed, status: { ...turnFailed.status, cellnParent: { ...turnFailed.status!.cellnParent!, initialTurn: { ...initialOK, result: { succeeded: false, answer } } } } } as AgentRun;
       const steps = diagnoseRun(failed)!.nextSteps;
-      const step = steps.find((candidate) => candidate.label === "Use a fleet backend with thinking disabled")!;
+      const step = steps.find((candidate) => candidate.label === "Disable thinking on this Agent's model connection")!;
       // The message that names the spent budget leads with the remedy.
       expect(steps.indexOf(step)).to.equal(answer === BUDGET_SPENT_ANSWER ? 0 : 1);
       expect(step.detail).to.contain("Disable thinking (reasoning models)").and.contain('{"chat_template_kwargs":{"enable_thinking":false}}').and.contain("JSON parameters");
+      // The Agent owns its backend: edit it, then start a new conversation.
+      expect(step.detail).to.contain("Agent → Harness → Model backend → Edit").and.contain("MODEL_ROUTE_CHANGED").and.contain("start a new conversation");
+      expect(step.detail).not.to.match(/fleet backend|new name|cannot change/i);
       expect(step.action).to.deep.include({ kind: "link", to: "/agents/hermes?tab=harness" });
     }
   });
@@ -134,10 +137,11 @@ describe("diagnoseRun", () => {
     for (const answer of [LENGTH_ANSWER, BUDGET_SPENT_ANSWER]) {
       const failed = { ...turnFailed, status: { ...turnFailed.status, cellnParent: { ...turnFailed.status!.cellnParent!, initialTurn: { ...initialOK, result: { succeeded: false, answer } } } } } as AgentRun;
       const steps = diagnoseRun(failed)!.nextSteps;
-      const thinking = steps.findIndex((candidate) => candidate.label === "Use a fleet backend with thinking disabled");
+      const thinking = steps.findIndex((candidate) => candidate.label === "Disable thinking on this Agent's model connection");
       const raise = steps[thinking + 1];
-      expect(raise.label).to.equal("Or use a fleet backend with more output tokens per request");
-      expect(raise.detail).to.contain("Max output tokens per request").and.contain("2048–4096").and.contain("4–8×").and.contain("4 minutes at 2048").and.contain("newer than v0.5.23");
+      expect(raise.label).to.equal("Or raise this Agent's max output tokens per request");
+      expect(raise.detail).to.contain("Max output tokens per request").and.contain("2048–4096").and.contain("4–8×").and.contain("4 minutes at 2048").and.contain("start a new conversation");
+      expect(raise.detail).not.to.match(/fleet backend|new name/i);
       expect(raise.action).to.deep.include({ kind: "link", to: "/agents/hermes?tab=harness" });
     }
   });
@@ -146,20 +150,97 @@ describe("diagnoseRun", () => {
     const failed = { ...turnFailed, status: { ...turnFailed.status, cellnParent: { ...turnFailed.status!.cellnParent!, initialTurn: { ...initialOK, result: { succeeded: false, answer: "Turn failed; no result committed: child timed out" } } } } } as AgentRun;
     const diagnosis = diagnoseRun(failed)!;
     expect(diagnosis).to.include({ kind: "turn-failed", title: "Turn failed: the turn ran out of time" });
-    expect(diagnosis.cause).to.contain("60 seconds").and.contain("longer on one that allows more");
-    expect(diagnosis.nextSteps.map((step) => step.label)).to.include.members(["Ask for less in one message", "Use a fleet backend with thinking disabled", "If the backend already allows more output tokens"]);
+    expect(diagnosis.cause).to.contain("60 seconds").and.contain("longer when the Agent's model connection allows more");
+    expect(diagnosis.nextSteps.map((step) => step.label)).to.include.members(["Ask for less in one message", "Disable thinking on this Agent's model connection", "If the connection already allows more output tokens"]);
   });
 
-  it("diagnoses an over-long answer: ask for less, or lower the backend's output tokens", () => {
+  it("diagnoses an over-long answer: ask for less, or lower the Agent's output tokens", () => {
     const failed = { ...turnFailed, status: { ...turnFailed.status, cellnParent: { ...turnFailed.status!.cellnParent!, initialTurn: { ...initialOK, result: { succeeded: false, answer: TOO_LONG_ANSWER } } } } } as AgentRun;
     const diagnosis = diagnoseRun(failed)!;
     expect(diagnosis).to.include({ kind: "turn-failed", title: "Turn failed: the answer was too long" });
     expect(diagnosis.code).to.contain("final answer exceeds limit");
     expect(diagnosis.cause).to.contain("answer size bound").and.not.contain("thinking");
     // The parent is Ready, so the conversation stays open after the failed first turn.
-    expect(diagnosis.nextSteps.map((step) => step.label)).to.deep.equal(["Ask for a shorter answer", "Or use a fleet backend with fewer output tokens per request", "Send another message"]);
-    expect(diagnosis.nextSteps[1].detail).to.contain("Max output tokens per request").and.contain("lower value");
+    expect(diagnosis.nextSteps.map((step) => step.label)).to.deep.equal(["Ask for a shorter answer", "Or lower this Agent's max output tokens per request", "Send another message"]);
+    expect(diagnosis.nextSteps[1].detail).to.contain("Max output tokens per request").and.contain("lower it");
     expect(diagnosis.nextSteps[1].action).to.deep.include({ kind: "link", to: "/agents/hermes?tab=harness" });
+  });
+
+  // An Agent with its own key runs gateway-mediated; its refusals arrive on the
+  // CellnScopedExecution condition (internal/controller/celln_scoped.go), where
+  // the controller shares the reason code but never the resolver's sentence.
+  const SCOPED_REFUSAL = "AUTH_ROUTE_MISMATCH: scoped authority refused before receiver enrollment; no native execution started";
+  const ownKeyModel = { connectionRef: "mine-connection", provider: "anthropic", protocol: "anthropic-messages", model: "claude-opus-5", baseURL: "https://api.anthropic.com/v1/messages" };
+  const mediation = (models: string[]): CellnMediation => ({ enabled: true, mediateBackends: false, pending: [],
+    routes: [{ provider: "anthropic", protocol: "anthropic-messages", models, endpointOrigins: ["https://api.anthropic.com"], policy: "celln-fleet-starter", secretKey: "ANTHROPIC_API_KEY" }] });
+  const scopedRefused = run({ phase: "Failed", error: SCOPED_REFUSAL, conditions: [condition("CellnScopedExecution", "AdmissionRefused", SCOPED_REFUSAL)] }, { model: ownKeyModel });
+
+  it("AUTH_ROUTE_MISMATCH names the provider, model and origin asked and that no declared route matches", () => {
+    const diagnosis = diagnoseRun(scopedRefused, [], { mediation: mediation(["claude-sonnet-5"]) })!;
+    expect(diagnosis).to.include({ kind: "admission-refused", code: "AUTH_ROUTE_MISMATCH" });
+    expect(diagnosis.cause).to.contain("anthropic (anthropic-messages)").and.contain("claude-opus-5").and.contain("https://api.anthropic.com").and.contain("no route an operator declared").and.contain("claude-sonnet-5");
+    // The controller's boilerplate is evidence, not an explanation.
+    expect(diagnosis.cause).not.to.contain("receiver enrollment");
+    expect(diagnosis.evidence.join(" ")).to.contain("receiver enrollment");
+    expect(diagnosis.nextSteps[0].label).to.equal("Declare the route, or pick a declared one");
+    expect(diagnosis.nextSteps[0].detail).to.contain("--celln-mediated-route provider=anthropic,protocol=anthropic-messages,origin=https://api.anthropic.com,models=claude-opus-5").and.contain("apply-routes");
+  });
+
+  it("AUTH_ROUTE_MISMATCH with a matching declared route points at the connection and the Agent's authRefs", () => {
+    const diagnosis = diagnoseRun(scopedRefused, [], { mediation: mediation(["claude-opus-5"]) })!;
+    expect(diagnosis.cause).to.contain("an operator declared").and.contain("mine-connection").and.contain("authRefs");
+    expect(diagnosis.nextSteps.map((step) => step.label)).to.deep.equal(["Run on this Agent's own connection", "Delete this run, then start a new one"]);
+    // Without the declared routes nothing is claimed about them.
+    expect(diagnoseRun(scopedRefused)!.cause).to.contain("claude-opus-5").and.contain("must all match one declared route").and.contain("Secret");
+  });
+
+  it("the authRefs refusal says the run named a connection whose Secret the Agent was not given", () => {
+    // platform_resolver.go resolveDecisionRoute; shared verbatim on the fleet parent path.
+    const message = `Platform policy refused admission (AUTH_ROUTE_MISMATCH): Agent "hermes" does not grant the model connection's Secret; add it to the Agent's authRefs or select the connection in the Agent's execution defaults. ${REFUSAL_TAIL}`;
+    const diagnosis = diagnoseRun(run({ phase: "Pending", conditions: [condition("CellnParentReady", "AdmissionPending", message)] }, { model: ownKeyModel }), [], { mediation: mediation(["claude-opus-5"]) })!;
+    expect(diagnosis.code).to.equal("AUTH_ROUTE_MISMATCH");
+    expect(diagnosis.cause).to.contain("mine-connection").and.contain("whose Secret this Agent was not given");
+    expect(diagnosis.nextSteps[0].label).to.equal("Run on this Agent's own connection");
+    expect(diagnosis.nextSteps[0].detail).to.contain("authRefs");
+  });
+
+  it("the resolver still words the authRefs refusal and the controller still reports the scoped reasons this way", () => {
+    cy.readFile("../internal/cellnauthority/platform_resolver.go").then((source: string) => expect(source).to.contain("does not grant the model connection's Secret"));
+    cy.readFile("../internal/controller/celln_scoped.go").then((source: string) => {
+      expect(source).to.contain('"ScopedDispatchDisabled"').and.contain('"AdmissionRefused"').and.contain('"CellnScopedExecution"');
+      expect(source).to.contain("scoped authority refused before receiver enrollment; no native execution started");
+    });
+  });
+
+  it("ScopedDispatchDisabled: mediation is not enabled, the run waits", () => {
+    const held = run({ phase: "Pending", conditions: [condition("CellnScopedExecution", "ScopedDispatchDisabled", "Operator scoped receiver configuration is absent; no legacy, model, OCI, or native execution was submitted")] }, { model: ownKeyModel });
+    const diagnosis = diagnoseRun(held)!;
+    expect(diagnosis).to.include({ kind: "mediation-disabled", code: "ScopedDispatchDisabled", severity: "warning" });
+    expect(diagnosis.cause).to.contain("own provider key").and.contain("celln.mediation.enabled").and.contain("never sent to a fleet backend");
+    expect(diagnosis.nextSteps.map((step) => step.label)).to.deep.equal(["Enable mediated model access", "Leave this run in place"]);
+  });
+
+  it("has an entry for the gateway refusals a per-Agent connection can hit", () => {
+    cy.readFile("../internal/modelgateway/types.go").then((source: string) => {
+      for (const code of ["MODEL_ROUTE_CHANGED", "MODEL_AUTH_FORBIDDEN", "MODEL_CREDENTIAL_SOURCE_CHANGED"]) {
+        expect(source, code).to.contain(`"${code}"`);
+        expect(HARNESS_ERRORS.some((entry) => entry.match.test(`model request refused: 403 {"reason":"${code}"}`)), code).to.equal(true);
+      }
+    });
+    const gatewayTurn = (code: string) => ({ ...turnFailed, status: { ...turnFailed.status, cellnParent: { ...turnFailed.status!.cellnParent!, initialTurn: { ...initialOK, result: { succeeded: false, answer: `Turn failed; no result committed: CELLN_HARNESS_ERROR model request refused: 403 {"reason":"${code}"}` } } } } }) as AgentRun;
+    const changed = diagnoseRun(gatewayTurn("MODEL_ROUTE_CHANGED"))!;
+    expect(changed.title).to.contain("model connection changed mid-conversation");
+    expect(changed.nextSteps[0].label).to.equal("Start a new conversation");
+    // Resending into the pinned conversation cannot work.
+    expect(changed.nextSteps.some((step) => step.label === "Send another message")).to.equal(false);
+    const forbidden = diagnoseRun(gatewayTurn("MODEL_AUTH_FORBIDDEN"))!;
+    expect(forbidden.cause).to.contain("more output tokens than this Agent's model connection allows").and.contain("pin");
+    expect(forbidden.nextSteps[0].detail).to.contain("Max output tokens per request").and.contain("Parameters (JSON)");
+    expect(diagnoseRun(gatewayTurn("MODEL_CREDENTIAL_SOURCE_CHANGED"))!.nextSteps[0].detail).to.contain("Replace the key");
+    // A one-shot run has only its error.
+    const oneShot = diagnoseRun(run({ phase: "Failed", error: "model gateway: MODEL_ROUTE_CHANGED" }, { executionLifecycle: "one-shot" }))!;
+    expect(oneShot).to.include({ kind: "run-failed" });
+    expect(oneShot.title).to.contain("Run failed: this Agent's model connection changed");
   });
 
   it("names the refused tool from the condition detail, else from the profile", () => {
@@ -278,7 +359,7 @@ describe("Why did this fail panel", () => {
     open(alive, [{ metadata: { name: "turn-1", uid: "turn-1-uid" }, spec: { runName: alive.metadata.name, runUID: "run-uid", message: "List everything" }, status: { execution: { ...initialOK, result: { succeeded: false, answer: LENGTH_ANSWER } } } }]);
     cy.get('[data-testid="run-diagnosis-cause"]').should("contain", "answer size bound");
     cy.get('[data-testid="run-diagnosis-step"]').first().should("contain", "Ask for a shorter answer").and("contain", "send the next message below");
-    cy.get('[data-testid="run-diagnosis-step"]').eq(1).should("contain", "Use a fleet backend with thinking disabled").and("contain", "Disable thinking (reasoning models)");
+    cy.get('[data-testid="run-diagnosis-step"]').eq(1).should("contain", "Disable thinking on this Agent's model connection").and("contain", "Disable thinking (reasoning models)");
   });
 
   it("continuation withheld: explains the loop guard and restarts elsewhere on request", () => {
