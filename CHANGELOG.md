@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.10.84](https://github.com/sympozium-ai/sympozium/compare/v0.10.83...v0.10.84) (2026-09-20)
+
+
+### Bug Fixes
+
+* **celln:** let a fleet backend's turn lifetime follow its output-token cap ([8000d51](https://github.com/sympozium-ai/sympozium/commit/8000d5166723ee9e318847abe2e5bece828c954a))
+* **celln:** let a fleet backend's turn lifetime follow its output-token cap ([f020d3e](https://github.com/sympozium-ai/sympozium/commit/f020d3eb902ef5d9b15090017f379de0251cd2e7))
+* **celln:** pin Celln v0.5.25 ([2f3698e](https://github.com/sympozium-ai/sympozium/commit/2f3698e02c0d8ccab004ab7d9d1bfd4cfece1fbe))
+* **celln:** pin Celln v0.5.25 (worker turn lifetime follows the output-token cap) ([676da52](https://github.com/sympozium-ai/sympozium/commit/676da52bdbf5ded0cb0d2da448f20b2d10bab584))
+
 ## [0.10.83](https://github.com/sympozium-ai/sympozium/compare/v0.10.82...v0.10.83) (2026-09-19)
 
 
