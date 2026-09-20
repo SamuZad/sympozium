@@ -199,6 +199,7 @@ func (s *Server) buildMux(frontendFS fs.FS, expected *tokenReader) http.Handler 
 	mux.HandleFunc("GET /api/v1/celln-platform/profiles", s.listCellnPlatformProfiles)
 	mux.HandleFunc("POST /api/v1/celln-platform/wrappers", s.ensureCellnPlatformWrappers)
 	mux.HandleFunc("GET /api/v1/celln-platform/mediation", s.getCellnMediation)
+	mux.HandleFunc("GET /api/v1/celln-platform/key-secrets", s.listCellnKeySecrets)
 	mux.HandleFunc("GET /api/v1/celln-platform/backends", s.listCellnFleetBackends)
 	mux.HandleFunc("GET /api/v1/celln-platform/cells", s.listCellnFleetCells)
 	mux.HandleFunc("POST /api/v1/celln-platform/backends", s.addCellnFleetBackend)
@@ -859,6 +860,18 @@ func (s *Server) patchAgent(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			inst.Spec.Execution = req.Execution.DeepCopy()
+			if req.Execution.Backend == "celln" && req.Execution.ModelConnectionRef != "" {
+				// Keep the Agent's grant on the Secret its own connection names
+				// now (a replaced key may live in another Secret), as creation does.
+				secretRef, err := s.cellnConnectionSecret(r.Context(), ns, req.Execution.ModelConnectionRef)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				if secretRef != nil {
+					inst.Spec.AuthRefs = []sympoziumv1alpha1.SecretRef{*secretRef}
+				}
+			}
 		}
 		if err := s.client.Update(r.Context(), &inst); err != nil {
 			http.Error(w, "updating execution defaults: "+err.Error(), http.StatusInternalServerError)
@@ -1049,6 +1062,17 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			req.Provider = resolvedModel.Provider
+			// An Agent's own key: grant the connection's Secret in authRefs so
+			// the grant survives a later change of the execution defaults. The
+			// name comes from the connection, never from the request.
+			secretRef, err := s.cellnConnectionSecret(r.Context(), ns, req.Execution.ModelConnectionRef)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if secretRef != nil {
+				req.SecretName = secretRef.Secret
+			}
 		} else {
 			model, _, err := modelconnection.ResolveHarness(r.Context(), s.client, ns, req.Execution.ModelConnectionRef, req.Model)
 			if err != nil {
