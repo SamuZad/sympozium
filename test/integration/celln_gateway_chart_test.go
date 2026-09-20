@@ -101,3 +101,45 @@ func TestGatewayChartRequiresExplicitTrustAndRestrictsIdentity(t *testing.T) {
 		t.Fatalf("unexpected component resources: %v", kinds)
 	}
 }
+
+// The documented celln.mediation sample must keep rendering, from Secret and
+// ConfigMap volumes alone: no configuration claim and no rendered credential.
+func TestGatewayChartMediationSampleRendersWithoutAClaim(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm required for render tests")
+	}
+	raw, err := exec.Command("helm", "template", "gateway-test", "../../charts/sympozium", "--show-only", "templates/model-gateway.yaml", "--show-only", "templates/celln-mediation.yaml",
+		"-f", "../../charts/testdata/celln-fleet-values.yaml", "-f", "../../charts/testdata/celln-mediation-values.yaml").CombinedOutput()
+	if err != nil {
+		t.Fatalf("render: %v %s", err, raw)
+	}
+	decoder := yamlutil.NewYAMLOrJSONDecoder(bytes.NewReader(raw), 4096)
+	kinds := map[string]int{}
+	for {
+		var obj unstructured.Unstructured
+		if err := decoder.Decode(&obj.Object); err == io.EOF {
+			break
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		kinds[obj.GetKind()]++
+		if obj.GetKind() != "Deployment" {
+			continue
+		}
+		volumes, _, _ := unstructured.NestedSlice(obj.Object, "spec", "template", "spec", "volumes")
+		for _, volume := range volumes {
+			if volume.(map[string]interface{})["persistentVolumeClaim"] != nil {
+				t.Fatal("mediated gateway still needs a configuration claim")
+			}
+		}
+		containers, _, _ := unstructured.NestedSlice(obj.Object, "spec", "template", "spec", "containers")
+		for _, c := range containers {
+			if c.(map[string]interface{})["envFrom"] != nil || c.(map[string]interface{})["env"] != nil {
+				t.Fatal("gateway credentials must arrive as files, never environment")
+			}
+		}
+	}
+	if kinds["Secret"] != 0 || kinds["PersistentVolumeClaim"] != 0 || kinds["Deployment"] != 1 || kinds["ConfigMap"] != 2 || kinds["Role"] != 1 || kinds["RoleBinding"] != 1 {
+		t.Fatalf("unexpected mediated resources: %v", kinds)
+	}
+}

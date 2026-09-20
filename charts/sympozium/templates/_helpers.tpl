@@ -155,3 +155,79 @@ OTel resource attributes: convert map to comma-separated "key=value" pairs.
 {{- end -}}
 {{- join "," $pairs -}}
 {{- end }}
+
+{{/*
+Mediated Celln model access (celln.mediation). Renders "true" when enabled and
+refuses any incomplete or contradictory input, so the controller, the fleet
+dispatchers and the model gateway are never rendered half-wired. Every
+template that wires one of the three includes this.
+*/}}
+{{- define "sympozium.cellnMediation" -}}
+{{- $m := .Values.celln.mediation | default dict -}}
+{{- if $m.enabled -}}
+{{- $fleet := .Values.celln.fleet | default dict -}}
+{{- if not (and .Values.celln.enabled $fleet.enabled) -}}
+{{- fail "celln.mediation requires celln.enabled and celln.fleet.enabled: the scoped receiver runs in the fleet's celln-node dispatchers" -}}
+{{- end -}}
+{{- if and .Values.celln.dispatcher .Values.celln.dispatcher.enduring .Values.celln.dispatcher.enduring.enabled -}}
+{{- fail "celln.mediation cannot combine with celln.dispatcher.enduring" -}}
+{{- end -}}
+{{- if not (regexMatch "^[^[:space:]]{1,253}$" ($m.clusterId | default "")) -}}
+{{- fail "celln.mediation.clusterId is required: the operator-chosen cluster identity bound into every decision" -}}
+{{- end -}}
+{{- $issuer := $m.issuer | default dict -}}
+{{- if ne ($issuer.name | default "") "sympozium-control-plane" -}}
+{{- fail "celln.mediation.issuer.name must stay sympozium-control-plane: the credential contract fixes the issuer" -}}
+{{- end -}}
+{{- if not (regexMatch "^[^[:space:]]{1,128}$" ($issuer.keyId | default "")) -}}
+{{- fail "celln.mediation.issuer.keyId is required: the `kid` of the bootstrapped signing key in the trust JWKS" -}}
+{{- end -}}
+{{- range $key := list "controllerSecret" "gatewaySecret" "nodeSecret" "trustConfigMap" -}}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$" (get $m $key | default "")) -}}
+{{- fail (printf "celln.mediation.%s must name the operator-provided object created by `sympozium celln-mediation bootstrap`" $key) -}}
+{{- end -}}
+{{- end -}}
+{{- $receiver := $m.receiver | default dict -}}
+{{- if and $receiver.url (not (regexMatch "^https://[^/?#@[:space:]]+$" $receiver.url)) -}}
+{{- fail "celln.mediation.receiver.url must be an origin-only HTTPS URL (https://host[:port])" -}}
+{{- end -}}
+{{- $port := int ($receiver.port | default 9443) -}}
+{{- if or (lt $port 1024) (gt $port 65535) (eq $port 8787) -}}
+{{- fail "celln.mediation.receiver.port must be an unprivileged port other than the dispatcher's 8787" -}}
+{{- end -}}
+{{- if .Values.modelGateway.configurationClaim -}}
+{{- fail "celln.mediation deploys the model gateway from Secret/ConfigMap volumes; unset modelGateway.configurationClaim" -}}
+{{- end -}}
+{{- if not ((.Values.modelGateway.database | default dict).secretName) -}}
+{{- fail "celln.mediation requires modelGateway.database.secretName: an operator-provided Secret holding the PostgreSQL URL (the chart bundles no database)" -}}
+{{- end -}}
+{{- if not ((.Values.modelGateway.database | default dict).key) -}}
+{{- fail "modelGateway.database.key must name the Secret key holding the PostgreSQL URL" -}}
+{{- end -}}
+true
+{{- end -}}
+{{- end -}}
+
+{{/* HTTPS origin of the chart's model gateway Service. */}}
+{{- define "sympozium.modelGatewayOrigin" -}}
+{{- printf "https://%s-model-gateway.%s.svc:8443" (include "sympozium.fullname" .) (include "sympozium.namespace" .) -}}
+{{- end -}}
+
+{{/* HTTPS origin of the one scoped receiver the controller dispatches to. */}}
+{{- define "sympozium.cellnScopedReceiverOrigin" -}}
+{{- $receiver := (.Values.celln.mediation | default dict).receiver | default dict -}}
+{{- $receiver.url | default (printf "https://celln-scoped-receiver.celln-system.svc:%d" (int ($receiver.port | default 9443))) -}}
+{{- end -}}
+
+{{/*
+Shell lines for the celln-node dispatcher wrapper: pass the enduring parent
+request only when the node has one. Celln refuses to start on a missing file,
+and without the flag it serves one-shot scoped dispatch only.
+*/}}
+{{- define "sympozium.cellnScopedParentRequestArg" -}}
+if [ -s "$SCOPED_PARENT_REQUEST" ]; then
+  set -- "$@" --scoped-parent-request-file "$SCOPED_PARENT_REQUEST"
+else
+  echo "celln scoped receiver: no parent request at $SCOPED_PARENT_REQUEST; enduring scoped runs stay disabled (one-shot only) until it exists and this pod restarts" >&2
+fi
+{{- end -}}

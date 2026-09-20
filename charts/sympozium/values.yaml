@@ -5,7 +5,9 @@ image:
   # -- Override the image tag (defaults to .Chart.AppVersion)
   tag: ""
 
-# Dedicated gateway component only; does not enable mediated Celln admission.
+# Dedicated gateway component only; does not enable mediated Celln admission
+# (celln.mediation.enabled does, and then deploys this gateway itself, from
+# Secret/ConfigMap volumes, without `enabled` or `configurationClaim` here).
 # Operator-provisioned claim holds gateway.json, public JWKS, TLS and static
 # registration/database credential files. No issuer private keys/provider keys.
 modelGateway:
@@ -14,6 +16,23 @@ modelGateway:
   configurationClaim: "" # files readable by UID 65532; secret files mode 0600
   # Explicit reviewed DNS, Kubernetes API and provider egress peers/ports.
   egress: []
+  # -- Used with celln.mediation.enabled, which deploys this gateway from
+  # Secret/ConfigMap volumes instead of configurationClaim. Operator-provided
+  # Secret in the control-plane namespace holding the PostgreSQL connection URL
+  # (migrations 002 and 003 applied). The chart bundles no database.
+  database:
+    secretName: ""
+    key: database-url
+  # -- Tenant namespaces whose ModelConnections and provider Secrets the
+  # gateway may read. Empty keeps the cluster-wide `get` ClusterRole; a list
+  # replaces it with one Role/RoleBinding per namespace (least privilege).
+  # celln.mediation also sets the gateway's readinessNamespaces from it; with
+  # configurationClaim, put the same list in your gateway.json or readiness
+  # keeps probing cluster-wide access and fails.
+  namespaces: []
+  # -- Exact provider origins on private addresses the gateway may reach
+  # (gateway.json privateOrigins). Only honoured with celln.mediation.
+  privateOrigins: []
 
 imagePullSecrets: []
 nameOverride: ""
@@ -697,6 +716,58 @@ celln:
       create: true
       storageClass: ""
       storage: 1Gi
+  # -- Mediated model access (default off): each native Celln Agent's model
+  # requests go through the model gateway, which injects that Agent's own
+  # provider key from its namespaced Secret; no provider key on Celln nodes.
+  # This one switch wires the controller's scoped dispatch
+  # (CELLN_SCOPED_CONFIG), the fleet dispatchers' scoped receiver and the model
+  # gateway to the same issuer, keys, tokens and CA. Requires celln.fleet, and
+  # modelGateway.image/egress/database. All key material is operator-provided
+  # by `sympozium celln-mediation bootstrap`; nothing is generated or rendered
+  # from values. Once on, the controller sends every NEW enduring Celln
+  # catalogue selection (and shared one-shots) down this path instead of a
+  # fleet parent on a host-profile backend; the fleet's own configuration is
+  # untouched. See docs/guides/celln-mediated-model-access.md.
+  mediation:
+    enabled: false
+    # -- Operator-chosen cluster identity bound into every signed decision.
+    clusterId: ""
+    # -- Namespace holding the controller's immutable prepared-operation
+    # records; never a tenant namespace. Empty uses the control-plane namespace.
+    preparationNamespace: ""
+    issuer:
+      # -- Fixed by the credential contract; the controller, dispatchers and
+      # gateway all refuse another issuer.
+      name: sympozium-control-plane
+      # -- Key id of the signing key; must be a `kid` in the trust JWKS.
+      keyId: ""
+    # -- Control-plane Secret, controller only. Keys: issuer.key (one PKCS#8
+    # Ed25519 PRIVATE KEY PEM), receiver-token, gateway-token.
+    controllerSecret: celln-mediation-controller
+    # -- Control-plane Secret, gateway only. Keys: tls.crt, tls.key,
+    # registration-token (equal to the controller's gateway-token).
+    gatewaySecret: celln-mediation-gateway
+    # -- celln-system Secret. Keys: operator-token (equal to the controller's
+    # receiver-token), tls.crt, tls.key (the receiver's TLS edge).
+    nodeSecret: celln-mediation-node
+    # -- Public ConfigMap of the same name in the control-plane namespace AND
+    # celln-system. Keys: jwks.json (public Ed25519 JWKS), ca.crt (the CA that
+    # signed both TLS certificates). Public material only, so a ConfigMap.
+    trustConfigMap: celln-mediation-trust
+    receiver:
+      # -- HTTPS origin of the ONE scoped receiver the controller uses. Empty
+      # uses the chart's celln-scoped-receiver Service, which is correct only
+      # while a single celln-node pod exists: scoped state lives on the node
+      # that prepared it and the router does not forward /v1/scoped/*. With
+      # several nodes, set an origin that reaches exactly one of them (its
+      # host name must be in the receiver certificate).
+      url: ""
+      port: 9443
+    # -- Parent request template for enduring scoped runs, read once when the
+    # dispatcher starts. Empty uses scoped-parent-request.json in the first
+    # backend's starter configuration on the node. When the file is absent the
+    # dispatcher starts with one-shot scoped dispatch only.
+    parentRequestFile: ""
   # -- One-command bootstrap for a fresh Celln install. Generates the
   # controller/router/backend/capability bearer Secrets and a router ownership
   # PVC, then the CLI points celln.tokenSecret, celln.capabilityTokenSecret and
