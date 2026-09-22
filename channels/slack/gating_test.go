@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -357,5 +359,211 @@ func TestThreadEngagement_TTLEvicts(t *testing.T) {
 	te.evictStale()
 	if st := te.get("C1", "T1"); st != nil {
 		t.Fatalf("entry should have been evicted, got %+v", st)
+	}
+}
+
+// --- sticky-thread hydration from Slack history ------------------------------------
+
+// fakeHistory serves a fixed thread history and counts fetches.
+type fakeHistory struct {
+	msgs  []historyMsg
+	err   error
+	calls int
+}
+
+func (f *fakeHistory) fetch(_, _ string, limit int) ([]historyMsg, error) {
+	f.calls++
+	if f.err != nil {
+		return nil, f.err
+	}
+	if len(f.msgs) > limit {
+		return f.msgs[:limit], nil
+	}
+	return f.msgs, nil
+}
+
+func stickyMentionCfg() *slackConfig {
+	return &slackConfig{
+		threading:        true,
+		threadStickiness: true,
+		allowedTriggers:  csvToSet("mention"),
+	}
+}
+
+// TestHydrate_InterruptedThreadStaysTagOnlyAfterRestart is the reported
+// bug: Alice opens a thread, Bob joins, the pod loses its state, and
+// Alice's next @-mention must not hand her free-flow back.
+func TestHydrate_InterruptedThreadStaysTagOnlyAfterRestart(t *testing.T) {
+	const (
+		botID  = "UBOT"
+		alice  = "UALICE"
+		bob    = "UBOB"
+		chat   = "C1"
+		thread = "1700000000.000100"
+	)
+	h := &fakeHistory{msgs: []historyMsg{
+		{User: alice, Text: "<@UBOT> hi", TS: thread},
+		{User: botID, Text: "hello!", TS: "1700000001.000100", BotID: "B1"},
+		{User: bob, Text: "me too", TS: "1700000002.000100"},
+		{User: alice, Text: "<@UBOT> again", TS: "1700000003.000100"}, // the current message
+	}}
+	te := newThreadEngagement(time.Hour) // fresh pod: no state
+	te.history = h.fetch
+
+	got, reason := evaluateInbound(stickyMentionCfg(), te, botID, alice, chat, thread, "1700000003.000100", "channel", "<@UBOT> again")
+	if got != gateAllow {
+		t.Fatalf("re-mention dropped: %v (%s)", got, reason)
+	}
+	st := te.get(chat, thread)
+	if st == nil || st.owner != alice || !st.interrupted {
+		t.Fatalf("expected alice-owned interrupted thread after hydration, got %+v", st)
+	}
+	if got, _ := evaluateInbound(stickyMentionCfg(), te, botID, alice, chat, thread, "1700000004.000100", "channel", "plain"); got != gateDrop {
+		t.Fatalf("plain follow-up in interrupted thread must drop after restart, got %v", got)
+	}
+	if h.calls != 1 {
+		t.Fatalf("history fetched %d times, want 1", h.calls)
+	}
+}
+
+// TestHydrate_UninterruptedOwnerResumesFreeFlow: after a restart the owner
+// of a solo thread @-mentions once and gets free-flow back.
+func TestHydrate_UninterruptedOwnerResumesFreeFlow(t *testing.T) {
+	const (
+		botID  = "UBOT"
+		alice  = "UALICE"
+		chat   = "C1"
+		thread = "1700000000.000100"
+	)
+	h := &fakeHistory{msgs: []historyMsg{
+		{User: alice, Text: "<@UBOT> hi", TS: thread},
+		{User: botID, Text: "hello!", TS: "1700000001.000100", BotID: "B1"},
+		{User: alice, Text: "plain", TS: "1700000002.000100"},
+		{User: alice, Text: "<@UBOT> still there?", TS: "1700000003.000100"},
+	}}
+	te := newThreadEngagement(time.Hour)
+	te.history = h.fetch
+
+	// A plain message into an unknown thread is dropped without a lookup.
+	if got, _ := evaluateInbound(stickyMentionCfg(), te, botID, alice, chat, thread, "1700000002.000100", "channel", "plain"); got != gateDrop {
+		t.Fatalf("plain message into unknown thread should drop, got %v", got)
+	}
+	if h.calls != 0 {
+		t.Fatalf("non-trigger must not fetch history, got %d calls", h.calls)
+	}
+
+	if got, _ := evaluateInbound(stickyMentionCfg(), te, botID, alice, chat, thread, "1700000003.000100", "channel", "<@UBOT> still there?"); got != gateAllow {
+		t.Fatalf("owner re-mention dropped: %v", got)
+	}
+	if got, _ := evaluateInbound(stickyMentionCfg(), te, botID, alice, chat, thread, "1700000004.000100", "channel", "plain again"); got != gateAllow {
+		t.Fatalf("owner free-flow should resume after hydration, got %v", got)
+	}
+}
+
+// TestHydrate_InThreadClaimThenInterrupt: ownership claimed by a mention
+// inside someone else's thread is replayed the same way as live.
+func TestHydrate_InThreadClaimThenInterrupt(t *testing.T) {
+	const (
+		botID  = "UBOT"
+		alice  = "UALICE"
+		bob    = "UBOB"
+		carol  = "UCAROL"
+		chat   = "C1"
+		thread = "1700000000.000100"
+	)
+	h := &fakeHistory{msgs: []historyMsg{
+		{User: carol, Text: "lunch?", TS: thread},                    // parent, not a trigger
+		{User: alice, Text: "<@UBOT> help", TS: "1700000001.000100"}, // claims ownership
+		{User: bob, Text: "hey", TS: "1700000002.000100"},            // interrupts
+	}}
+	te := newThreadEngagement(time.Hour)
+	te.history = h.fetch
+
+	if got, _ := evaluateInbound(stickyMentionCfg(), te, botID, alice, chat, thread, "1700000003.000100", "channel", "<@UBOT> again"); got != gateAllow {
+		t.Fatalf("re-mention dropped: %v", got)
+	}
+	st := te.get(chat, thread)
+	if st == nil || st.owner != alice || !st.interrupted {
+		t.Fatalf("expected alice-owned interrupted thread, got %+v", st)
+	}
+}
+
+// TestHydrate_HistoryErrorAllowsWithoutOwnership: when Slack can't be
+// reached the trigger is served, but nobody gains free-flow and nothing
+// is cached, so the next trigger retries.
+func TestHydrate_HistoryErrorAllowsWithoutOwnership(t *testing.T) {
+	const (
+		botID  = "UBOT"
+		alice  = "UALICE"
+		chat   = "C1"
+		thread = "1700000000.000100"
+	)
+	h := &fakeHistory{err: errors.New("ratelimited")}
+	te := newThreadEngagement(time.Hour)
+	te.history = h.fetch
+
+	if got, _ := evaluateInbound(stickyMentionCfg(), te, botID, alice, chat, thread, "1700000003.000100", "channel", "<@UBOT> hi"); got != gateAllow {
+		t.Fatalf("trigger should be allowed when history fails, got %v", got)
+	}
+	if st := te.get(chat, thread); st != nil {
+		t.Fatalf("history failure must not cache state, got %+v", st)
+	}
+	if got, _ := evaluateInbound(stickyMentionCfg(), te, botID, alice, chat, thread, "1700000004.000100", "channel", "plain"); got != gateDrop {
+		t.Fatalf("plain follow-up must drop without ownership, got %v", got)
+	}
+
+	h.err = nil
+	h.msgs = []historyMsg{{User: alice, Text: "<@UBOT> hi", TS: thread}}
+	evaluateInbound(stickyMentionCfg(), te, botID, alice, chat, thread, "1700000005.000100", "channel", "<@UBOT> retry")
+	if h.calls != 2 {
+		t.Fatalf("next trigger should retry the lookup, got %d calls", h.calls)
+	}
+}
+
+// TestHydrate_TooLongThreadIsInterrupted: history beyond the replay cap is
+// assumed interrupted rather than claimable.
+func TestHydrate_TooLongThreadIsInterrupted(t *testing.T) {
+	const (
+		botID  = "UBOT"
+		alice  = "UALICE"
+		chat   = "C1"
+		thread = "1700000000.000000"
+	)
+	msgs := make([]historyMsg, 0, maxHydrateMessages+1)
+	msgs = append(msgs, historyMsg{User: "UCAROL", Text: "parent", TS: thread})
+	for i := 1; i <= maxHydrateMessages; i++ {
+		msgs = append(msgs, historyMsg{User: "UCAROL", Text: "chatter", TS: "1700000000." + fmt.Sprintf("%06d", i)})
+	}
+	h := &fakeHistory{msgs: msgs}
+	te := newThreadEngagement(time.Hour)
+	te.history = h.fetch
+
+	if got, _ := evaluateInbound(stickyMentionCfg(), te, botID, alice, chat, thread, "1700000500.000000", "channel", "<@UBOT> hi"); got != gateAllow {
+		t.Fatalf("trigger dropped: %v", got)
+	}
+	st := te.get(chat, thread)
+	if st == nil || st.owner != "" || !st.interrupted {
+		t.Fatalf("expected unowned interrupted thread, got %+v", st)
+	}
+	if got, _ := evaluateInbound(stickyMentionCfg(), te, botID, alice, chat, thread, "1700000501.000000", "channel", "plain"); got != gateDrop {
+		t.Fatalf("plain message in too-long thread must drop, got %v", got)
+	}
+}
+
+func TestTSBefore(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want bool
+	}{
+		{"1700000000.000100", "1700000000.000200", true},
+		{"1700000000.000200", "1700000000.000100", false},
+		{"1700000000.000100", "1700000000.000100", false},
+		{"999999999.999999", "1700000000.000000", true},
+		{"1700000001.000000", "1700000000.999999", false},
+	}
+	for _, tc := range cases {
+		if got := tsBefore(tc.a, tc.b); got != tc.want {
+			t.Errorf("tsBefore(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+		}
 	}
 }

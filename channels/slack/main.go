@@ -99,6 +99,7 @@ func main() {
 		cfg:      loadSlackConfig(log),
 		threads:  newThreadEngagement(24 * time.Hour),
 	}
+	ch.threads.history = ch.fetchThreadHistory
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -672,6 +673,53 @@ func (sc *SlackChannel) callSlackAPIFormInto(ctx context.Context, endpoint strin
 		}
 	}
 	return fmt.Errorf("slack %s rejected request: %s", endpoint, parsed.Error)
+}
+
+// fetchThreadHistory returns up to limit messages of a thread via
+// conversations.replies, parent first. It backs sticky-thread hydration,
+// which runs inside gating and has no request context of its own.
+func (sc *SlackChannel) fetchThreadHistory(chatID, threadTS string, limit int) ([]historyMsg, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	var out []historyMsg
+	seen := map[string]bool{}
+	cursor := ""
+	for len(out) < limit {
+		form := url.Values{
+			"channel": {chatID},
+			"ts":      {threadTS},
+			"limit":   {"200"},
+		}
+		if cursor != "" {
+			form.Set("cursor", cursor)
+		}
+		var resp struct {
+			Messages         []historyMsg `json:"messages"`
+			HasMore          bool         `json:"has_more"`
+			ResponseMetadata struct {
+				NextCursor string `json:"next_cursor"`
+			} `json:"response_metadata"`
+		}
+		if err := sc.callSlackAPIFormInto(ctx, "https://slack.com/api/conversations.replies", form, &resp); err != nil {
+			return nil, err
+		}
+		for _, m := range resp.Messages {
+			// Later pages can repeat the parent message.
+			if !seen[m.TS] {
+				seen[m.TS] = true
+				out = append(out, m)
+			}
+		}
+		cursor = resp.ResponseMetadata.NextCursor
+		if !resp.HasMore || cursor == "" {
+			break
+		}
+	}
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }
 
 // sendMessage sends a message via the Slack chat.postMessage API.

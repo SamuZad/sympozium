@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -128,13 +129,36 @@ type threadState struct {
 }
 
 // threadEngagement is a TTL-bounded map of (chat,thread) → state. Lives in
-// memory in the Slack pod; lost on restart, which is acceptable: worst
-// case the bot asks for an @ once after a restart.
+// memory in the Slack pod and is lost on restart or eviction. When a
+// trigger arrives in a thread with no entry, the state is rebuilt from
+// Slack history (see hydrate) so a lost interruption is not undone; the
+// worst case is the owner having to @ the bot once after a restart.
 type threadEngagement struct {
 	mu      sync.Mutex
 	entries map[string]*threadState
 	ttl     time.Duration
+
+	// history fetches a thread's messages for hydrate. Nil disables
+	// hydration: unknown threads are treated as never seen.
+	history threadHistoryFunc
 }
+
+// historyMsg is one message of a thread as returned by
+// conversations.replies.
+type historyMsg struct {
+	User  string `json:"user"`
+	Text  string `json:"text"`
+	TS    string `json:"ts"`
+	BotID string `json:"bot_id"`
+}
+
+// threadHistoryFunc returns up to limit messages of a thread in
+// chronological order, parent first.
+type threadHistoryFunc func(chatID, threadTS string, limit int) ([]historyMsg, error)
+
+// maxHydrateMessages bounds how much history hydrate replays. A thread
+// with more earlier messages than this is assumed interrupted.
+const maxHydrateMessages = 1000
 
 func newThreadEngagement(ttl time.Duration) *threadEngagement {
 	return &threadEngagement{
@@ -188,6 +212,75 @@ func (te *threadEngagement) sweep(ctx context.Context, interval time.Duration) {
 	}
 }
 
+// hydrate rebuilds the sticky state of a thread the pod has no record of
+// by replaying its earlier messages (those before beforeTS) through
+// evaluateInbound, so ownership and interruption come out exactly as if
+// the pod had seen them live. The result is merged monotonically — an
+// owner is never replaced and interrupted is never cleared — and cached
+// even when empty so the thread is not fetched again. A returned error
+// means nothing was cached.
+func (te *threadEngagement) hydrate(cfg *slackConfig, botID, chatID, threadTS, beforeTS, channelType string) error {
+	if te.history == nil {
+		return nil
+	}
+	msgs, err := te.history(chatID, threadTS, maxHydrateMessages)
+	if err != nil {
+		return err
+	}
+
+	replay := newThreadEngagement(0)
+	complete := false
+	for _, m := range msgs {
+		if !tsBefore(m.TS, beforeTS) {
+			complete = true
+			break
+		}
+		// Same filters the live handlers apply before gating.
+		if m.User == "" || m.Text == "" || m.BotID != "" {
+			continue
+		}
+		parentTS := threadTS
+		if m.TS == threadTS {
+			parentTS = "" // the parent arrived as a top-level message
+		}
+		evaluateInbound(cfg, replay, botID, m.User, chatID, parentTS, m.TS, channelType, m.Text)
+	}
+	replayed := replay.get(chatID, threadTS)
+	tooLong := !complete && len(msgs) >= maxHydrateMessages
+
+	te.update(chatID, threadTS, func(s *threadState) {
+		if tooLong {
+			s.interrupted = true
+		}
+		if replayed == nil {
+			return
+		}
+		if s.owner == "" {
+			s.owner = replayed.owner
+		}
+		s.interrupted = s.interrupted || replayed.interrupted
+	})
+	return nil
+}
+
+// tsBefore reports whether Slack timestamp a ("seconds.micros") is
+// earlier than b.
+func tsBefore(a, b string) bool {
+	aSec, aFrac, _ := strings.Cut(a, ".")
+	bSec, bFrac, _ := strings.Cut(b, ".")
+	as, err1 := strconv.ParseInt(aSec, 10, 64)
+	bs, err2 := strconv.ParseInt(bSec, 10, 64)
+	af, err3 := strconv.ParseInt(aFrac, 10, 64)
+	bf, err4 := strconv.ParseInt(bFrac, 10, 64)
+	if err1 != nil || err2 != nil || err3 != nil || err4 != nil {
+		return a < b
+	}
+	if as != bs {
+		return as < bs
+	}
+	return af < bf
+}
+
 func (te *threadEngagement) evictStale() {
 	te.mu.Lock()
 	defer te.mu.Unlock()
@@ -229,6 +322,21 @@ func evaluateInbound(
 	inThread := threadTS != ""
 	sticky := cfg.threading && cfg.threadStickiness && inThread
 
+	// A trigger in a thread the pod has no record of (restart, eviction,
+	// or never seen) would claim ownership below. Rebuild the thread's
+	// state from Slack first so an interrupted thread stays tag-only.
+	// Only triggers pay for the lookup, and only when triggers are
+	// restricted — otherwise stickiness changes nothing.
+	if sticky && te.get(chatID, threadTS) == nil && len(cfg.allowedTriggers) > 0 &&
+		cfg.triggerAllowed(kind) && cfg.accessAllowed(senderID, chatID) {
+		if err := te.hydrate(cfg, botID, chatID, threadTS, ts, channelType); err != nil {
+			// History unknown: serve this trigger but grant no ownership,
+			// so a lost interruption cannot be undone. The next trigger
+			// retries the lookup.
+			return gateAllow, fmt.Sprintf("sticky: thread history unavailable, allowed without ownership: %v", err)
+		}
+	}
+
 	// Sticky-thread interruption: any sender other than the thread's
 	// owner permanently marks the thread interrupted, regardless of
 	// access control, trigger, or content. This runs before access
@@ -250,6 +358,15 @@ func evaluateInbound(
 	if sticky {
 		st := te.get(chatID, threadTS)
 		switch {
+		case st != nil && (st.interrupted || (st.owner != "" && st.owner != senderID)):
+			// Either a non-owner is speaking, or the thread has been
+			// interrupted (possibly with no known owner, when rebuilt
+			// from history). Both require a trigger every time; lax
+			// free-flow never returns once interrupted.
+			if !cfg.triggerAllowed(kind) {
+				return gateDrop, fmt.Sprintf("sticky interrupted/non-owner, trigger not allowed: kind=%s", kind)
+			}
+			return gateAllow, "sticky: trigger satisfied"
 		case st == nil || st.owner == "":
 			// Unowned thread: claim ownership iff this sender passes
 			// the trigger rules (e.g. opening @-mention).
@@ -262,15 +379,6 @@ func evaluateInbound(
 				}
 			})
 			return gateAllow, "sticky: claimed thread ownership"
-		case st.owner != senderID, st.interrupted:
-			// Either a non-owner is speaking, or the owner is speaking
-			// in a thread that's been interrupted. Both require a
-			// trigger every time; lax free-flow never returns once
-			// interrupted.
-			if !cfg.triggerAllowed(kind) {
-				return gateDrop, fmt.Sprintf("sticky interrupted/non-owner, trigger not allowed: kind=%s", kind)
-			}
-			return gateAllow, "sticky: trigger satisfied"
 		default:
 			// Owner free-flow.
 			te.update(chatID, threadTS, func(s *threadState) {})
