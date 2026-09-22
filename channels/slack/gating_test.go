@@ -567,3 +567,86 @@ func TestTSBefore(t *testing.T) {
 		}
 	}
 }
+
+// --- messages addressed to someone other than the bot ------------------------------
+
+func TestAddressedToOther(t *testing.T) {
+	cases := []struct {
+		name, text, botID string
+		want              bool
+	}{
+		{"leading user mention", "<@UMICHAEL> see above", "UBOT", true},
+		{"leading mention after whitespace", "  <@UMICHAEL> see above", "UBOT", true},
+		{"leading user group", "<!subteam^S123|@oncall> see above", "UBOT", true},
+		{"mention mid-sentence", "can you check what <@UMICHAEL> said?", "UBOT", false},
+		{"leading @here", "<!here> heads up", "UBOT", false},
+		{"no mention", "see above", "UBOT", false},
+		{"unknown bot id never matches", "<@UMICHAEL> see above", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := addressedToOther(tc.text, tc.botID); got != tc.want {
+				t.Fatalf("addressedToOther(%q) = %v, want %v", tc.text, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestEvaluateInbound_AddressedToOther(t *testing.T) {
+	const (
+		botID  = "UBOT"
+		alice  = "UALICE"
+		bob    = "UBOB"
+		chat   = "C1"
+		thread = "1700000000.000100"
+	)
+
+	t.Run("owner free-flow skips messages to someone else", func(t *testing.T) {
+		te := newThreadEngagement(time.Hour)
+		cfg := stickyMentionCfg()
+		evaluateInbound(cfg, te, botID, alice, chat, "", thread, "channel", "<@UBOT> hi")
+		if got, reason := evaluateInbound(cfg, te, botID, alice, chat, thread, "1700000001.000100", "channel", "<@UMICHAEL> see above"); got != gateDrop {
+			t.Fatalf("message to michael should drop, got %v (%s)", got, reason)
+		}
+		if got, _ := evaluateInbound(cfg, te, botID, alice, chat, thread, "1700000002.000100", "channel", "<@UMICHAEL> see above <@UBOT> please proceed"); got != gateAllow {
+			t.Fatalf("message tagging the bot too should run, got %v", got)
+		}
+		if got, _ := evaluateInbound(cfg, te, botID, alice, chat, thread, "1700000003.000100", "channel", "what did <@UMICHAEL> mean?"); got != gateAllow {
+			t.Fatalf("mid-sentence mention should keep free-flow, got %v", got)
+		}
+		if st := te.get(chat, thread); st.interrupted {
+			t.Fatal("owner addressing someone else must not interrupt")
+		}
+	})
+
+	t.Run("non-owner addressing someone else still interrupts", func(t *testing.T) {
+		te := newThreadEngagement(time.Hour)
+		cfg := stickyMentionCfg()
+		evaluateInbound(cfg, te, botID, alice, chat, "", thread, "channel", "<@UBOT> hi")
+		if got, _ := evaluateInbound(cfg, te, botID, bob, chat, thread, "1700000001.000100", "channel", "<@UALICE> I'll take it"); got != gateDrop {
+			t.Fatalf("got %v, want drop", got)
+		}
+		if !te.get(chat, thread).interrupted {
+			t.Fatal("bob's message must interrupt the thread")
+		}
+	})
+
+	t.Run("channel trigger skips messages to someone else", func(t *testing.T) {
+		te := newThreadEngagement(time.Hour)
+		cfg := &slackConfig{} // everything triggers
+		if got, _ := evaluateInbound(cfg, te, botID, alice, chat, "", thread, "channel", "<@UMICHAEL> lunch?"); got != gateDrop {
+			t.Fatalf("got %v, want drop", got)
+		}
+		if got, _ := evaluateInbound(cfg, te, botID, alice, chat, "", thread, "channel", "lunch?"); got != gateAllow {
+			t.Fatalf("got %v, want allow", got)
+		}
+	})
+
+	t.Run("DMs are always for the bot", func(t *testing.T) {
+		te := newThreadEngagement(time.Hour)
+		cfg := &slackConfig{allowedTriggers: csvToSet("dm")}
+		if got, _ := evaluateInbound(cfg, te, botID, alice, "D1", "", thread, "im", "<@UMICHAEL> said to ask you"); got != gateAllow {
+			t.Fatalf("got %v, want allow", got)
+		}
+	})
+}

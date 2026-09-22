@@ -88,6 +88,20 @@ func classifyKind(channelType, text, botID string) triggerKind {
 	return kindChannel
 }
 
+// addressedToOther reports whether a message that does not mention the
+// bot opens by @-mentioning someone else — a user or a user group, e.g.
+// "<@UMICHAEL> see above". Such messages are aimed at that person, not
+// the bot. @here/@channel don't count. Only meaningful for kindChannel
+// (bot not mentioned, not a DM); without a bot ID a leading mention
+// might be the bot itself, so it never matches.
+func addressedToOther(text, botID string) bool {
+	if botID == "" {
+		return false
+	}
+	t := strings.TrimSpace(text)
+	return strings.HasPrefix(t, "<@") || strings.HasPrefix(t, "<!subteam^")
+}
+
 // accessAllowed enforces the user/chat allow-deny lists. Returns false when
 // the message must be dropped before any state mutation.
 func (c *slackConfig) accessAllowed(senderID, chatID string) bool {
@@ -318,6 +332,7 @@ func evaluateInbound(
 	botID, senderID, chatID, threadTS, ts, channelType, text string,
 ) (gateDecision, string) {
 	kind := classifyKind(channelType, text, botID)
+	toOther := kind == kindChannel && addressedToOther(text, botID)
 
 	inThread := threadTS != ""
 	sticky := cfg.threading && cfg.threadStickiness && inThread
@@ -327,7 +342,7 @@ func evaluateInbound(
 	// state from Slack first so an interrupted thread stays tag-only.
 	// Only triggers pay for the lookup, and only when triggers are
 	// restricted — otherwise stickiness changes nothing.
-	if sticky && te.get(chatID, threadTS) == nil && len(cfg.allowedTriggers) > 0 &&
+	if sticky && !toOther && te.get(chatID, threadTS) == nil && len(cfg.allowedTriggers) > 0 &&
 		cfg.triggerAllowed(kind) && cfg.accessAllowed(senderID, chatID) {
 		if err := te.hydrate(cfg, botID, chatID, threadTS, ts, channelType); err != nil {
 			// History unknown: serve this trigger but grant no ownership,
@@ -352,6 +367,13 @@ func evaluateInbound(
 
 	if !cfg.accessAllowed(senderID, chatID) {
 		return gateDrop, fmt.Sprintf("access denied: sender=%s chat=%s", senderID, chatID)
+	}
+
+	// "@michael see above" is aimed at Michael, not the bot: never run,
+	// not even as owner free-flow. Runs after the interruption latch, so
+	// a non-owner addressing someone else still interrupts the thread.
+	if toOther {
+		return gateDrop, "addressed to another user"
 	}
 
 	// Sticky-thread evaluation.
