@@ -557,6 +557,18 @@ func TestParseAgentResultFromLogs_Success(t *testing.T) {
 	}
 }
 
+func TestParseAgentResultFromLogs_JSONLFinalEvent(t *testing.T) {
+	logs := `{"timestamp":"2026-09-22T10:15:36Z","level":"info","component":"harness","harness":"codex","event":"run.completed","message":"Agent run completed","data":{"result":{"status":"success","response":"all good","metrics":{"durationMs":1200,"inputTokens":10,"outputTokens":20,"toolCalls":1}}}}` + "\n"
+
+	result, errMsg, usage := parseAgentResultFromLogs(logs, logr.Discard())
+	if errMsg != "" || result != "all good" {
+		t.Fatalf("result=%q err=%q", result, errMsg)
+	}
+	if usage == nil || usage.TotalTokens != 30 || usage.ToolCalls != 1 {
+		t.Fatalf("unexpected usage: %+v", usage)
+	}
+}
+
 func TestParseAgentResultFromLogs_Error(t *testing.T) {
 	want := "OpenAI API error (HTTP 429): insufficient_quota"
 	logs := "__SYMPOZIUM_RESULT__" +

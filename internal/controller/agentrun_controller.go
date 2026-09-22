@@ -3376,9 +3376,23 @@ func (r *AgentRunReconciler) extractResultFromPod(ctx context.Context, log logr.
 	return parseAgentResultFromLogs(string(raw), log)
 }
 
-// parseAgentResultFromLogs parses the structured result marker emitted by the
-// agent-runner and extracts either the success response or the failure message.
+// parseAgentResultFromLogs parses the final Sympozium JSONL event emitted by
+// agent containers. The legacy marker is retained as a read-only fallback so
+// rolling upgrades do not lose completed results.
 func parseAgentResultFromLogs(logs string, log logr.Logger) (string, string, *sympoziumv1alpha1.TokenUsage) {
+	for _, line := range reverseLogLines(logs) {
+		var event struct {
+			Event string `json:"event"`
+			Data  struct {
+				Result json.RawMessage `json:"result"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal([]byte(line), &event); err != nil || (event.Event != "run.completed" && event.Event != "run.failed") || len(event.Data.Result) == 0 {
+			continue
+		}
+		return parseAgentResultJSON(event.Data.Result, log)
+	}
+
 	startIdx := strings.LastIndex(logs, resultMarkerStart)
 	if startIdx < 0 {
 		if fallbackErr := extractLikelyProviderErrorFromLogs(logs); fallbackErr != "" {
@@ -3393,6 +3407,20 @@ func parseAgentResultFromLogs(logs string, log logr.Logger) (string, string, *sy
 	}
 	jsonStr := strings.TrimSpace(payload[:endIdx])
 
+	return parseAgentResultJSON([]byte(jsonStr), log)
+}
+
+func reverseLogLines(logs string) []string {
+	lines := strings.Split(logs, "\n")
+	for i, j := 0, len(lines)-1; i < j; i, j = i+1, j-1 {
+		lines[i], lines[j] = lines[j], lines[i]
+	}
+	return lines
+}
+
+// parseAgentResultJSON extracts either a success response or failure message
+// from the stable result payload used in both JSONL events and legacy markers.
+func parseAgentResultJSON(payload []byte, log logr.Logger) (string, string, *sympoziumv1alpha1.TokenUsage) {
 	// Parse the full agent result including metrics.
 	var parsed struct {
 		Status   string `json:"status"`
@@ -3405,7 +3433,7 @@ func parseAgentResultFromLogs(logs string, log logr.Logger) (string, string, *sy
 			ToolCalls    int   `json:"toolCalls"`
 		} `json:"metrics"`
 	}
-	if err := json.Unmarshal([]byte(jsonStr), &parsed); err != nil {
+	if err := json.Unmarshal(payload, &parsed); err != nil {
 		log.V(1).Info("could not parse result JSON", "err", err)
 		return "", "", nil
 	}
