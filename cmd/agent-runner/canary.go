@@ -301,8 +301,6 @@ func emitCanaryResult(result string) {
 	_ = os.MkdirAll("/ipc/output", 0o755)
 	writeJSON("/ipc/output/result.json", res)
 	_ = os.WriteFile("/ipc/done", []byte("done"), 0o644)
-	if markerBytes, err := json.Marshal(res); err == nil {
-		fmt.Fprintf(os.Stdout, "\n__SYMPOZIUM_RESULT__%s__SYMPOZIUM_END__\n", string(markerBytes))
-	}
+	emitAgentResult(res)
 	log.Println("canary health checks complete")
 }

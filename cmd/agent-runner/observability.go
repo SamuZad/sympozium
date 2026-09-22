@@ -17,6 +17,8 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/sympozium-ai/sympozium/internal/harness"
 )
 
 type agentObservability struct {
@@ -275,11 +277,7 @@ func formatTraceparent(sc trace.SpanContext) string {
 }
 
 func logWithTrace(ctx context.Context, level, msg string, fields map[string]any) {
-	entry := map[string]any{
-		"time":  time.Now().UTC().Format(time.RFC3339Nano),
-		"level": level,
-		"msg":   msg,
-	}
+	entry := make(map[string]any, len(fields)+2)
 	for k, v := range fields {
 		entry[k] = v
 	}
@@ -287,9 +285,5 @@ func logWithTrace(ctx context.Context, level, msg string, fields map[string]any)
 		entry["trace_id"] = meta["trace_id"]
 		entry["span_id"] = meta["span_id"]
 	}
-	line, err := json.Marshal(entry)
-	if err != nil {
-		return
-	}
-	log.Println(string(line))
+	harness.EmitLog(os.Stderr, "agent-runner", level, "agent.log", msg, "stderr", entry)
 }

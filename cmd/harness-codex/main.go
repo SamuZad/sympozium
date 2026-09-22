@@ -42,12 +42,13 @@ const harnessName = "codex"
 
 func main() {
 	if err := run(context.Background()); err != nil {
-		fmt.Fprintln(os.Stderr, "harness-codex:", err)
+		harness.EmitLog(os.Stderr, harnessName, "error", "run.failed", "Agent run failed", "stderr", map[string]any{"error": err.Error()})
 		os.Exit(1)
 	}
 }
 
 func run(ctx context.Context) error {
+	_ = os.Setenv("HARNESS_NAME", harnessName)
 	// Tag codex's native OTel emissions with `harness=codex` so dashboards
 	// can split metrics by harness. The Rust OTel SDK that codex uses
 	// honors OTEL_RESOURCE_ATTRIBUTES per spec; the controller has already
@@ -262,7 +263,7 @@ func writeConfigTOML(codexHome string) error {
 	rendered := sb.String()
 	// Mirror the final TOML to stderr so we can see exactly what codex parses
 	// without execing into the pod. The TOML never contains the API key.
-	fmt.Fprintln(os.Stderr, "harness-codex: rendered config.toml:\n"+rendered)
+	harness.EmitLog(os.Stderr, harnessName, "info", "config.rendered", "Rendered Codex configuration", "stderr", map[string]any{"config": rendered})
 	return os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(rendered), 0o644)
 }
 
@@ -374,7 +375,8 @@ func runCodex(ctx context.Context, o *harness.Observability) (string, *codexRun,
 		task,
 	}
 	cmd := exec.CommandContext(ctx, "codex", args...)
-	cmd.Stderr = os.Stderr
+	stderr := harness.NewProcessOutputWriter(os.Stderr, harnessName, "stderr")
+	cmd.Stderr = stderr
 	cmd.Stdin = nil
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -384,7 +386,10 @@ func runCodex(ctx context.Context, o *harness.Observability) (string, *codexRun,
 		harness.MarkSpanError(span, err)
 		return "", run, fmt.Errorf("start codex: %w", err)
 	}
-	run.consume(stdout, os.Stdout)
+	processOut := harness.NewProcessOutputWriter(os.Stdout, harnessName, "stdout")
+	run.consume(stdout, processOut)
+	processOut.Flush()
+	stderr.Flush()
 	runErr := cmd.Wait()
 	if runErr != nil {
 		harness.MarkSpanError(span, runErr)

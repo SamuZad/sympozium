@@ -58,12 +58,13 @@ const mcpConfigFile = "sympozium-mcp.json"
 
 func main() {
 	if err := run(context.Background()); err != nil {
-		fmt.Fprintln(os.Stderr, "harness-claude-code:", err)
+		harness.EmitLog(os.Stderr, harnessName, "error", "run.failed", "Agent run failed", "stderr", map[string]any{"error": err.Error()})
 		os.Exit(1)
 	}
 }
 
 func run(ctx context.Context) error {
+	_ = os.Setenv("HARNESS_NAME", harnessName)
 	// Tag Claude Code's native OTel emissions with `harness=claude-code` so
 	// dashboards can split metrics by harness. The JS OTel SDK honors
 	// OTEL_RESOURCE_ATTRIBUTES per spec; the controller has already populated

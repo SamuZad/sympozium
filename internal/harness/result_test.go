@@ -11,35 +11,32 @@ import (
 	"github.com/sympozium-ai/sympozium/internal/ipc"
 )
 
-// parseMarker mirrors parseAgentResultFromLogs in internal/controller: take the
-// last marker start, the first marker end after it, and unmarshal the JSON in
-// between.
-func parseMarker(t *testing.T, logs string) (status, response, errMsg string, durationMs int64) {
+// parseResultEvent mirrors the controller's final JSONL event extraction.
+func parseResultEvent(t *testing.T, logs string) (status, response, errMsg string, durationMs int64) {
 	t.Helper()
-	start := strings.LastIndex(logs, ResultMarkerStart)
-	if start < 0 {
-		t.Fatalf("stdout has no %s marker:\n%s", ResultMarkerStart, logs)
-	}
-	payload := logs[start+len(ResultMarkerStart):]
-	end := strings.Index(payload, ResultMarkerEnd)
-	if end < 0 {
-		t.Fatalf("stdout has no %s marker after start:\n%s", ResultMarkerEnd, logs)
-	}
 	var parsed struct {
-		Status   string `json:"status"`
-		Response string `json:"response"`
-		Error    string `json:"error"`
-		Metrics  struct {
-			DurationMs int64 `json:"durationMs"`
-		} `json:"metrics"`
+		Event string `json:"event"`
+		Data  struct {
+			Result struct {
+				Status   string `json:"status"`
+				Response string `json:"response"`
+				Error    string `json:"error"`
+				Metrics  struct {
+					DurationMs int64 `json:"durationMs"`
+				} `json:"metrics"`
+			} `json:"result"`
+		} `json:"data"`
 	}
-	if err := json.Unmarshal([]byte(strings.TrimSpace(payload[:end])), &parsed); err != nil {
-		t.Fatalf("marker payload is not valid JSON: %v\n%s", err, payload[:end])
+	if err := json.Unmarshal([]byte(strings.TrimSpace(logs)), &parsed); err != nil {
+		t.Fatalf("result event is not valid JSON: %v\n%s", err, logs)
 	}
-	return parsed.Status, parsed.Response, parsed.Error, parsed.Metrics.DurationMs
+	if parsed.Event != "run.completed" && parsed.Event != "run.failed" {
+		t.Fatalf("event = %q, want final run event", parsed.Event)
+	}
+	return parsed.Data.Result.Status, parsed.Data.Result.Response, parsed.Data.Result.Error, parsed.Data.Result.Metrics.DurationMs
 }
 
-func TestWriteResultWritesFileAndPrintsMarker(t *testing.T) {
+func TestWriteResultWritesFileAndEmitsJSONL(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "output", "result.json")
 	var stdout bytes.Buffer
 
@@ -67,24 +64,17 @@ func TestWriteResultWritesFileAndPrintsMarker(t *testing.T) {
 	}
 
 	// Log path: what the controller parses into status.result.
-	status, response, errMsg, durationMs := parseMarker(t, stdout.String())
+	status, response, errMsg, durationMs := parseResultEvent(t, stdout.String())
 	if status != "success" || response != res.Response || errMsg != "" || durationMs != 1234 {
 		t.Fatalf("marker mismatch: status=%q response=%q err=%q durationMs=%d", status, response, errMsg, durationMs)
 	}
 
-	// The marker must be a single line so it survives the controller's
-	// TailLines window intact, and it must start on its own line.
-	line := stdout.String()
-	if !strings.HasPrefix(line, "\n") {
-		t.Fatalf("marker should start on a fresh line, got %q", line[:1])
-	}
-	body := strings.TrimSpace(line)
-	if strings.Contains(body, "\n") {
-		t.Fatalf("marker must be single-line, got:\n%s", body)
+	if strings.Count(stdout.String(), "\n") != 1 {
+		t.Fatalf("result event must be one JSONL line, got:\n%s", stdout.String())
 	}
 }
 
-func TestWriteResultPrintsMarkerOnError(t *testing.T) {
+func TestWriteResultEmitsJSONLOnError(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "output", "result.json")
 	var stdout bytes.Buffer
 
@@ -93,13 +83,13 @@ func TestWriteResultPrintsMarkerOnError(t *testing.T) {
 	if err := writeResult(res, out, &stdout); err != nil {
 		t.Fatalf("writeResult: %v", err)
 	}
-	status, response, errMsg, _ := parseMarker(t, stdout.String())
+	status, response, errMsg, _ := parseResultEvent(t, stdout.String())
 	if status != "error" || errMsg != res.Error || response != "partial" {
 		t.Fatalf("marker mismatch: status=%q response=%q err=%q", status, response, errMsg)
 	}
 }
 
-func TestWriteResultMarkerOmitsAttachments(t *testing.T) {
+func TestWriteResultEventOmitsAttachments(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "output", "result.json")
 	var stdout bytes.Buffer
 
@@ -128,18 +118,18 @@ func TestWriteResultMarkerOmitsAttachments(t *testing.T) {
 		t.Fatalf("result.json lost attachments: %+v", fromFile.Attachments)
 	}
 
-	// Marker carries the reply but not the attachment payload.
+	// Log event carries the reply but not the attachment payload.
 	logs := stdout.String()
 	if strings.Contains(logs, "attachments") || strings.Contains(logs, "QUJDQUJD") {
-		t.Fatalf("marker must not include attachments:\n%s", logs)
+		t.Fatalf("result event must not include attachments:\n%s", logs)
 	}
-	status, response, _, _ := parseMarker(t, logs)
+	status, response, _, _ := parseResultEvent(t, logs)
 	if status != "success" || response != res.Response {
 		t.Fatalf("marker mismatch: status=%q response=%q", status, response)
 	}
 }
 
-func TestWriteResultPrintsMarkerWhenFileWriteFails(t *testing.T) {
+func TestWriteResultEmitsEventWhenFileWriteFails(t *testing.T) {
 	// A regular file where the output *directory* should be makes MkdirAll fail,
 	// simulating a missing/unwritable IPC volume.
 	blocker := filepath.Join(t.TempDir(), "output")
@@ -154,8 +144,41 @@ func TestWriteResultPrintsMarkerWhenFileWriteFails(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected file write error")
 	}
-	status, response, _, _ := parseMarker(t, stdout.String())
+	status, response, _, _ := parseResultEvent(t, stdout.String())
 	if status != "success" || response != res.Response {
-		t.Fatalf("marker should be printed despite file error, got status=%q response=%q", status, response)
+		t.Fatalf("event should be emitted despite file error, got status=%q response=%q", status, response)
+	}
+}
+
+func TestProcessOutputWriterAlwaysEmitsJSONL(t *testing.T) {
+	var out bytes.Buffer
+	w := NewProcessOutputWriter(&out, "codex", "stdout")
+	if _, err := w.Write([]byte(`{"type":"item.completed"}` + "\nplain text")); err != nil {
+		t.Fatal(err)
+	}
+	w.Flush()
+
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("got %d lines, want 2: %s", len(lines), out.String())
+	}
+	for _, line := range lines {
+		var event LogEvent
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatalf("not valid JSONL: %v", err)
+		}
+		if event.Message != "Native process output" || event.Event != "process.output" || event.Harness != "codex" {
+			t.Fatalf("unexpected envelope: %+v", event)
+		}
+	}
+	var first map[string]any
+	_ = json.Unmarshal([]byte(lines[0]), &first)
+	if first["data"].(map[string]any)["native_event"] == nil {
+		t.Fatalf("native JSON was not preserved: %s", lines[0])
+	}
+	var second map[string]any
+	_ = json.Unmarshal([]byte(lines[1]), &second)
+	if second["data"].(map[string]any)["raw_message"] != "plain text" {
+		t.Fatalf("plain text was not preserved: %s", lines[1])
 	}
 }

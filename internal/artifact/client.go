@@ -15,6 +15,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/sympozium-ai/sympozium/internal/jsonlog"
 )
 
 // Client talks to the artifact-server using the pod's ServiceAccount token.
@@ -33,7 +35,7 @@ func NewClientFromEnv() *Client {
 	}
 	token, err := readServiceAccountToken()
 	if err != nil || token == "" {
-		fmt.Fprintf(os.Stderr, "artifact: client disabled (no SA token): %v\n", err)
+		jsonlog.Emit(os.Stderr, "artifact", os.Getenv("HARNESS_NAME"), "warn", "artifact.client.disabled", "Artifact client is disabled", "stderr", map[string]any{"error": err.Error()})
 		return nil
 	}
 	return &Client{

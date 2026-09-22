@@ -93,7 +93,8 @@ func runClaude(ctx context.Context, o *harness.Observability, opts claudeOptions
 	cmd.WaitDelay = 15 * time.Second
 
 	stderrTail := newTailBuffer(64 * 1024)
-	cmd.Stderr = io.MultiWriter(os.Stderr, stderrTail)
+	stderr := harness.NewProcessOutputWriter(os.Stderr, harnessName, "stderr")
+	cmd.Stderr = io.MultiWriter(stderr, stderrTail)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -105,7 +106,10 @@ func runClaude(ctx context.Context, o *harness.Observability, opts claudeOptions
 	}
 
 	result := &streamResult{}
-	result.consume(stdout, os.Stdout)
+	processOut := harness.NewProcessOutputWriter(os.Stdout, harnessName, "stdout")
+	result.consume(stdout, processOut)
+	processOut.Flush()
+	stderr.Flush()
 
 	runErr := cmd.Wait()
 	if runErr != nil {
