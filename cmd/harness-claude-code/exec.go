@@ -222,7 +222,6 @@ func (s *streamResult) consumeLine(line []byte) {
 				if b.ID != "" {
 					s.pendingTools[b.ID] = b.Name
 				}
-				harness.Logf(harnessName, "tool_use %s", b.Name)
 			case "text":
 				if strings.TrimSpace(b.Text) != "" {
 					s.LastAssistantText = b.Text
