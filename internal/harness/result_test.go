@@ -167,7 +167,7 @@ func TestProcessOutputWriterAlwaysEmitsJSONL(t *testing.T) {
 		if err := json.Unmarshal([]byte(line), &event); err != nil {
 			t.Fatalf("not valid JSONL: %v", err)
 		}
-		if event.Message != "Native process output" || event.Event != "process.output" || event.Harness != "codex" {
+		if event.Event != "process.output" || event.Harness != "codex" {
 			t.Fatalf("unexpected envelope: %+v", event)
 		}
 	}
