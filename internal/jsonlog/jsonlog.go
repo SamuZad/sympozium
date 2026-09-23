@@ -115,12 +115,18 @@ func humanMessage(event map[string]any) string {
 		return firstNonEmpty(nestedString(event, "error", "message"), stringValue(event["message"]), "Turn failed")
 	}
 	if typeName == "result" {
+		if boolValue(event["is_error"]) || strings.HasPrefix(stringValue(event["subtype"]), "error") {
+			return firstNonEmpty(stringValue(event["result"]), eventErrors(event["errors"]), "Run failed: "+stringValue(event["subtype"]), "Run failed")
+		}
 		return firstNonEmpty(stringValue(event["result"]), "Run completed")
 	}
 	if typeName == "assistant" || typeName == "user" {
 		if msg := streamMessage(event); msg != "" {
 			return msg
 		}
+	}
+	if typeName == "system" {
+		return claudeSystemMessage(event)
 	}
 	if item, ok := event["item"].(map[string]any); ok {
 		return itemMessage(typeName, item)
@@ -136,7 +142,7 @@ func humanMessage(event map[string]any) string {
 	case "turn.completed":
 		return "Turn completed"
 	}
-	return firstNonEmpty(stringValue(event["message"]), typeName, "Native process event")
+	return firstNonEmpty(stringValue(event["message"]), stringValue(event["text"]), describeUnknownEvent(event), "Native process event")
 }
 
 func itemMessage(eventType string, item map[string]any) string {
@@ -168,9 +174,22 @@ func itemMessage(eventType string, item map[string]any) string {
 
 func streamMessage(event map[string]any) string {
 	message, _ := event["message"].(map[string]any)
-	content, _ := message["content"].([]any)
+	if message == nil {
+		return strings.TrimSpace(stringValue(event["text"]))
+	}
+	return renderContent(message["content"])
+}
+
+func renderContent(content any) string {
+	if text := strings.TrimSpace(stringValue(content)); text != "" {
+		return text
+	}
+	if block, ok := content.(map[string]any); ok {
+		return renderContent([]any{block})
+	}
+	contentBlocks, _ := content.([]any)
 	var parts []string
-	for _, v := range content {
+	for _, v := range contentBlocks {
 		block, _ := v.(map[string]any)
 		switch stringValue(block["type"]) {
 		case "text":
@@ -180,12 +199,35 @@ func streamMessage(event map[string]any) string {
 		case "tool_use":
 			parts = append(parts, "Tool requested: "+stringValue(block["name"]))
 		case "tool_result":
-			if text := strings.TrimSpace(stringValue(block["content"])); text != "" {
+			if text := renderContent(block["content"]); text != "" {
+				parts = append(parts, text)
+			} else {
+				parts = append(parts, "Tool result received")
+			}
+		case "thinking":
+			if text := strings.TrimSpace(firstNonEmpty(stringValue(block["thinking"]), stringValue(block["text"]))); text != "" {
 				parts = append(parts, text)
 			}
 		}
 	}
 	return strings.Join(parts, "\n")
+}
+
+func claudeSystemMessage(event map[string]any) string {
+	subtype := stringValue(event["subtype"])
+	if subtype == "init" {
+		if model := stringValue(event["model"]); model != "" {
+			return "Claude session started: " + model
+		}
+		return "Claude session started"
+	}
+	if msg := firstNonEmpty(stringValue(event["message"]), stringValue(event["text"])); msg != "" {
+		return msg
+	}
+	if subtype != "" {
+		return "Claude system event: " + subtype
+	}
+	return "Claude system event"
 }
 
 func nestedString(m map[string]any, key, child string) string {
@@ -212,4 +254,40 @@ func statusSuffix(status string) string {
 		return ""
 	}
 	return " (" + status + ")"
+}
+
+func boolValue(v any) bool {
+	b, _ := v.(bool)
+	return b
+}
+
+func eventErrors(v any) string {
+	items, ok := v.([]any)
+	if !ok {
+		return strings.TrimSpace(stringValue(v))
+	}
+	var messages []string
+	for _, item := range items {
+		switch value := item.(type) {
+		case string:
+			messages = append(messages, value)
+		case map[string]any:
+			if msg := stringValue(value["message"]); msg != "" {
+				messages = append(messages, msg)
+			}
+		}
+	}
+	return strings.Join(messages, "; ")
+}
+
+func describeUnknownEvent(event map[string]any) string {
+	typeName := stringValue(event["type"])
+	if subtype := stringValue(event["subtype"]); subtype != "" {
+		typeName += "/" + subtype
+	}
+	payload, err := json.Marshal(event)
+	if err != nil {
+		return typeName
+	}
+	return "Native event " + typeName + ": " + string(payload)
 }

@@ -33,3 +33,25 @@ func TestHumanMessageClaudeText(t *testing.T) {
 		t.Fatalf("humanMessage() = %q", got)
 	}
 }
+
+func TestHumanMessageClaudeSystemAndNestedToolResult(t *testing.T) {
+	system := map[string]any{"type": "system", "subtype": "init", "model": "claude-opus"}
+	if got := humanMessage(system); got != "Claude session started: claude-opus" {
+		t.Fatalf("system message = %q", got)
+	}
+	toolResult := map[string]any{"type": "user", "message": map[string]any{"content": []any{map[string]any{"type": "tool_result", "content": []any{map[string]any{"type": "text", "text": "42 rows returned"}}}}}}
+	if got := humanMessage(toolResult); got != "42 rows returned" {
+		t.Fatalf("tool result message = %q", got)
+	}
+}
+
+func TestHumanMessageClaudeFailureAndUnknownEvent(t *testing.T) {
+	failure := map[string]any{"type": "result", "subtype": "error_during_execution", "is_error": true, "errors": []any{map[string]any{"message": "rate limited"}}}
+	if got := humanMessage(failure); got != "rate limited" {
+		t.Fatalf("failure message = %q", got)
+	}
+	unknown := map[string]any{"type": "future_event", "subtype": "progress", "detail": "new CLI output"}
+	if got := humanMessage(unknown); got != `Native event future_event/progress: {"detail":"new CLI output","subtype":"progress","type":"future_event"}` {
+		t.Fatalf("unknown message = %q", got)
+	}
+}
