@@ -133,7 +133,8 @@ func (c *slackConfig) triggerAllowed(k triggerKind) bool {
 //     thread's `owner`.
 //   - Any message from anyone other than the owner — regardless of
 //     access, trigger, or content — permanently marks the thread
-//     `interrupted`.
+//     `interrupted`, as does any message (owner's included) that opens
+//     by addressing someone other than the bot.
 //   - Once interrupted, every message (including from the owner) must
 //     satisfy the trigger rules (e.g. @-mention) to be processed.
 type threadState struct {
@@ -354,11 +355,14 @@ func evaluateInbound(
 
 	// Sticky-thread interruption: any sender other than the thread's
 	// owner permanently marks the thread interrupted, regardless of
-	// access control, trigger, or content. This runs before access
-	// control so even a denied user's message latches the interrupt.
+	// access control, trigger, or content. So does anyone — the owner
+	// included — opening a message by addressing someone else ("@michael
+	// see above"): the thread is now a conversation between people. This
+	// runs before access control so even a denied user's message latches
+	// the interrupt.
 	if sticky {
 		st := te.get(chatID, threadTS)
-		if st != nil && st.owner != "" && st.owner != senderID {
+		if toOther || (st != nil && st.owner != "" && st.owner != senderID) {
 			te.update(chatID, threadTS, func(s *threadState) {
 				s.interrupted = true
 			})
@@ -370,8 +374,8 @@ func evaluateInbound(
 	}
 
 	// "@michael see above" is aimed at Michael, not the bot: never run,
-	// not even as owner free-flow. Runs after the interruption latch, so
-	// a non-owner addressing someone else still interrupts the thread.
+	// not even as owner free-flow. In a sticky thread the latch above
+	// has already made the rest of the thread tag-only.
 	if toOther {
 		return gateDrop, "addressed to another user"
 	}

@@ -601,21 +601,36 @@ func TestEvaluateInbound_AddressedToOther(t *testing.T) {
 		thread = "1700000000.000100"
 	)
 
-	t.Run("owner free-flow skips messages to someone else", func(t *testing.T) {
+	t.Run("owner addressing someone else makes the thread tag-only", func(t *testing.T) {
 		te := newThreadEngagement(time.Hour)
 		cfg := stickyMentionCfg()
 		evaluateInbound(cfg, te, botID, alice, chat, "", thread, "channel", "<@UBOT> hi")
-		if got, reason := evaluateInbound(cfg, te, botID, alice, chat, thread, "1700000001.000100", "channel", "<@UMICHAEL> see above"); got != gateDrop {
+		if got, _ := evaluateInbound(cfg, te, botID, alice, chat, thread, "1700000001.000100", "channel", "still free-flow"); got != gateAllow {
+			t.Fatalf("owner free-flow should work before addressing anyone, got %v", got)
+		}
+		if got, reason := evaluateInbound(cfg, te, botID, alice, chat, thread, "1700000002.000100", "channel", "<@UMICHAEL> look at this"); got != gateDrop {
 			t.Fatalf("message to michael should drop, got %v (%s)", got, reason)
 		}
-		if got, _ := evaluateInbound(cfg, te, botID, alice, chat, thread, "1700000002.000100", "channel", "<@UMICHAEL> see above <@UBOT> please proceed"); got != gateAllow {
+		if !te.get(chat, thread).interrupted {
+			t.Fatal("owner addressing someone else must interrupt the thread")
+		}
+		if got, _ := evaluateInbound(cfg, te, botID, alice, chat, thread, "1700000003.000100", "channel", "jump"); got != gateDrop {
+			t.Fatalf("plain follow-up after addressing someone else must drop, got %v", got)
+		}
+		if got, _ := evaluateInbound(cfg, te, botID, alice, chat, thread, "1700000004.000100", "channel", "<@UMICHAEL> see above <@UBOT> please proceed"); got != gateAllow {
 			t.Fatalf("message tagging the bot too should run, got %v", got)
 		}
-		if got, _ := evaluateInbound(cfg, te, botID, alice, chat, thread, "1700000003.000100", "channel", "what did <@UMICHAEL> mean?"); got != gateAllow {
-			t.Fatalf("mid-sentence mention should keep free-flow, got %v", got)
+	})
+
+	t.Run("mid-sentence mention keeps free-flow", func(t *testing.T) {
+		te := newThreadEngagement(time.Hour)
+		cfg := stickyMentionCfg()
+		evaluateInbound(cfg, te, botID, alice, chat, "", thread, "channel", "<@UBOT> hi")
+		if got, _ := evaluateInbound(cfg, te, botID, alice, chat, thread, "1700000001.000100", "channel", "what did <@UMICHAEL> mean?"); got != gateAllow {
+			t.Fatalf("got %v, want allow", got)
 		}
-		if st := te.get(chat, thread); st.interrupted {
-			t.Fatal("owner addressing someone else must not interrupt")
+		if te.get(chat, thread).interrupted {
+			t.Fatal("mid-sentence mention must not interrupt")
 		}
 	})
 
@@ -649,4 +664,26 @@ func TestEvaluateInbound_AddressedToOther(t *testing.T) {
 			t.Fatalf("got %v, want allow", got)
 		}
 	})
+}
+
+// TestHydrate_OwnerAddressingOtherIsReplayed: an owner's "@michael ..." seen
+// only in history still leaves the thread tag-only after a restart.
+func TestHydrate_OwnerAddressingOtherIsReplayed(t *testing.T) {
+	const (
+		botID  = "UBOT"
+		alice  = "UALICE"
+		chat   = "C1"
+		thread = "1700000000.000100"
+	)
+	h := &fakeHistory{msgs: []historyMsg{
+		{User: alice, Text: "<@UBOT> hi", TS: thread},
+		{User: alice, Text: "<@UMICHAEL> look at this", TS: "1700000001.000100"},
+	}}
+	te := newThreadEngagement(time.Hour)
+	te.history = h.fetch
+
+	evaluateInbound(stickyMentionCfg(), te, botID, alice, chat, thread, "1700000002.000100", "channel", "<@UBOT> jump")
+	if st := te.get(chat, thread); st == nil || !st.interrupted {
+		t.Fatalf("expected interrupted thread after replay, got %+v", st)
+	}
 }

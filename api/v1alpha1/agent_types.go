@@ -372,7 +372,10 @@ type SlackChannelOptions struct {
 	// without re-mentioning. The first sender to address the bot in
 	// a thread becomes the thread's "owner". Any message from anyone
 	// other than the owner — even an @-mention from a denied user —
-	// permanently marks the thread "interrupted". Once interrupted,
+	// permanently marks the thread "interrupted", as does a message
+	// from anyone (the owner included) that opens by @-mentioning
+	// someone other than the bot without also mentioning the bot
+	// (e.g. "@michael see above"). Once interrupted,
 	// every subsequent message (including from the owner) must
 	// satisfy AllowedTriggers (e.g. @-mention) to be processed; the
 	// lax free-flow mode never resumes for that thread. Has no
