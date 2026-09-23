@@ -71,7 +71,7 @@ Running without a subcommand launches the interactive TUI.`,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			// Skip K8s client init for commands that don't need it.
 			switch cmd.Name() {
-			case "version", "install", "uninstall", "onboard", "tui", "sympozium", "serve":
+			case "version", "install", "upgrade", "update", "uninstall", "onboard", "tui", "sympozium", "serve":
 				return nil
 			}
 			return initClient()
@@ -93,6 +93,8 @@ Running without a subcommand launches the interactive TUI.`,
 
 	rootCmd.AddCommand(
 		newInstallCmd(),
+		newUpgradeCmd(),
+		newUpdateCmd(),
 		newDoctorCmd(),
 		newUninstallCmd(),
 		newOnboardCmd(),
@@ -1398,7 +1400,7 @@ layers (enduring native parents); it requires the operator-reviewed
 	cmd.Flags().BoolVar(&noErgoz, "no-ergoz", false, "Do not install ergoz (accelerator power telemetry) into ergoz-system")
 	cmd.Flags().BoolVar(&cellnHostInstaller, "celln-host-installer", false, "Deploy the privileged host-installer DaemonSet (bare-metal systemd dispatcher) instead of the in-cluster pod dispatcher; requires --celln-backend")
 	cmd.Flags().StringArrayVar(&cellnBackends, "celln-backend", nil, "Celln router dispatcher origin(s) http://host:port (repeatable); defaults to the in-cluster celln-dispatcher Service")
-	cmd.Flags().StringVar(&cellnRouterImage, "celln-router-image", "", "Celln router image repo:tag or repo@sha256:... (default ghcr.io/sympozium-ai/celln:v0.5.28)")
+	cmd.Flags().StringVar(&cellnRouterImage, "celln-router-image", "", "Celln router image repo:tag or repo@sha256:... (default "+defaultCellnRouterRepo+":"+defaultCellnRouterTag+")")
 	cmd.Flags().StringVar(&cellnInstallerImage, "celln-installer-image", "", "Celln host-installer image repo:tag (default ghcr.io/sympozium-ai/sympozium/celln-installer, tagged with this release; a source build uses the embedded chart's appVersion, never 'latest')")
 	cmd.Flags().IntVar(&cellnRouterReplicas, "celln-router-replicas", 1, "Celln router replicas for the generated ReadWriteOnce ownership PVC")
 	cmd.Flags().BoolVar(&cellnNative, "celln-native", false, "Also install the native Celln starter catalogue and grant layers (requires the operator --celln-native-* inputs)")
@@ -1421,7 +1423,7 @@ func cellnInstallSetValues(ctx context.Context, routerImage, installerImage stri
 	if replicas <= 0 {
 		replicas = 1
 	}
-	routerRepo, routerRef, routerIsDigest := splitImageRef(routerImage, "ghcr.io/sympozium-ai/celln", "v0.5.28")
+	routerRepo, routerRef, routerIsDigest := splitImageRef(routerImage, defaultCellnRouterRepo, defaultCellnRouterTag)
 	releaseTag, _, err := defaultReleaseTag()
 	if err != nil {
 		return nil, err
@@ -1476,7 +1478,11 @@ func cellnInstallSetValues(ctx context.Context, routerImage, installerImage stri
 	return vals, nil
 }
 
-const defaultCellnInstallerRepo = "ghcr.io/sympozium-ai/sympozium/celln-installer"
+const (
+	defaultCellnInstallerRepo = "ghcr.io/sympozium-ai/sympozium/celln-installer"
+	defaultCellnRouterRepo    = "ghcr.io/sympozium-ai/celln"
+	defaultCellnRouterTag     = "v0.5.28"
+)
 
 // sourceBuildInstallerNote says which installer tag a source build chose and
 // why; empty for a release build or when --celln-installer-image names a tag.
