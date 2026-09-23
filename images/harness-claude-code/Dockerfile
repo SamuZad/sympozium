@@ -25,7 +25,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -mod=mod -ldflags="-s -w" -o /sympozium-tool ./cmd/sympozium-tool
 
 FROM node:22-bookworm-slim
-ARG CLAUDE_CODE_VERSION=2.1.263
+ARG CLAUDE_CODE_VERSION=2.1.280
 
 # Install Claude Code + the tools it leans on. git is required for most of
 # Claude Code's repo-aware behaviour; jq/curl are cheap conveniences for the
