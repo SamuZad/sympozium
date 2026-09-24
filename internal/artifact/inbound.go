@@ -7,8 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/sympozium-ai/sympozium/internal/jsonlog"
 )
 
 // InboundRef mirrors the artifact-referencing fields of channel.Attachment as
@@ -31,17 +29,17 @@ func MaterializeInbound(ctx context.Context, workspaceDir string) []string {
 	}
 	var refs []InboundRef
 	if err := json.Unmarshal([]byte(raw), &refs); err != nil {
-		jsonlog.Emit(os.Stderr, "artifact", os.Getenv("HARNESS_NAME"), "warn", "artifact.inbound.invalid", "Invalid inbound attachment metadata", "stderr", map[string]any{"error": err.Error()})
+		fmt.Fprintf(os.Stderr, "artifact: invalid INBOUND_ATTACHMENTS: %v\n", err)
 		return nil
 	}
 	client := NewClientFromEnv()
 	if client == nil {
-		jsonlog.Emit(os.Stderr, "artifact", os.Getenv("HARNESS_NAME"), "warn", "artifact.inbound.unavailable", "Inbound attachments cannot be materialized", "stderr", nil)
+		fmt.Fprintln(os.Stderr, "artifact: inbound attachments present but artifact-server is not configured")
 		return nil
 	}
 	dir := filepath.Join(workspaceDir, "attachments")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		jsonlog.Emit(os.Stderr, "artifact", os.Getenv("HARNESS_NAME"), "warn", "artifact.inbound.mkdir_failed", "Could not create attachment directory", "stderr", map[string]any{"error": err.Error(), "path": dir})
+		fmt.Fprintf(os.Stderr, "artifact: mkdir %s: %v\n", dir, err)
 		return nil
 	}
 	var saved []string
@@ -52,7 +50,7 @@ func MaterializeInbound(ctx context.Context, workspaceDir string) []string {
 		}
 		data, fetchedName, err := client.Fetch(ctx, ref.ArtifactID)
 		if err != nil {
-			jsonlog.Emit(os.Stderr, "artifact", os.Getenv("HARNESS_NAME"), "warn", "artifact.inbound.fetch_failed", "Could not fetch inbound attachment", "stderr", map[string]any{"error": err.Error(), "artifact_id": ref.ArtifactID})
+			fmt.Fprintf(os.Stderr, "artifact: fetch inbound attachment %s: %v\n", ref.ArtifactID, err)
 			continue
 		}
 		name := filepath.Base(strings.TrimSpace(ref.Filename))
@@ -68,7 +66,7 @@ func MaterializeInbound(ctx context.Context, workspaceDir string) []string {
 		seen[name] = true
 		path := filepath.Join(dir, name)
 		if err := os.WriteFile(path, data, 0o644); err != nil {
-			jsonlog.Emit(os.Stderr, "artifact", os.Getenv("HARNESS_NAME"), "warn", "artifact.inbound.write_failed", "Could not write inbound attachment", "stderr", map[string]any{"error": err.Error(), "path": path})
+			fmt.Fprintf(os.Stderr, "artifact: write %s: %v\n", path, err)
 			continue
 		}
 		saved = append(saved, path)

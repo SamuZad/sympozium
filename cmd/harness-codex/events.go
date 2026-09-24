@@ -129,6 +129,7 @@ func (c *codexRun) consumeLine(line []byte) {
 				c.ToolInvocations = map[toolKey]int{}
 			}
 			c.ToolInvocations[toolKey{Name: codexToolName(ev.Item.Type, ev.Item.Server, ev.Item.Tool), Status: codexToolStatus(ev.Item.Status)}]++
+			harness.Logf(harnessName, "tool %s (%s)", codexToolName(ev.Item.Type, ev.Item.Server, ev.Item.Tool), ev.Item.Status)
 		}
 	}
 }

@@ -93,8 +93,7 @@ func runClaude(ctx context.Context, o *harness.Observability, opts claudeOptions
 	cmd.WaitDelay = 15 * time.Second
 
 	stderrTail := newTailBuffer(64 * 1024)
-	stderr := harness.NewProcessOutputWriter(os.Stderr, harnessName, "stderr")
-	cmd.Stderr = io.MultiWriter(stderr, stderrTail)
+	cmd.Stderr = io.MultiWriter(os.Stderr, stderrTail)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -106,10 +105,7 @@ func runClaude(ctx context.Context, o *harness.Observability, opts claudeOptions
 	}
 
 	result := &streamResult{}
-	processOut := harness.NewProcessOutputWriter(os.Stdout, harnessName, "stdout")
-	result.consume(stdout, processOut)
-	processOut.Flush()
-	stderr.Flush()
+	result.consume(stdout, os.Stdout)
 
 	runErr := cmd.Wait()
 	if runErr != nil {
@@ -222,6 +218,7 @@ func (s *streamResult) consumeLine(line []byte) {
 				if b.ID != "" {
 					s.pendingTools[b.ID] = b.Name
 				}
+				harness.Logf(harnessName, "tool_use %s", b.Name)
 			case "text":
 				if strings.TrimSpace(b.Text) != "" {
 					s.LastAssistantText = b.Text
