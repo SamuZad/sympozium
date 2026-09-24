@@ -100,6 +100,7 @@ func run(ctx context.Context) error {
 	if strings.TrimSpace(task) == "" {
 		return fail(fmt.Errorf("TASK env var is empty"))
 	}
+	harness.Logf(harnessName, "task: %s", task)
 
 	workspace := harness.EnvOr("WORKSPACE_DIR", "/workspace")
 	configDir, err := prepareConfigDir(workspace)
