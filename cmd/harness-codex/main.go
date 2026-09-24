@@ -355,6 +355,7 @@ func runCodex(ctx context.Context, o *harness.Observability) (string, *codexRun,
 	if task == "" {
 		return "", run, fmt.Errorf("TASK env var is empty")
 	}
+	harness.Logf(harnessName, "task: %s", task)
 	workspace := harness.EnvOr("WORKSPACE_DIR", "/workspace")
 	lastMessagePath := filepath.Join(os.TempDir(), "codex-last.txt")
 	_ = os.Remove(lastMessagePath)
