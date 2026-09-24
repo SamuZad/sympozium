@@ -18,7 +18,6 @@ import (
 	oteltrace "go.opentelemetry.io/otel/trace"
 
 	"github.com/sympozium-ai/sympozium/internal/artifact"
-	"github.com/sympozium-ai/sympozium/internal/harness"
 )
 
 // maxToolIterations is the maximum number of tool-call round-trips before
@@ -126,12 +125,7 @@ type streamChunk struct {
 }
 
 func main() {
-	_ = os.Setenv("HARNESS_NAME", "agent-runner")
-	// Route the standard logger through the JSONL normalizer. This covers the
-	// runner and provider helpers, including warnings from dependencies that use
-	// the package logger.
-	log.SetOutput(harness.NewProcessOutputWriter(os.Stderr, "agent-runner", "stderr"))
-	log.SetFlags(0)
+	log.SetFlags(log.Ltime | log.Lmicroseconds)
 
 	// Subcommand dispatch. The agent-runner image is distroless (no shell),
 	// so lightweight helper steps that would otherwise be shell scripts are
@@ -177,7 +171,9 @@ func main() {
 		_ = os.MkdirAll("/ipc/output", 0o755)
 		writeJSON("/ipc/output/result.json", res)
 		_ = os.WriteFile("/ipc/done", []byte("done"), 0o644)
-		emitAgentResult(res)
+		if markerBytes, err := json.Marshal(res); err == nil {
+			fmt.Fprintf(os.Stdout, "\n__SYMPOZIUM_RESULT__%s__SYMPOZIUM_END__\n", string(markerBytes))
+		}
 		log.Println("agent-runner dry run finished")
 		os.Exit(0)
 	}
@@ -475,7 +471,9 @@ func main() {
 
 	// Print a structured marker to stdout so the controller can extract
 	// the result from pod logs even after the IPC volume is gone.
-	emitAgentResult(res)
+	if markerBytes, err := json.Marshal(res); err == nil {
+		fmt.Fprintf(os.Stdout, "\n__SYMPOZIUM_RESULT__%s__SYMPOZIUM_END__\n", string(markerBytes))
+	}
 
 	if res.Status == "error" {
 		obs.recordRunMetrics(ctx, "error", getEnv("INSTANCE_NAME", ""), modelName, getEnv("AGENT_NAMESPACE", ""), elapsed.Milliseconds(), inputTokens, outputTokens)
@@ -493,16 +491,6 @@ func main() {
 	})
 	runSpan.End()
 	log.Println("agent-runner finished successfully")
-}
-
-// emitAgentResult is the final JSONL event the controller uses to populate
-// AgentRun status after the pod has terminated.
-func emitAgentResult(res agentResult) {
-	event, level, message := "run.completed", "info", "Agent run completed"
-	if res.Status == "error" {
-		event, level, message = "run.failed", "error", "Agent run failed"
-	}
-	harness.EmitLog(os.Stdout, "agent-runner", level, event, message, "stdout", map[string]any{"result": res})
 }
 
 // callAnthropic dispatches an agent run to the Anthropic provider.

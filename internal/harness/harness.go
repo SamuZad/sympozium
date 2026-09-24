@@ -20,6 +20,7 @@
 package harness
 
 import (
+	"fmt"
 	"os"
 	"strings"
 )
@@ -41,6 +42,13 @@ func FirstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+// Logf writes a single diagnostic line to stderr prefixed with the harness
+// name (e.g. "harness-codex: …"), matching the convention the controller's
+// log scraping and the docs use.
+func Logf(name, format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "harness-"+name+": "+format+"\n", args...)
 }
 
 // AppendResourceAttribute appends a key=value entry to OTEL_RESOURCE_ATTRIBUTES
