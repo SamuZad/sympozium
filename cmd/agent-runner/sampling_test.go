@@ -338,3 +338,89 @@ func openAITextCompletion(text string) map[string]any {
 }
 
 func ptrFloat(f float64) *float64 { return &f }
+
+func anthropicTextMessage(text string) map[string]any {
+	return map[string]any{
+		"id": "msg_test", "type": "message", "role": "assistant", "model": "claude-test",
+		"content":     []map[string]any{{"type": "text", "text": text}},
+		"stop_reason": "end_turn",
+		"usage":       map[string]int{"input_tokens": 1, "output_tokens": 1},
+	}
+}
+
+// A stored thinking level on a model without extended thinking costs one
+// extra request per run, not a failed run: the provider retries without
+// thinking, restores the non-thinking max_tokens and temperature, and stops
+// sending thinking afterwards.
+func TestAnthropic_ThinkingRejectedDegradesOncePerRun(t *testing.T) {
+	t.Setenv("THINKING_MODE", "high")
+	t.Setenv("TEMPERATURE", "0.2")
+	var mu sync.Mutex
+	var bodies []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		bodies = append(bodies, body)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if _, withThinking := body["thinking"]; withThinking {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]any{"type": "error", "error": map[string]string{
+				"type": "invalid_request_error", "message": "'claude-test' does not support thinking.",
+			}})
+			return
+		}
+		json.NewEncoder(w).Encode(anthropicTextMessage("ok"))
+	}))
+	defer srv.Close()
+
+	p := newAnthropicProvider("key", srv.URL, "claude-test", "sys", "task", nil, nil)
+	for turn := 1; turn <= 2; turn++ {
+		if res, err := p.Chat(t.Context()); err != nil || res.Text != "ok" {
+			t.Fatalf("turn %d: text %q err %v, want ok", turn, res.Text, err)
+		}
+	}
+	if len(bodies) != 3 {
+		t.Fatalf("requests = %d, want 3 (rejected, retried without thinking, second turn)", len(bodies))
+	}
+	if _, ok := bodies[0]["thinking"]; !ok {
+		t.Fatal("first request did not send thinking")
+	}
+	for i, body := range bodies[1:] {
+		if th, ok := body["thinking"]; ok {
+			t.Fatalf("request %d still sent thinking %v after the rejection", i+2, th)
+		}
+		if body["max_tokens"] != 8192.0 || body["temperature"] != 0.2 {
+			t.Fatalf("request %d max_tokens=%v temperature=%v, want the non-thinking 8192 and 0.2", i+2, body["max_tokens"], body["temperature"])
+		}
+	}
+}
+
+func TestAnthropic_OtherBadRequestIsNotRetried(t *testing.T) {
+	t.Setenv("THINKING_MODE", "high")
+	var mu sync.Mutex
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]any{"type": "error", "error": map[string]string{
+			"type": "invalid_request_error", "message": "messages: roles must alternate between user and assistant",
+		}})
+	}))
+	defer srv.Close()
+
+	p := newAnthropicProvider("key", srv.URL, "claude-test", "sys", "task", nil, nil)
+	if _, err := p.Chat(t.Context()); err == nil {
+		t.Fatal("Chat succeeded on a 400, want error")
+	}
+	if calls != 1 {
+		t.Fatalf("requests = %d, want 1 (no retry for unrelated 400s)", calls)
+	}
+	if p.thinkingUnsupported {
+		t.Fatal("an unrelated 400 latched thinking off")
+	}
+}
