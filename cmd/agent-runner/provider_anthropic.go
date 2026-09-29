@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"net/http"
 	"strings"
 	"sync"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	anthropicoption "github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/anthropics/anthropic-sdk-go/packages/param"
 )
 
 const (
@@ -40,6 +42,42 @@ type anthropicProvider struct {
 	// warnOnce keeps the per-request sampling warnings to one log line each.
 	warnTemperature sync.Once
 	warnBudget      sync.Once
+	// thinkingUnsupported latches once the API rejects extended thinking
+	// for this model, so later requests in the run stop sending it.
+	thinkingUnsupported bool
+}
+
+// createMessage sends a Messages request. If the API rejects extended
+// thinking (a model without it, or a setting it cannot honour), it latches
+// that for the rest of the run and retries once without thinking, so a
+// stored thinking level degrades to a no-op instead of failing every call.
+// Mirrors openaiProvider.createCompletion.
+func (p *anthropicProvider) createMessage(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
+	msg, err := p.client.Messages.New(ctx, params)
+	if err != nil && params.Thinking.OfEnabled != nil && isThinkingUnsupportedErr(err) {
+		log.Printf("anthropic: model %q rejected extended thinking; retrying without it for the rest of this run", p.model)
+		p.thinkingUnsupported = true
+		// Re-derive sampling with thinking off: max_tokens drops back to its
+		// non-thinking value and a configured temperature applies again.
+		params.Thinking = anthropic.ThinkingConfigParamUnion{}
+		params.Temperature = param.Opt[float64]{}
+		p.applySampling(&params)
+		msg, err = p.client.Messages.New(ctx, params)
+	}
+	return msg, err
+}
+
+// isThinkingUnsupportedErr reports whether err is a 400 whose body names
+// thinking. The SDK error carries no structured param field, so this
+// matches on the raw body. applySampling never sends an out-of-range
+// budget, so a 400 about thinking means the model or deployment cannot
+// honour it.
+func isThinkingUnsupportedErr(err error) bool {
+	var apiErr *anthropic.Error
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadRequest {
+		return false
+	}
+	return strings.Contains(strings.ToLower(apiErr.Error()), "thinking")
 }
 
 // anthropicThinkingBudget maps a reasoning level to an extended-thinking
@@ -76,6 +114,9 @@ func (p *anthropicProvider) applySampling(params *anthropic.MessageNewParams) {
 	}
 
 	budget := anthropicThinkingBudget(p.sampling.thinking)
+	if p.thinkingUnsupported {
+		budget = 0
+	}
 	if budget > 0 {
 		if p.sampling.maxTokens > 0 {
 			if limit := maxTokens / 2; budget > limit {
@@ -180,7 +221,7 @@ func (p *anthropicProvider) Chat(ctx context.Context) (ChatResult, error) {
 			"messages_bytes": jsonBytes(p.messages),
 		})
 	}
-	msg, err := p.client.Messages.New(ctx, params)
+	msg, err := p.createMessage(ctx, params)
 	if err != nil {
 		var apiErr *anthropic.Error
 		if errors.As(err, &apiErr) {
@@ -345,7 +386,7 @@ func (p *anthropicProvider) Prompt(ctx context.Context, prompt string, useContex
 	}
 	p.applySampling(&params)
 
-	msg, err := p.client.Messages.New(ctx, params)
+	msg, err := p.createMessage(ctx, params)
 	if err != nil {
 		var apiErr *anthropic.Error
 		if errors.As(err, &apiErr) {
