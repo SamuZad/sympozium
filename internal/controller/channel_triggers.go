@@ -56,6 +56,20 @@ func channelTriggerSpec(inst *sympoziumv1alpha1.Agent, channelType string) *symp
 	return nil
 }
 
+// channelAutoReply reports whether runs triggered through channelType should
+// have their final response posted back automatically (the default).
+func channelAutoReply(inst *sympoziumv1alpha1.Agent, channelType string) bool {
+	if inst == nil {
+		return true
+	}
+	for i := range inst.Spec.Channels {
+		if inst.Spec.Channels[i].Type == channelType && inst.Spec.Channels[i].AutoReply != nil {
+			return *inst.Spec.Channels[i].AutoReply
+		}
+	}
+	return true
+}
+
 // triggerDecision describes what the router should do with an inbound
 // message after evaluating ChannelTriggerSpec.
 type triggerDecision int

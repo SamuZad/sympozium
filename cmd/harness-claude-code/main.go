@@ -265,14 +265,20 @@ func writeClaudeMD(configDir, extra string) error {
 
 // environmentSection tells Claude Code what kind of place it woke up in. It
 // runs headless: nobody will answer a clarifying question, and the final
-// message is what gets relayed back to the user.
+// message is the run's result — relayed back to the user unless the channel
+// has auto-reply turned off.
 func environmentSection() string {
+	relay := "Your final message is relayed to the user (and to the channel that triggered this run, if any), so end with a " +
+		"clear, self-contained answer. Any file under /workspace that your final message references by path " +
+		"is attached to that reply automatically.\n\n"
+	if !harness.ChannelAutoReply() {
+		relay = "Your final message is recorded as the run's result but is not posted to the channel that triggered " +
+			"this run: reply to the user with `sympozium-tool send-message` as the channel context describes.\n\n"
+	}
 	return "# Sympozium environment\n\n" +
 		"You are running headless inside a Sympozium agent pod on Kubernetes. There is no interactive user: " +
 		"never stop to ask for confirmation or clarification — make reasonable assumptions, state them, and finish the task. " +
-		"Your final message is relayed to the user (and to the channel that triggered this run, if any), so end with a " +
-		"clear, self-contained answer. Any file under /workspace that your final message references by path " +
-		"is attached to that reply automatically.\n\n" +
+		relay +
 		"Your container is intentionally low-privilege; tooling and RBAC live in SkillPack sidecars reached via `sympozium-tool exec`.\n\n"
 }
 

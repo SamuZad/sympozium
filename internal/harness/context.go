@@ -115,9 +115,17 @@ func ChannelContextSection() string {
 
 	var b strings.Builder
 	b.WriteString("\n# Channel context\n\n")
-	fmt.Fprintf(&b, "This task was received through the **%s** channel (chat ID `%s`). "+
-		"Reply through this channel by running `%s` to deliver results, ask follow-up "+
-		"questions, or send notifications to the user.", channel, chatID, reply)
+	fmt.Fprintf(&b, "This task was received through the **%s** channel (chat ID `%s`). ", channel, chatID)
+	if ChannelAutoReply() {
+		fmt.Fprintf(&b, "Your final message is posted back to this chat automatically, with any files it "+
+			"references attached — do not also send it yourself. Use `%s` only for messages that must "+
+			"reach the user before you finish, such as progress updates.", reply)
+	} else {
+		fmt.Fprintf(&b, "Nothing you write in your final message is posted to this chat: the user sees only "+
+			"what you send with `%s`. Send your answer that way before you finish, with "+
+			"`--attachment-path` for any files they should get, and keep the final message to a brief "+
+			"summary for the run log.", reply)
+	}
 	if threadID != "" {
 		fmt.Fprintf(&b, " The originating message is in thread `%s` — keep replies in the "+
 			"same thread (the command above already targets it) and treat this as a "+
@@ -125,6 +133,14 @@ func ChannelContextSection() string {
 	}
 	b.WriteString("\n")
 	return b.String()
+}
+
+// ChannelAutoReply reports whether the controller will post this run's final
+// response back to the channel that triggered it. False when the channel has
+// spec.channels[].autoReply=false (CHANNEL_AUTO_REPLY=false), in which case
+// the agent must reply through `sympozium-tool send-message` itself.
+func ChannelAutoReply() bool {
+	return !strings.EqualFold(strings.TrimSpace(os.Getenv("CHANNEL_AUTO_REPLY")), "false")
 }
 
 // InboundAttachmentsSection lists files from the triggering channel message

@@ -26,6 +26,13 @@ import (
 
 var routerTracer = otel.Tracer("sympozium.ai/channel-router")
 
+// autoReplyAnnotation is stamped "false" on channel-sourced AgentRuns whose
+// channel has spec.channels[].autoReply=false. It freezes the decision at
+// trigger time (an edit to the Agent mid-run cannot flip it) and is read both
+// by handleCompleted and by the pod builder, which tells the agent via
+// CHANNEL_AUTO_REPLY that it has to reply itself.
+const autoReplyAnnotation = "sympozium.ai/auto-reply"
+
 // ChannelRouter subscribes to channel.message.received on the event bus,
 // creates AgentRuns for inbound messages, and routes completed responses
 // back to the originating channel via channel.message.send.
@@ -327,6 +334,10 @@ func (cr *ChannelRouter) handleInbound(ctx context.Context, event *eventbus.Even
 		},
 	}
 
+	if !channelAutoReply(inst, msg.Channel) {
+		run.Annotations[autoReplyAnnotation] = "false"
+	}
+
 	// Propagate artifact-backed attachments as metadata so the agent pod can
 	// download the bytes from the artifact-server (never via the event bus).
 	var attachmentRefs []channelpkg.Attachment
@@ -438,6 +449,15 @@ func (cr *ChannelRouter) handleCompleted(ctx context.Context, event *eventbus.Ev
 	replyMessageTS := run.Annotations["sympozium.ai/reply-message-ts"]
 
 	if replyChannel == "" {
+		return
+	}
+	if run.Annotations[autoReplyAnnotation] == "false" {
+		// The agent delivers its own replies. A run that failed still
+		// gets a notice, via handleFailed, since the agent may never have
+		// got as far as replying.
+		span.SetAttributes(attribute.Bool("sympozium.channel.auto_reply", false))
+		cr.Log.Info("Auto-reply disabled for channel; not relaying agent response",
+			"run", run.Name, "channel", replyChannel)
 		return
 	}
 

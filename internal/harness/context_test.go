@@ -81,6 +81,31 @@ func TestChannelContextSection(t *testing.T) {
 	}
 }
 
+func TestChannelContextSection_AutoReply(t *testing.T) {
+	t.Setenv("SOURCE_CHANNEL", "slack")
+	t.Setenv("SOURCE_CHAT_ID", "C123")
+	t.Setenv("SOURCE_THREAD_ID", "")
+
+	t.Setenv("CHANNEL_AUTO_REPLY", "")
+	if !ChannelAutoReply() {
+		t.Fatal("auto-reply is the default")
+	}
+	if got := ChannelContextSection(); !strings.Contains(got, "posted back to this chat automatically") {
+		t.Fatalf("default should say the final message is relayed:\n%s", got)
+	}
+
+	t.Setenv("CHANNEL_AUTO_REPLY", "false")
+	if ChannelAutoReply() {
+		t.Fatal("CHANNEL_AUTO_REPLY=false should disable auto-reply")
+	}
+	got := ChannelContextSection()
+	for _, want := range []string{"Nothing you write in your final message is posted", "--attachment-path", "sympozium-tool send-message --channel slack --chat-id C123`"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("auto-reply off: missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestInboundAttachmentsSection(t *testing.T) {
 	if InboundAttachmentsSection(nil) != "" {
 		t.Fatal("expected empty section for no attachments")

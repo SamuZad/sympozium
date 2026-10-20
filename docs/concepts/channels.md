@@ -27,6 +27,22 @@ Connect channels during onboarding or via the TUI edit modal:
 | **Discord** | Create a Discord bot, grab the token, and connect it during onboarding |
 | **WhatsApp** | Use the WhatsApp Business API — Sympozium displays a QR code in the TUI for pairing |
 
+## Replies
+
+By default the channel router posts each run's final response back to the chat that triggered it, with any files the response references attached. The agent can also message the chat itself while it works, using `send_channel_message` (agent-runner) or `sympozium-tool send-message` (CLI harnesses). The default prompt tells it to use that only for progress updates, so the answer isn't posted twice.
+
+To have the agent deliver every reply itself, turn auto-reply off for that channel:
+
+```yaml
+spec:
+  channels:
+    - type: slack
+      configRef: { secret: my-slack }
+      autoReply: false
+```
+
+With `autoReply: false`, the final response is still recorded in `AgentRun.status.result`, but it is not posted to the chat. The agent's prompt says so, and tells it to send its answer, with attachments, through the channel tool before it finishes. Failure notices (errors, timeouts) are still posted automatically, since a failed run may never have reached its reply. The setting is captured on each AgentRun when it is triggered (`sympozium.ai/auto-reply: "false"`), so editing the Agent doesn't change runs already in flight.
+
 ## Slack Setup (Socket Mode)
 
 For reliable Slack connectivity, configure your Slack app with both tokens and required app settings:

@@ -264,6 +264,15 @@ type ChannelSpec struct {
 	// +optional
 	Triggers *ChannelTriggerSpec `json:"triggers,omitempty"`
 
+	// AutoReply controls whether a run's final response is posted back to
+	// the chat that triggered it. Default true. Set false when the agent
+	// should reply only through its own channel tool (`send_channel_message`
+	// / `sympozium-tool send-message`): the run's result is still recorded,
+	// the agent is told nothing is relayed for it, and only failure notices
+	// are posted automatically.
+	// +optional
+	AutoReply *bool `json:"autoReply,omitempty"`
+
 	// Slack holds Slack-specific options. Ignored for other channel types.
 	// +optional
 	Slack *SlackChannelOptions `json:"slack,omitempty"`

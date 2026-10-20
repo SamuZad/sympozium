@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -65,6 +67,93 @@ func TestChannelRouterHandleInboundCopiesModelTuning(t *testing.T) {
 	if model.Temperature != "0.2" {
 		t.Errorf("Temperature = %q, want 0.2", model.Temperature)
 	}
+}
+
+func TestChannelRouterAutoReply(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := sympoziumv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
+	off := false
+
+	// route triggers a run through the given channel spec, then completes
+	// and fails it, returning the run plus the texts posted for each.
+	route := func(t *testing.T, ch sympoziumv1alpha1.ChannelSpec) (sympoziumv1alpha1.AgentRun, []string, []string) {
+		t.Helper()
+		inst := &sympoziumv1alpha1.Agent{
+			ObjectMeta: metav1.ObjectMeta{Name: "helper", Namespace: "default"},
+			Spec:       sympoziumv1alpha1.AgentSpec{Channels: []sympoziumv1alpha1.ChannelSpec{ch}},
+		}
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(inst).Build()
+		bus := &recordingEventBus{}
+		cr := &ChannelRouter{Client: cl, EventBus: bus, Log: logr.Discard()}
+		ctx := context.Background()
+
+		in, _ := eventbus.NewEvent(eventbus.TopicChannelMessageRecv, nil, channel.InboundMessage{
+			InstanceName: "helper", Channel: "telegram", ChatID: "chat-1", Text: "hello",
+		})
+		cr.handleInbound(ctx, in)
+		var runs sympoziumv1alpha1.AgentRunList
+		if err := cl.List(ctx, &runs); err != nil || len(runs.Items) != 1 {
+			t.Fatalf("runs = %d, err = %v", len(runs.Items), err)
+		}
+		run := runs.Items[0]
+		meta := map[string]string{"agentRunID": run.Name, "instanceName": "helper"}
+
+		texts := func() []string {
+			var out []string
+			for _, p := range bus.published {
+				var msg channel.OutboundMessage
+				_ = json.Unmarshal(p.Event.Data, &msg)
+				out = append(out, msg.Text)
+			}
+			bus.published = nil
+			return out
+		}
+		done, _ := eventbus.NewEvent(eventbus.TopicAgentRunCompleted, meta, map[string]string{"status": "success", "response": "the answer"})
+		cr.handleCompleted(ctx, done)
+		completed := texts()
+		failed, _ := eventbus.NewEvent(eventbus.TopicAgentRunFailed, meta, map[string]string{"error": "boom"})
+		cr.handleFailed(ctx, failed)
+		return run, completed, texts()
+	}
+
+	t.Run("default relays the response", func(t *testing.T) {
+		run, completed, _ := route(t, sympoziumv1alpha1.ChannelSpec{Type: "telegram"})
+		if _, ok := run.Annotations[autoReplyAnnotation]; ok {
+			t.Errorf("annotation set without autoReply=false: %v", run.Annotations)
+		}
+		if len(completed) != 1 || completed[0] != "the answer" {
+			t.Errorf("completed posts = %q, want the response", completed)
+		}
+	})
+
+	t.Run("autoReply=false posts only failures", func(t *testing.T) {
+		run, completed, failed := route(t, sympoziumv1alpha1.ChannelSpec{Type: "telegram", AutoReply: &off})
+		if run.Annotations[autoReplyAnnotation] != "false" {
+			t.Errorf("annotation = %q, want false", run.Annotations[autoReplyAnnotation])
+		}
+		if len(completed) != 0 {
+			t.Errorf("response must not be relayed, got %q", completed)
+		}
+		if len(failed) != 1 || !strings.Contains(failed[0], "boom") {
+			t.Errorf("failure notice = %q, want one mentioning the error", failed)
+		}
+	})
+
+	t.Run("pod is told to reply itself", func(t *testing.T) {
+		run, _, _ := route(t, sympoziumv1alpha1.ChannelSpec{Type: "telegram", AutoReply: &off})
+		cs, _ := (&AgentRunReconciler{}).buildContainers(&run, false, nil, nil, nil)
+		var found bool
+		for _, e := range cs[0].Env {
+			if e.Name == "CHANNEL_AUTO_REPLY" && e.Value == "false" {
+				found = true
+			}
+		}
+		if !found {
+			t.Error("agent container should get CHANNEL_AUTO_REPLY=false")
+		}
+	})
 }
 
 func TestCheckChannelAccess(t *testing.T) {

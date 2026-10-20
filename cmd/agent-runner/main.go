@@ -216,10 +216,20 @@ func main() {
 			"\n\n## Channel Context\n\n"+
 				"This task was received through the **%s** channel (chat ID: %s). "+
 				"You can reply through this channel using the `send_channel_message` tool "+
-				"with channel=%q and chatId=%q. Use it to deliver results, ask follow-up "+
-				"questions, or send notifications to the user.",
+				"with channel=%q and chatId=%q. ",
 			sourceChannel, sourceChatID, sourceChannel, sourceChatID,
 		)
+		// CHANNEL_AUTO_REPLY=false: the controller will not relay the final
+		// response (spec.channels[].autoReply=false), so the agent must.
+		if strings.EqualFold(getEnv("CHANNEL_AUTO_REPLY", ""), "false") {
+			channelCtx += "Your final response is NOT posted to this chat: the user sees only what you " +
+				"send with `send_channel_message`. Send your answer that way before you finish, and keep " +
+				"the final response to a brief summary for the run log."
+		} else {
+			channelCtx += "Your final response is posted back to this chat automatically, so do not also " +
+				"send it with the tool; use the tool only for messages that must reach the user before you " +
+				"finish, such as progress updates."
+		}
 		if sourceThreadID != "" {
 			channelCtx += fmt.Sprintf(
 				" The originating message is in thread %q — pass threadId=%q to keep "+

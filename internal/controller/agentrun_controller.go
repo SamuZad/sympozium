@@ -2441,6 +2441,13 @@ func (r *AgentRunReconciler) buildContainers(
 			corev1.EnvVar{Name: "SOURCE_THREAD_ID", Value: tid},
 		)
 	}
+	// The channel router will not relay this run's response, so the agent
+	// has to reply through the channel tool itself; its prompt says so.
+	if agentRun.Annotations[autoReplyAnnotation] == "false" {
+		containers[0].Env = append(containers[0].Env,
+			corev1.EnvVar{Name: "CHANNEL_AUTO_REPLY", Value: "false"},
+		)
+	}
 	if att := agentRun.Annotations["sympozium.ai/inbound-attachments"]; att != "" {
 		containers[0].Env = append(containers[0].Env,
 			corev1.EnvVar{Name: "INBOUND_ATTACHMENTS", Value: att},

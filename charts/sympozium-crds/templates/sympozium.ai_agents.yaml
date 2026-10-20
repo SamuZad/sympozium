@@ -566,6 +566,15 @@ spec:
                             When empty, rejected messages are silently dropped.
                           type: string
                       type: object
+                    autoReply:
+                      description: |-
+                        AutoReply controls whether a run's final response is posted back to
+                        the chat that triggered it. Default true. Set false when the agent
+                        should reply only through its own channel tool (`send_channel_message`
+                        / `sympozium-tool send-message`): the run's result is still recorded,
+                        the agent is told nothing is relayed for it, and only failure notices
+                        are posted automatically.
+                      type: boolean
                     configRef:
                       description: |-
                         ConfigRef references the secret containing channel credentials.

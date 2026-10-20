@@ -867,6 +867,11 @@ func (in *ChannelSpec) DeepCopyInto(out *ChannelSpec) {
 		*out = new(ChannelTriggerSpec)
 		(*in).DeepCopyInto(*out)
 	}
+	if in.AutoReply != nil {
+		in, out := &in.AutoReply, &out.AutoReply
+		*out = new(bool)
+		**out = **in
+	}
 	if in.Slack != nil {
 		in, out := &in.Slack, &out.Slack
 		*out = new(SlackChannelOptions)
