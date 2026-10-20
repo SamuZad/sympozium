@@ -777,6 +777,58 @@ func TestBuildContainers_SkillSidecarDefaultCommand(t *testing.T) {
 	}
 }
 
+func TestBuildContainers_SidecarCachesOnWorkspace(t *testing.T) {
+	envOf := func(c corev1.Container) map[string][]string {
+		m := map[string][]string{}
+		for _, e := range c.Env {
+			m[e.Name] = append(m[e.Name], e.Value)
+		}
+		return m
+	}
+	r := &AgentRunReconciler{}
+	sidecars := []resolvedSidecar{
+		{skillPackName: "charts", sidecar: sympoziumv1alpha1.SkillSidecar{
+			Image: "charts:latest", MountWorkspace: true,
+			// The SkillPack's own value must win over the default.
+			Env: []sympoziumv1alpha1.EnvVar{{Name: "UV_CACHE_DIR", Value: "/opt/uv-cache"}},
+		}},
+		{skillPackName: "no-ws", sidecar: sympoziumv1alpha1.SkillSidecar{
+			Image: "no-ws:latest", MountWorkspace: false,
+		}},
+		{skillPackName: "root", sidecar: sympoziumv1alpha1.SkillSidecar{
+			Image: "root:latest", MountWorkspace: true,
+			HostAccess: &sympoziumv1alpha1.HostAccessSpec{Enabled: true, RunAsRoot: true},
+		}},
+	}
+	cs, _ := r.buildContainers(newTestRun(), false, nil, sidecars, nil)
+	byName := map[string]corev1.Container{}
+	for _, c := range cs {
+		byName[c.Name] = c
+	}
+
+	charts := envOf(byName["skill-charts"])
+	for name, want := range map[string]string{
+		"XDG_CACHE_HOME":   "/workspace/.cache",
+		"PIP_CACHE_DIR":    "/workspace/.cache/pip",
+		"npm_config_cache": "/workspace/.cache/npm",
+		"MPLCONFIGDIR":     "/workspace/.cache/matplotlib",
+		"UV_CACHE_DIR":     "/opt/uv-cache",
+	} {
+		if got := charts[name]; len(got) != 1 || got[0] != want {
+			t.Errorf("skill-charts %s = %v, want exactly [%s]", name, got, want)
+		}
+	}
+	if _, ok := envOf(byName["skill-no-ws"])["XDG_CACHE_HOME"]; ok {
+		t.Error("a sidecar without /workspace must keep its default cache locations")
+	}
+	if _, ok := envOf(byName["skill-root"])["XDG_CACHE_HOME"]; ok {
+		t.Error("a root sidecar must not create the shared cache dirs")
+	}
+	if _, ok := envOf(byName["skill-charts"])["TMPDIR"]; ok {
+		t.Error("TMPDIR must not be moved for sidecars")
+	}
+}
+
 func TestBuildContainers_MultipleSkillSidecars(t *testing.T) {
 	r := &AgentRunReconciler{}
 	sidecars := []resolvedSidecar{

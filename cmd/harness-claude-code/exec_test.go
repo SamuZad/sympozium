@@ -2,8 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/sympozium-ai/sympozium/internal/harness"
 )
@@ -178,6 +184,140 @@ func TestStreamResult_HandlesHugeLines(t *testing.T) {
 	s.consume(strings.NewReader(line), nil)
 	if s.Final == nil || s.Response() != "ok" {
 		t.Fatalf("result lost after huge line: %+v", s.Final)
+	}
+}
+
+// backgroundFollowUpStream is what Claude Code prints when the model answers
+// while a backgrounded command is still running: the answer turn ends, then
+// minutes later the task finishes, the model is woken for a follow-up turn,
+// and only that follow-up's text lands in the result event.
+const backgroundFollowUpStream = `{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"uv run chart.py"}}],"stop_reason":"tool_use"}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"Command running in background"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Here is the full analysis."}],"stop_reason":null}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Charts attached."}],"stop_reason":"end_turn"}}
+{"type":"user","message":{"role":"user","content":"<task-notification>chart.py timed out</task-notification>"}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"One addendum: the first render timed out."}],"stop_reason":"end_turn"}}
+{"type":"result","subtype":"success","is_error":false,"result":"One addendum: the first render timed out.","session_id":"abc"}
+`
+
+func TestStreamResult_FollowUpTurnKeepsAnswer(t *testing.T) {
+	s := &streamResult{}
+	s.consume(strings.NewReader(backgroundFollowUpStream), nil)
+
+	want := "Here is the full analysis.\n\nCharts attached.\n\nOne addendum: the first render timed out."
+	if got := s.Response(); got != want {
+		t.Errorf("Response = %q, want %q", got, want)
+	}
+	if len(s.Answers) != 2 {
+		t.Errorf("Answers = %q, want 2 turns", s.Answers)
+	}
+}
+
+func TestStreamResult_KeepsFirstResultEvent(t *testing.T) {
+	s := &streamResult{}
+	s.consume(strings.NewReader(
+		`{"type":"result","subtype":"success","result":"answer","num_turns":4,"session_id":"x"}`+"\n"+
+			`{"type":"result","subtype":"success","result":"","num_turns":0,"session_id":"x"}`+"\n"), nil)
+	if s.Final == nil || s.Final.NumTurns != 4 || s.Response() != "answer" {
+		t.Fatalf("follow-up result must not replace the first: %+v", s.Final)
+	}
+}
+
+func TestStreamResult_PerBlockEndTurnCountsOnce(t *testing.T) {
+	// One assistant message streamed as one event per content block, each
+	// carrying the message's stop_reason.
+	s := &streamResult{}
+	s.consume(strings.NewReader(
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Part one."}],"stop_reason":"end_turn"}}`+"\n"+
+			`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Part two."}],"stop_reason":"end_turn"}}`+"\n"), nil)
+	if len(s.Answers) != 1 || s.Response() != "Part one.\n\nPart two." {
+		t.Fatalf("Answers = %q", s.Answers)
+	}
+}
+
+func TestStreamResult_IgnoresSubagentText(t *testing.T) {
+	s := &streamResult{}
+	s.consume(strings.NewReader(
+		`{"type":"assistant","parent_tool_use_id":"task1","message":{"role":"assistant","content":[{"type":"text","text":"subagent report"}],"stop_reason":"end_turn"}}`+"\n"+
+			`{"type":"assistant","parent_tool_use_id":null,"message":{"role":"assistant","content":[{"type":"text","text":"Main answer."}],"stop_reason":"end_turn"}}`+"\n"), nil)
+	if s.Response() != "Main answer." {
+		t.Fatalf("Response = %q, subagent text must not leak into the answer", s.Response())
+	}
+}
+
+func TestStreamResult_SettledWithoutResultIsSuccess(t *testing.T) {
+	s := &streamResult{}
+	s.consume(strings.NewReader(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Done."}],"stop_reason":"end_turn"}}`+"\n"), nil)
+	if s.Err() == nil {
+		t.Fatal("a run that just stopped without a result event is an error")
+	}
+	s.Settled = true
+	if err := s.Err(); err != nil {
+		t.Fatalf("answered then stopped by the shim should succeed, got %v", err)
+	}
+}
+
+// fakeClaude puts a `claude` shell script on PATH for runClaude to exec.
+func fakeClaude(t *testing.T, script string) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "claude"), []byte("#!/bin/sh\n"+script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func TestRunClaude_StopsAfterTurnEndWhenBackgroundWorkHangs(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "bg.pid")
+	t.Setenv("BG_PID_FILE", pidFile)
+	// Answers, then keeps running on a backgrounded child that also holds
+	// stdout open — the shape of Claude Code waiting on a hung task.
+	fakeClaude(t, `cat >/dev/null
+sleep 300 &
+echo $! > "$BG_PID_FILE"
+echo '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"The real answer."}],"stop_reason":"end_turn"}}'
+wait
+`)
+	o := harness.InitObservability(context.Background(), harnessName)
+	start := time.Now()
+	res, _, err := runClaude(context.Background(), o, claudeOptions{
+		Task: "x", Workspace: t.TempDir(), TurnEndGrace: 200 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("runClaude err = %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("runClaude took %v; the grace cutoff did not fire", elapsed)
+	}
+	if !res.Settled || res.Err() != nil || res.Response() != "The real answer." {
+		t.Fatalf("settled=%v err=%v response=%q", res.Settled, res.Err(), res.Response())
+	}
+
+	raw, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, _ := strconv.Atoi(strings.TrimSpace(string(raw)))
+	deadline := time.Now().Add(5 * time.Second)
+	for syscall.Kill(pid, 0) == nil {
+		if time.Now().After(deadline) {
+			t.Fatalf("background child %d survived the process-group kill", pid)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestRunClaude_CleanExitIsNotSettled(t *testing.T) {
+	fakeClaude(t, `cat >/dev/null
+echo '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}}'
+echo '{"type":"result","subtype":"success","result":"ok","session_id":"x"}'
+`)
+	o := harness.InitObservability(context.Background(), harnessName)
+	res, _, err := runClaude(context.Background(), o, claudeOptions{
+		Task: "x", Workspace: t.TempDir(), TurnEndGrace: 5 * time.Second,
+	})
+	if err != nil || res.Settled || res.Err() != nil || res.Response() != "ok" {
+		t.Fatalf("err=%v settled=%v resErr=%v response=%q", err, res.Settled, res.Err(), res.Response())
 	}
 }
 

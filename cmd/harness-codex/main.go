@@ -81,6 +81,11 @@ func run(ctx context.Context) error {
 		return err
 	}
 
+	workspace := harness.EnvOr("WORKSPACE_DIR", "/workspace")
+	// Before CODEX_HOME: with HOME moved onto the workspace, ~/.codex is
+	// CODEX_HOME itself and linkHomeCodex has nothing to do.
+	harness.UseWorkspaceForScratch(harnessName, workspace)
+
 	codexHome := harness.EnvOr("CODEX_HOME", "/workspace/.codex")
 	if err := os.MkdirAll(codexHome, 0o755); err != nil {
 		return fail(fmt.Errorf("mkdir codex home %s: %w", codexHome, err))
@@ -102,7 +107,6 @@ func run(ctx context.Context) error {
 		harness.Logf(harnessName, "warning: failed to write auth.json: %v", err)
 	}
 
-	workspace := harness.EnvOr("WORKSPACE_DIR", "/workspace")
 	if err := writeAgentsMD(codexHome, artifact.MaterializeInbound(ctx, workspace)); err != nil {
 		return fail(fmt.Errorf("write AGENTS.md: %w", err))
 	}
@@ -188,6 +192,7 @@ func linkHomeCodex(codexHome string) error {
 // channel frame, pre-downloaded attachments, and the sympozium-tool docs.
 func writeAgentsMD(codexHome string, inboundAttachmentPaths []string) error {
 	var b strings.Builder
+	b.WriteString(harness.WorkspaceSection())
 	b.WriteString(harness.SkillsMarkdown(harness.EnvOr("SKILLS_DIR", "/skills")))
 	b.WriteString(harness.SystemPromptSection())
 	b.WriteString(harness.ChannelContextSection())

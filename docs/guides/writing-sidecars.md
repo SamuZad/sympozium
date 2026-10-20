@@ -306,6 +306,18 @@ spec:
 
 The runtime automatically sets `SYMPOZIUM_SKILL_PACK` on each sidecar container to the SkillPack's `metadata.name`. This is used for [target-based routing](#target-based-routing).
 
+When `mountWorkspace: true`, the runtime also points the common package and tool caches at the workspace volume:
+
+| Variable | Value |
+|----------|-------|
+| `XDG_CACHE_HOME` | `/workspace/.cache` |
+| `UV_CACHE_DIR` | `/workspace/.cache/uv` |
+| `PIP_CACHE_DIR` | `/workspace/.cache/pip` |
+| `npm_config_cache` | `/workspace/.cache/npm` |
+| `MPLCONFIGDIR` | `/workspace/.cache/matplotlib` |
+
+Without these, a sidecar that has no writable `$HOME` caches into `/tmp`. That is a 256Mi emptyDir shared by every container in the pod, and one `uv run --with matplotlib` can fill it. All pod containers run as the same UID, so the sidecars share this cache with the agent container. On a per-session PVC the cache also persists across runs. A value you set in `sidecar.env` wins over these defaults. Pod env also overrides the image's `ENV`, so if your image bakes in its own cache location (for example a pre-warmed `UV_CACHE_DIR`), set it again in `sidecar.env`. The defaults are skipped for `hostAccess.runAsRoot` sidecars. `TMPDIR` is not changed: `/tmp` is still the hand-off location between the agent and sidecars that don't mount the workspace.
+
 Your SkillPack can inject additional env vars:
 
 ```yaml

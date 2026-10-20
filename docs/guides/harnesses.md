@@ -81,15 +81,26 @@ built on `internal/harness`. On start they:
    discovered tools it publishes a manifest; the shim then points the CLI at
    the single loopback endpoint `http://127.0.0.1:8765/mcp` and waits for it to
    answer `initialize`. Remote URLs, headers and secrets never reach the CLI.
-4. **Run the CLI**, capture its final answer, and write
+4. **Keep files on the workspace.** `/tmp` in an agent pod is a 256Mi
+   emptyDir shared with the SkillPack sidecars, and it does not outlive the
+   pod. The shim points `HOME` at `/workspace` when the image's home is
+   read-only, so tool caches (uv, pip, npm, matplotlib, …) land there.
+   It points `TMPDIR`/`TMP`/`TEMP` at `/workspace/.tmp/<run-id>/`, unless
+   you set `TMPDIR` yourself. A later run prunes another run's temp dir once
+   it is a day old. The context also tells the agent to create its files
+   under `/workspace` and to use `/tmp` only to hand files to a sidecar that
+   doesn't mount the workspace. Sidecars that mount the workspace get the
+   same treatment for their caches; see
+   [Writing Sidecars](writing-sidecars.md#environment-variables).
+5. **Run the CLI**, capture its final answer, and write
    `/ipc/output/result.json` with status, response, token counts and
    duration — the same contract as the agent-runner.
-5. **Auto-attach produced files.** Any path under `/workspace` or `/tmp` the
+6. **Auto-attach produced files.** Any path under `/workspace` or `/tmp` the
    final answer references (Markdown link or bare absolute path) is attached
    to the relayed reply — uploaded to the artifact-server when
    `ARTIFACT_SERVER_URL` is set, inline base64 otherwise. See
    [Writing Tools](writing-tools.md#large-files-the-artifact-server-reference-by-id).
-6. **Emit telemetry** tagged `harness=<name>`. The shim parses the CLI's own
+7. **Emit telemetry** tagged `harness=<name>`. The shim parses the CLI's own
    event stream (`codex exec --json`, `claude -p --output-format stream-json`)
    and emits the same canonical series the agent-runner does, with the same
    instrument types and attributes: `gen_ai.client.token.usage` (histogram;
@@ -131,7 +142,8 @@ block legitimate writes to `/ipc` and calls to the memory-server.
 | `model.maxTokens` (`MAX_TOKENS`) | `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | |
 | `model.providerHeaders` | `ANTHROPIC_CUSTOM_HEADERS` | One `Name: Value` per line. |
 | `model.temperature` | — | Not supported by Claude Code; ignored with a log line. |
-| `timeout` (`RUN_TIMEOUT`) | shim-side deadline | `claude` gets SIGTERM, then SIGKILL after 15s; the partial answer is still recorded. |
+| `timeout` (`RUN_TIMEOUT`) | shim-side deadline | `claude`'s process group gets SIGTERM, then SIGKILL after 15s; the partial answer is still recorded. |
+| — | `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` | Always set. A Bash command that hits its timeout is stopped instead of moved to the background, so a hung sidecar command can't hold the run open after the model has answered. |
 | observability enabled | `CLAUDE_CODE_ENABLE_TELEMETRY=1`, `OTEL_*_EXPORTER=otlp` | Points at the controller-configured OTLP endpoint. |
 
 Anything the shim derives is set **only if unset**, so a value you put in
@@ -188,6 +200,13 @@ shows tool calls and the final result as JSONL, plus human-readable
 `status.metrics`. An `error_*` result subtype (e.g. `error_max_budget_usd`) or a
 non-zero exit marks the run `Failed` while keeping any partial answer.
 
+The answer is the text of the turn the model ended (`stop_reason: end_turn`).
+If `claude` is still running 30s later (`CLAUDE_CODE_TURN_END_GRACE`), for
+example because it is waiting on background work, the shim stops its whole
+process group and records that answer as a success. If Claude Code wakes the
+model for a follow-up turn before then, the follow-up text is appended to the
+answer rather than replacing it.
+
 `--strict-mcp-config` makes Claude Code ignore `.mcp.json` files a checked-out
 repository might contain; only the Sympozium bridge is offered. Claude Code's
 auto-updater, crash reporting and product telemetry are disabled in the image
@@ -201,6 +220,8 @@ export the shim enables is unaffected.
 | `CLAUDE_CONFIG_DIR` | Move Claude Code's state directory (default `/workspace/.claude`). |
 | `CLAUDE_CODE_CONTINUE` | `true`/`false` — force or forbid `--continue`. |
 | `CLAUDE_CODE_MAX_BUDGET_USD` | Per-run API spend cap, passed as `--max-budget-usd` (e.g. `2.50`). |
+| `CLAUDE_CODE_TURN_END_GRACE` | How long `claude` may keep running after the model ends its turn before the shim stops it (Go duration, default `30s`; `0` waits for it to exit on its own). |
+| `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` | Set to `0` to re-enable Claude Code background tasks (the shim defaults it to `1`). |
 | `HARNESS_CLAUDE_EXTRA_ARGS` | Space-separated extra `claude` flags, e.g. `--fallback-model claude-sonnet-5`. |
 | `ANTHROPIC_*`, `CLAUDE_CODE_*`, `MAX_THINKING_TOKENS` | Any native Claude Code variable; overrides the shim's derived value. |
 

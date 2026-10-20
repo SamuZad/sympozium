@@ -2468,6 +2468,12 @@ func (r *AgentRunReconciler) buildContainers(
 		for _, e := range sc.sidecar.Env {
 			envVars = append(envVars, corev1.EnvVar{Name: e.Name, Value: e.Value})
 		}
+		// Root sidecars are skipped: a cache dir root creates first would
+		// lock the pod's non-root containers out of /workspace/.cache.
+		runsAsRoot := sc.sidecar.HostAccess != nil && sc.sidecar.HostAccess.Enabled && sc.sidecar.HostAccess.RunAsRoot
+		if sc.sidecar.MountWorkspace && !runsAsRoot {
+			envVars = appendEnvDefaults(envVars, sidecarWorkspaceCacheEnv)
+		}
 
 		mounts := []corev1.VolumeMount{
 			{Name: "ipc", MountPath: "/ipc"},
@@ -3147,6 +3153,39 @@ func (r *AgentRunReconciler) buildVolumes(agentRun *sympoziumv1alpha1.AgentRun, 
 	}
 
 	return volumes
+}
+
+// sidecarWorkspaceCacheEnv points the common package/tool caches of a skill
+// sidecar that mounts /workspace at /workspace/.cache. Otherwise a sidecar
+// with no writable $HOME makes uv, pip, npm and matplotlib cache into /tmp,
+// the 256Mi emptyDir every container in the pod shares, and a single
+// `uv run --with matplotlib` can fill it. All pod containers run as the same
+// UID, so the agent container (whose harness also caches under
+// /workspace/.cache) and the sidecars share one cache. These tools create
+// the directories on demand. TMPDIR is deliberately not moved: mktemp fails
+// outright on a missing directory, and custom sidecar entrypoints would not
+// create it.
+var sidecarWorkspaceCacheEnv = []corev1.EnvVar{
+	{Name: "XDG_CACHE_HOME", Value: "/workspace/.cache"},
+	{Name: "UV_CACHE_DIR", Value: "/workspace/.cache/uv"},
+	{Name: "PIP_CACHE_DIR", Value: "/workspace/.cache/pip"},
+	{Name: "npm_config_cache", Value: "/workspace/.cache/npm"},
+	{Name: "MPLCONFIGDIR", Value: "/workspace/.cache/matplotlib"},
+}
+
+// appendEnvDefaults appends each default whose name env does not already
+// set, so explicit values (e.g. SkillPack sidecar.env) always win.
+func appendEnvDefaults(env, defaults []corev1.EnvVar) []corev1.EnvVar {
+	set := make(map[string]bool, len(env))
+	for _, e := range env {
+		set[e.Name] = true
+	}
+	for _, d := range defaults {
+		if !set[d.Name] {
+			env = append(env, d)
+		}
+	}
+	return env
 }
 
 // reservedVolumeNames are the volume names that Sympozium manages internally

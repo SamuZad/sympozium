@@ -13,7 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
+	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -32,6 +32,10 @@ type claudeOptions struct {
 	// MaxBudgetUSD caps API spend for the run (--max-budget-usd); empty
 	// means no cap.
 	MaxBudgetUSD string
+	// TurnEndGrace is how long `claude` may keep running after the model
+	// first ends its turn before the shim terminates it; 0 waits for a
+	// natural exit. See runClaude.
+	TurnEndGrace time.Duration
 	ExtraArgs    []string
 }
 
@@ -76,6 +80,14 @@ func claudeArgs(o claudeOptions) []string {
 // runClaude executes `claude` in the workspace, tees its stream-json output to
 // the pod log while parsing it, and returns the accumulated result, the tail
 // of stderr (for error classification), and the process error if any.
+//
+// In print mode Claude Code does not exit when the model ends its turn if
+// background work it started is still pending: it waits for that work (up to
+// its own time limit, ~10 minutes) and then wakes the model for a follow-up
+// turn whose result replaces the real answer. Nobody is waiting for that
+// follow-up in a pod, so once the model has ended its turn the shim gives
+// `claude` opts.TurnEndGrace to exit on its own and then terminates its
+// whole process group, keeping the answer it already has.
 func runClaude(ctx context.Context, o *harness.Observability, opts claudeOptions) (*streamResult, string, error) {
 	ctx, span := o.StartExecSpan(ctx,
 		attribute.String("claude_code.workspace", opts.Workspace),
@@ -84,13 +96,16 @@ func runClaude(ctx context.Context, o *harness.Observability, opts claudeOptions
 	)
 	defer span.End()
 
-	cmd := exec.CommandContext(ctx, "claude", claudeArgs(opts)...)
+	execCtx, stop := context.WithCancel(ctx)
+	defer stop()
+	cmd := exec.CommandContext(execCtx, "claude", claudeArgs(opts)...)
 	cmd.Dir = opts.Workspace
 	cmd.Stdin = strings.NewReader(opts.Task)
 	// On timeout/cancel ask nicely first so Claude Code can flush its
 	// transcript and telemetry, then let WaitDelay escalate to SIGKILL.
-	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
-	cmd.WaitDelay = 15 * time.Second
+	// The process group also covers shells and sympozium-tool clients
+	// Claude Code left running in the background.
+	harness.UseProcessGroup(cmd, 15*time.Second)
 
 	stderrTail := newTailBuffer(64 * 1024)
 	cmd.Stderr = io.MultiWriter(os.Stderr, stderrTail)
@@ -105,9 +120,35 @@ func runClaude(ctx context.Context, o *harness.Observability, opts claudeOptions
 	}
 
 	result := &streamResult{}
+	var settled atomic.Bool
+	var graceTimer *time.Timer
+	if opts.TurnEndGrace > 0 {
+		result.onTurnEnd = func() {
+			if graceTimer != nil {
+				return
+			}
+			graceTimer = time.AfterFunc(opts.TurnEndGrace, func() {
+				harness.Logf(harnessName, "claude still running %s after the turn ended (pending background work?); stopping it and keeping the answer", opts.TurnEndGrace)
+				settled.Store(true)
+				stop()
+			})
+		}
+	}
 	result.consume(stdout, os.Stdout)
+	if graceTimer != nil {
+		graceTimer.Stop()
+	}
 
 	runErr := cmd.Wait()
+	// Reap anything that outlived claude itself (background shells,
+	// sympozium-tool exec clients) so it cannot hold the pod open.
+	harness.KillProcessGroup(cmd)
+	if settled.Load() {
+		// We stopped claude ourselves after it had answered; its exit
+		// status (143 / signal) is not a failure of the run.
+		result.Settled = true
+		runErr = nil
+	}
 	if runErr != nil {
 		harness.MarkSpanError(span, runErr)
 		runErr = fmt.Errorf("claude exited: %w", runErr)
@@ -127,16 +168,26 @@ type streamEvent struct {
 	DurationMs   int64           `json:"duration_ms"`
 	TotalCostUSD float64         `json:"total_cost_usd"`
 	Errors       json.RawMessage `json:"errors"`
-	Usage        *struct {
+	// ParentToolUseID is set on events from inside a subagent (Task tool);
+	// nil for the main conversation.
+	ParentToolUseID *string `json:"parent_tool_use_id"`
+	Usage           *struct {
 		InputTokens              int `json:"input_tokens"`
 		OutputTokens             int `json:"output_tokens"`
 		CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 		CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 	} `json:"usage"`
 	Message *struct {
-		Role    string          `json:"role"`
-		Content json.RawMessage `json:"content"`
+		Role       string          `json:"role"`
+		Content    json.RawMessage `json:"content"`
+		StopReason string          `json:"stop_reason"`
 	} `json:"message"`
+}
+
+// topLevel reports whether the event belongs to the main conversation rather
+// than a subagent.
+func (e *streamEvent) topLevel() bool {
+	return e.ParentToolUseID == nil || *e.ParentToolUseID == ""
 }
 
 type contentBlock struct {
@@ -157,9 +208,25 @@ type toolKey struct {
 
 // streamResult accumulates what the shim learns from a stream-json run.
 type streamResult struct {
-	// Final is the terminal "result" event, nil if the process ended
-	// without one (crash, timeout, kill).
+	// Final is the first "result" event, nil if the process ended without
+	// one (crash, timeout, kill). Claude Code can emit more after follow-up
+	// turns triggered by finished background tasks; those carry only the
+	// follow-up's text, so they never replace the first.
 	Final *streamEvent
+	// Answers holds the text of every main-conversation turn that ended
+	// (stop_reason end_turn), in order. Normally exactly one; more when
+	// Claude Code woke the model again before exiting.
+	Answers []string
+	// Settled is set by runClaude when it stopped claude itself after the
+	// model had already ended its turn.
+	Settled bool
+	// turnText collects main-conversation text since the last user event
+	// (tool results), i.e. the text of the assistant message being built.
+	turnText     []string
+	turnAnswered bool
+	// onTurnEnd, when set, is called each time the model ends its turn or a
+	// result event arrives.
+	onTurnEnd func()
 	// ToolCalls counts tool_use blocks across assistant turns.
 	ToolCalls int
 	// ToolInvocations counts tool calls by (name, status), where status is
@@ -201,13 +268,20 @@ func (s *streamResult) consumeLine(line []byte) {
 	}
 	switch ev.Type {
 	case "assistant":
-		if ev.Message == nil || len(ev.Message.Content) == 0 {
+		if ev.Message == nil {
 			return
 		}
 		var blocks []contentBlock
-		if err := json.Unmarshal(ev.Message.Content, &blocks); err != nil {
-			return
+		if len(ev.Message.Content) > 0 {
+			if err := json.Unmarshal(ev.Message.Content, &blocks); err != nil {
+				return
+			}
 		}
+		defer func() {
+			if ev.topLevel() && ev.Message.StopReason == "end_turn" {
+				s.endTurn()
+			}
+		}()
 		for _, b := range blocks {
 			switch b.Type {
 			case "tool_use":
@@ -220,12 +294,19 @@ func (s *streamResult) consumeLine(line []byte) {
 				}
 				harness.Logf(harnessName, "tool_use %s", b.Name)
 			case "text":
-				if strings.TrimSpace(b.Text) != "" {
+				if ev.topLevel() && strings.TrimSpace(b.Text) != "" {
 					s.LastAssistantText = b.Text
+					s.turnText = append(s.turnText, strings.TrimSpace(b.Text))
 				}
 			}
 		}
 	case "user":
+		// A main-conversation user event (tool results, or the notice of a
+		// finished background task) starts a new assistant message.
+		if ev.topLevel() {
+			s.turnText = nil
+			s.turnAnswered = false
+		}
 		// Tool results come back as user-role messages; resolve each
 		// pending tool_use to a success/error outcome.
 		if ev.Message == nil || len(ev.Message.Content) == 0 {
@@ -254,8 +335,29 @@ func (s *streamResult) consumeLine(line []byte) {
 			s.ToolInvocations[toolKey{Name: name, Status: status}]++
 		}
 	case "result":
-		ev := ev
-		s.Final = &ev
+		if s.Final == nil {
+			ev := ev
+			s.Final = &ev
+		}
+		if s.onTurnEnd != nil {
+			s.onTurnEnd()
+		}
+	}
+}
+
+// endTurn records the current assistant message as an answer. Claude Code
+// may emit one event per content block, each carrying the message's
+// stop_reason, so the turn's slot is overwritten rather than appended twice.
+func (s *streamResult) endTurn() {
+	ans := strings.Join(s.turnText, "\n\n")
+	if s.turnAnswered {
+		s.Answers[len(s.Answers)-1] = ans
+	} else {
+		s.Answers = append(s.Answers, ans)
+		s.turnAnswered = true
+	}
+	if s.onTurnEnd != nil {
+		s.onTurnEnd()
 	}
 }
 
@@ -308,9 +410,20 @@ func (s *streamResult) SortedToolInvocations() []struct {
 	return out
 }
 
-// Response returns the final answer: the result event's text when present,
-// otherwise the last assistant text seen (partial output).
+// Response returns the final answer: the text of every turn the model ended,
+// joined, so a follow-up turn's addendum never hides the answer before it.
+// Falls back to the result event's text (if stop_reason was missing from the
+// stream), then to the last assistant text seen (partial output).
 func (s *streamResult) Response() string {
+	var answers []string
+	for _, a := range s.Answers {
+		if a != "" {
+			answers = append(answers, a)
+		}
+	}
+	if len(answers) > 0 {
+		return strings.Join(answers, "\n\n")
+	}
 	if s.Final != nil && strings.TrimSpace(s.Final.Result) != "" {
 		return strings.TrimSpace(s.Final.Result)
 	}
@@ -340,6 +453,11 @@ func (s *streamResult) OutputTokens() int {
 // error_max_turns) or when no result event arrived at all.
 func (s *streamResult) Err() error {
 	if s.Final == nil {
+		if s.Settled && s.Response() != "" {
+			// The model answered; claude was stopped while waiting on
+			// background work, before it printed the result event.
+			return nil
+		}
 		return errors.New("claude produced no result event")
 	}
 	if !s.Final.IsError && !strings.HasPrefix(s.Final.Subtype, "error") {

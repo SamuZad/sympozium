@@ -93,7 +93,7 @@ func cmdSendMessage(argv []string) int {
 	fs.Var(&attachmentPaths, "attachment-path", "Local image path to attach. May be repeated. Must be under /workspace, /tmp, /skills, or /ipc.")
 	fs.Var(&attachmentURLs, "attachment-url", "Public https image URL to attach. May be repeated.")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, `Usage: sympozium-tool send-message --channel <name> --text "..." [--chat-id ID] [--thread-id ID] [--format plain|markdown|html] [--attachment-path /tmp/chart.png]
+		fmt.Fprintln(os.Stderr, `Usage: sympozium-tool send-message --channel <name> --text "..." [--chat-id ID] [--thread-id ID] [--format plain|markdown|html] [--attachment-path /workspace/chart.png]
 
 Writes /ipc/messages/send-<ts>.json. The IPC bridge relays it to the channel pod.
 Fire-and-forget: exits 0 once the message file is written.`)

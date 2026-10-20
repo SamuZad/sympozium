@@ -157,6 +157,24 @@ func customHeaders(raw string) (string, bool) {
 	return strings.Join(lines, "\n"), true
 }
 
+// headlessEnv turns off Claude Code features that assume someone is watching
+// the session.
+//
+// Background tasks: Claude Code moves a Bash command that hits its timeout to
+// the background (and lets the model start one with run_in_background). In
+// print mode it then refuses to exit after the model has answered, waits for
+// the task, and wakes the model for a follow-up turn — so a hung sidecar
+// command holds the pod for minutes and the run's result becomes the
+// follow-up's text instead of the answer. With background tasks disabled a
+// command that times out is stopped and the model sees the failure inside its
+// turn. Operators who want them back can set
+// CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=0 in spec.env.
+func headlessEnv() map[string]string {
+	return map[string]string{
+		"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
+	}
+}
+
 // telemetryEnv enables Claude Code's native OpenTelemetry export against the
 // same OTLP collector the controller configures for the agent-runner, so
 // dashboards stay unified across harnesses. Claude Code emits

@@ -33,9 +33,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -57,7 +59,13 @@ const maxSystemPromptArgBytes = 100 * 1024
 const mcpConfigFile = "sympozium-mcp.json"
 
 func main() {
-	if err := run(context.Background()); err != nil {
+	// `claude` runs in its own process group (so background work it leaves
+	// behind can be reaped), which means the SIGTERM dumb-init forwards on pod
+	// shutdown reaches only the shim. Turn it into context cancellation so
+	// runClaude passes it on to the whole group and still writes a result.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+	defer stop()
+	if err := run(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, "harness-claude-code:", err)
 		os.Exit(1)
 	}
@@ -107,9 +115,9 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return fail(err)
 	}
-	if prevHome := os.Getenv("HOME"); ensureWritableHome(workspace) != prevHome {
-		harness.Logf(harnessName, "HOME %q is not writable; using %s", prevHome, workspace)
-	}
+	// HOME on the workspace also makes `~/.claude` coincide with the default
+	// CLAUDE_CONFIG_DIR.
+	harness.UseWorkspaceForScratch(harnessName, workspace)
 
 	inbound := artifact.MaterializeInbound(ctx, workspace)
 	systemPrompt := buildSystemPrompt(inbound)
@@ -138,6 +146,7 @@ func run(ctx context.Context) error {
 	applyEnvIfUnset(providerEnv(os.Getenv("MODEL_PROVIDER"), os.Getenv("MODEL_BASE_URL"), os.Getenv))
 	applyEnvIfUnset(modelTuningEnv(os.Getenv))
 	applyEnvIfUnset(telemetryEnv(os.Getenv))
+	applyEnvIfUnset(headlessEnv())
 	if os.Getenv("TEMPERATURE") != "" {
 		harness.Logf(harnessName, "TEMPERATURE is not supported by Claude Code; ignoring")
 	}
@@ -151,6 +160,7 @@ func run(ctx context.Context) error {
 		MCPConfigPath: mcpConfigPath,
 		Continue:      shouldContinueSession(sessionKey, os.Getenv("CLAUDE_CODE_CONTINUE"), hasPriorSession(configDir)),
 		MaxBudgetUSD:  maxBudgetUSD(os.Getenv("CLAUDE_CODE_MAX_BUDGET_USD")),
+		TurnEndGrace:  turnEndGrace(os.Getenv("CLAUDE_CODE_TURN_END_GRACE")),
 		ExtraArgs:     strings.Fields(os.Getenv("HARNESS_CLAUDE_EXTRA_ARGS")),
 	}
 	if opts.Continue {
@@ -175,7 +185,7 @@ func run(ctx context.Context) error {
 		result, _, runErr = runClaude(execCtx, o, opts)
 	}
 	duration := time.Since(started).Milliseconds()
-	if errors.Is(execCtx.Err(), context.DeadlineExceeded) {
+	if !result.Settled && errors.Is(execCtx.Err(), context.DeadlineExceeded) {
 		runErr = fmt.Errorf("claude exceeded RUN_TIMEOUT %s", os.Getenv("RUN_TIMEOUT"))
 	}
 	if runErr == nil {
@@ -233,31 +243,6 @@ func prepareConfigDir(workspace string) (string, error) {
 	return configDir, nil
 }
 
-// ensureWritableHome makes sure $HOME points at a writable directory. The
-// agent container runs with readOnlyRootFilesystem, so the image's /home/<user>
-// is not writable; Claude Code (and git, npm, …) expect to be able to drop
-// dotfiles under $HOME. When the current HOME is unusable we point it at the
-// workspace, which also makes `~/.claude` coincide with the default
-// CLAUDE_CONFIG_DIR. Returns the effective HOME.
-func ensureWritableHome(fallback string) string {
-	if home := os.Getenv("HOME"); home != "" && dirWritable(home) {
-		return home
-	}
-	_ = os.Setenv("HOME", fallback)
-	return fallback
-}
-
-func dirWritable(dir string) bool {
-	f, err := os.CreateTemp(dir, ".harness-probe-*")
-	if err != nil {
-		return false
-	}
-	name := f.Name()
-	_ = f.Close()
-	_ = os.Remove(name)
-	return true
-}
-
 // writeClaudeMD renders <configDir>/CLAUDE.md, the memory file Claude Code
 // loads into every conversation. It carries the stable, bulky context —
 // environment notes, mounted skills, sympozium-tool docs — while the per-run
@@ -268,6 +253,7 @@ func dirWritable(dir string) bool {
 func writeClaudeMD(configDir, extra string) error {
 	var b strings.Builder
 	b.WriteString(environmentSection())
+	b.WriteString(harness.WorkspaceSection())
 	b.WriteString(harness.SkillsMarkdown(harness.EnvOr("SKILLS_DIR", "/skills")))
 	b.WriteString(harness.SympoziumToolsSection())
 	if extra != "" {
@@ -285,9 +271,8 @@ func environmentSection() string {
 		"You are running headless inside a Sympozium agent pod on Kubernetes. There is no interactive user: " +
 		"never stop to ask for confirmation or clarification — make reasonable assumptions, state them, and finish the task. " +
 		"Your final message is relayed to the user (and to the channel that triggered this run, if any), so end with a " +
-		"clear, self-contained answer. Any file under /workspace or /tmp that your final message references by path " +
+		"clear, self-contained answer. Any file under /workspace that your final message references by path " +
 		"is attached to that reply automatically.\n\n" +
-		"The working directory (/workspace) is your scratch space. " +
 		"Your container is intentionally low-privilege; tooling and RBAC live in SkillPack sidecars reached via `sympozium-tool exec`.\n\n"
 }
 
@@ -374,6 +359,30 @@ func runTimeout(raw string) time.Duration {
 	d, err := time.ParseDuration(raw)
 	if err != nil || d <= 0 {
 		return 0
+	}
+	return d
+}
+
+// defaultTurnEndGrace is how long `claude` may keep running after the model
+// ends its turn. A clean print-mode run exits within moments of its result
+// event, so this only bites when Claude Code is waiting on background work.
+const defaultTurnEndGrace = 30 * time.Second
+
+// turnEndGrace parses CLAUDE_CODE_TURN_END_GRACE (a Go duration such as
+// "2m"). Unset or invalid means defaultTurnEndGrace; "0" disables the cutoff
+// so claude is always left to exit on its own (bounded by RUN_TIMEOUT).
+func turnEndGrace(raw string) time.Duration {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return defaultTurnEndGrace
+	}
+	if raw == "0" {
+		return 0
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < 0 {
+		harness.Logf(harnessName, "ignoring invalid CLAUDE_CODE_TURN_END_GRACE %q", raw)
+		return defaultTurnEndGrace
 	}
 	return d
 }

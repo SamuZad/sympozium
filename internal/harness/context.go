@@ -180,7 +180,7 @@ func SympoziumToolsSection() string {
 		"## send-message (reply via a channel)\n\n" +
 		"Notify the user through Telegram/Slack/Discord/WhatsApp. Omit `--chat-id` for self-chat; pass `--thread-id` to stay in an existing Slack/Discord thread.\n\n" +
 		"```\n" +
-		"sympozium-tool send-message --channel <telegram|slack|discord|whatsapp> --text \"...\" [--chat-id ID] [--thread-id ID] [--attachment-path /tmp/chart.png]\n" +
+		"sympozium-tool send-message --channel <telegram|slack|discord|whatsapp> --text \"...\" [--chat-id ID] [--thread-id ID] [--attachment-path /workspace/chart.png]\n" +
 		"```\n\n" +
 		"Slack image attachments can use `--attachment-path` for a local generated PNG or `--attachment-url` for a public HTTPS image. Local files are capped by CHANNEL_ATTACHMENT_MAX_BYTES (default 768000).\n\n" +
 		"## schedule (recurring agent runs)\n\n" +

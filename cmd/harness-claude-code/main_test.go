@@ -33,35 +33,6 @@ func TestPrepareConfigDir_DefaultsUnderWorkspace(t *testing.T) {
 	}
 }
 
-func TestEnsureWritableHome(t *testing.T) {
-	ws := t.TempDir()
-
-	writable := t.TempDir()
-	t.Setenv("HOME", writable)
-	if got := ensureWritableHome(ws); got != writable {
-		t.Fatalf("writable HOME should be kept, got %q", got)
-	}
-
-	// Read-only HOME (as with readOnlyRootFilesystem) falls back to the workspace.
-	ro := filepath.Join(t.TempDir(), "ro")
-	if err := os.Mkdir(ro, 0o500); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(ro, 0o700) })
-	if os.Getuid() == 0 {
-		t.Skip("root ignores directory permissions")
-	}
-	t.Setenv("HOME", ro)
-	if got := ensureWritableHome(ws); got != ws || os.Getenv("HOME") != ws {
-		t.Fatalf("read-only HOME should fall back to workspace, got %q (HOME=%q)", got, os.Getenv("HOME"))
-	}
-
-	t.Setenv("HOME", "")
-	if got := ensureWritableHome(ws); got != ws {
-		t.Fatalf("empty HOME should fall back to workspace, got %q", got)
-	}
-}
-
 func TestWriteClaudeMD_ComposesAndRegenerates(t *testing.T) {
 	configDir := t.TempDir()
 	skills := t.TempDir()
@@ -230,6 +201,22 @@ func TestRunTimeout(t *testing.T) {
 	}
 	if got := runTimeout("30m"); got != 30*time.Minute {
 		t.Fatalf("runTimeout(30m) = %v", got)
+	}
+}
+
+func TestTurnEndGrace(t *testing.T) {
+	cases := map[string]time.Duration{
+		"":        defaultTurnEndGrace,
+		"garbage": defaultTurnEndGrace,
+		"-5s":     defaultTurnEndGrace,
+		"0":       0,
+		"0s":      0,
+		" 2m ":    2 * time.Minute,
+	}
+	for raw, want := range cases {
+		if got := turnEndGrace(raw); got != want {
+			t.Errorf("turnEndGrace(%q) = %v, want %v", raw, got, want)
+		}
 	}
 }
 
