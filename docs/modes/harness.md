@@ -145,7 +145,7 @@ Nothing new was built for this. The mode reuses what the platform already had:
 | Persona | `SYSTEM_PROMPT` |
 | Tool policy | `TOOL_POLICY_ALLOW` / `TOOL_POLICY_DENY` — only reaches a run whose image declares `toolFilter` |
 | MCP servers | the registry ConfigMap the controller already generates, mounted at `MCP_CONFIG_PATH`, plus one `MCP_AUTH_<SERVER>` per authenticated server. A replaced agent container gets the **JSON** rendering (`mcp-servers.json`) because its adapter is a shell script with `jq`; the mcp-bridge sidecar keeps reading the YAML one |
-| Skills | `/skills/`, as today. SkillPack **tools** arrive through the skill tool server — see [SkillPack tools](#skillpack-tools). The raw tool manifest is deliberately *not* mounted: it lists tools the policy denies, and a harness has no way to dispatch them anyway |
+| Skills | `/skills/<pack>/<skill>.md`, the layout agent-runner reads, with YAML frontmatter (`name`, `description`) on each file. SkillPack **tools** arrive through the skill tool server — see [SkillPack tools](#skillpack-tools). The raw tool manifest is deliberately *not* mounted: it lists tools the policy denies, and a harness has no way to dispatch them anyway |
 | Sandbox / pod security | unchanged — non-root, `readOnlyRootFilesystem`, `drop: [ALL]`, RuntimeDefault seccomp |
 | Writable `$HOME` | an `emptyDir` at `/home/agent` (volume `harness-home`), with `HOME`, `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` pointed at it — **not** a relaxed security context |
 | Adapter contract | `SYMPOZIUM_HARNESS_CONTRACT_VERSION=v1alpha1`; reject versions the adapter does not understand |

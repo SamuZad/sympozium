@@ -861,7 +861,7 @@ CMD ["/usr/local/bin/tool-executor.sh"]
 
 ### `images/skill-github-gitops/tool-executor.sh`
 
-The script is identical to `images/skill-k8s-ops/tool-executor.sh` with one
+The script is the canonical `pkg/sidecartools/tool-executor.sh` with one
 addition at startup — it sources the token from the mounted secret before
 processing any request:
 
@@ -879,7 +879,7 @@ else
     echo "[tool-executor] WARNING: /secrets/github-token/GH_TOKEN not found — gh commands will fail"
 fi
 
-# ... rest is identical to skill-k8s-ops/tool-executor.sh ...
+# ... rest is identical to pkg/sidecartools/tool-executor.sh ...
 ```
 
 ---

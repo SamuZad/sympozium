@@ -2,11 +2,27 @@
 # tool-executor.sh — Watches /ipc/tools/ for exec-request-*.json files,
 # executes the requested commands, and writes exec-result-*.json responses.
 # This script runs as the main process in skill sidecar containers.
+#
+# This is the canonical copy. The skill images build it in at
+# /usr/local/bin/tool-executor.sh, and the controller mounts it read-only at
+# /sympozium/bin/tool-executor.sh in every skill sidecar, so a stock image with
+# bash, jq and coreutils can run it by setting it as the SkillPack's command.
+#
+# Environment:
+#   SYMPOZIUM_SKILL_PACK       this sidecar's SkillPack name, for target routing
+#   TOOL_EXECUTOR_MAX_TIMEOUT  upper bound on a request's timeout in seconds (default 120)
+#   SYMPOZIUM_IPC_DIR          IPC volume root (default /ipc)
 
 set -euo pipefail
 
-TOOLS_DIR="/ipc/tools"
+IPC_DIR="${SYMPOZIUM_IPC_DIR:-/ipc}"
+TOOLS_DIR="$IPC_DIR/tools"
 POLL_INTERVAL=0.2  # seconds
+
+MAX_TIMEOUT="${TOOL_EXECUTOR_MAX_TIMEOUT:-120}"
+if ! [[ "$MAX_TIMEOUT" =~ ^[0-9]+$ ]] || [[ "$MAX_TIMEOUT" -lt 1 ]]; then
+    MAX_TIMEOUT=120
+fi
 
 mkdir -p "$TOOLS_DIR"
 
@@ -33,7 +49,7 @@ process_request() {
 
     # Sanitize timeout.
     if [[ "$timeout_sec" -lt 1 ]]; then timeout_sec=30; fi
-    if [[ "$timeout_sec" -gt 120 ]]; then timeout_sec=120; fi
+    if [[ "$timeout_sec" -gt "$MAX_TIMEOUT" ]]; then timeout_sec=$MAX_TIMEOUT; fi
 
     # Execute the command, capturing stdout/stderr and exit code.
     local stdout="" stderr="" exit_code=0 timed_out="false"
@@ -126,7 +142,7 @@ process_request() {
 # Main loop: poll for new request files.
 while true; do
     # Exit when the agent signals it is done.
-    if [[ -f /ipc/done ]]; then
+    if [[ -f "$IPC_DIR/done" ]]; then
         echo "[tool-executor] agent done, exiting"
         exit 0
     fi

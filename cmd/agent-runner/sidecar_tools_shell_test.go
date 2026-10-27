@@ -8,12 +8,15 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sympozium-ai/sympozium/pkg/sidecartools"
 )
 
-// The exact argv-decode pipeline used by every images/skill-*/tool-executor.sh
-// argv branch. Kept in lock-step with those scripts: if you change the decode
-// loop there, change it here too. It prints one line per decoded argv element,
-// wrapped in <…> so the test can assert exact boundaries.
+// The exact argv-decode pipeline used by the argv branch of every tool-executor
+// script — the canonical pkg/sidecartools/tool-executor.sh and the github-gitops
+// variant. TestExecutorScriptsShareArgvDecode keeps them in lock-step with this
+// snippet. It prints one line per decoded argv element, wrapped in <…> so the
+// test can assert exact boundaries.
 const executorArgvDecodeSnippet = `
 set -euo pipefail
 cmd_argv=()
@@ -78,6 +81,28 @@ func TestExecutorArgvBranch_NewlineSafe(t *testing.T) {
 	for _, line := range got {
 		if line == "<--kubeconfig=/evil/admin.conf>" {
 			t.Fatal("newline value was split into a separate --kubeconfig argument (flag injection)")
+		}
+	}
+}
+
+// TestExecutorScriptsShareArgvDecode fails when a tool-executor script's argv
+// decode loop drifts from executorArgvDecodeSnippet, which the newline-safety
+// test above exercises.
+func TestExecutorScriptsShareArgvDecode(t *testing.T) {
+	const decodeLoop = `while IFS= read -r _b64; do cmd_argv+=("$(printf '%s' "$_b64" | base64 -d)"); done < <(jq -r '.argv[] | @base64'`
+	if !strings.Contains(executorArgvDecodeSnippet, decodeLoop) {
+		t.Fatal("executorArgvDecodeSnippet no longer contains the decode loop this test checks for")
+	}
+	gitops, err := os.ReadFile(filepath.Join("..", "..", "images", "skill-github-gitops", "tool-executor.sh"))
+	if err != nil {
+		t.Fatalf("reading github-gitops tool-executor: %v", err)
+	}
+	for name, script := range map[string]string{
+		"pkg/sidecartools/tool-executor.sh":           sidecartools.ExecutorScript,
+		"images/skill-github-gitops/tool-executor.sh": string(gitops),
+	} {
+		if !strings.Contains(script, decodeLoop) {
+			t.Errorf("%s: argv decode loop differs from executorArgvDecodeSnippet", name)
 		}
 	}
 }
