@@ -12,9 +12,9 @@ import (
 	"github.com/sympozium-ai/sympozium/pkg/sidecartools"
 )
 
-// The exact argv-decode pipeline used by the argv branch of every tool-executor
-// script — the canonical pkg/sidecartools/tool-executor.sh and the github-gitops
-// variant. TestExecutorScriptsShareArgvDecode keeps them in lock-step with this
+// The exact argv-decode pipeline used by the argv branch of the tool-executor
+// (pkg/sidecartools/tool-executor.sh, which every skill image runs).
+// TestExecutorScriptUsesArgvDecodeSnippet keeps the script in lock-step with this
 // snippet. It prints one line per decoded argv element, wrapped in <…> so the
 // test can assert exact boundaries.
 const executorArgvDecodeSnippet = `
@@ -85,24 +85,15 @@ func TestExecutorArgvBranch_NewlineSafe(t *testing.T) {
 	}
 }
 
-// TestExecutorScriptsShareArgvDecode fails when a tool-executor script's argv
+// TestExecutorScriptUsesArgvDecodeSnippet fails when the tool-executor's argv
 // decode loop drifts from executorArgvDecodeSnippet, which the newline-safety
 // test above exercises.
-func TestExecutorScriptsShareArgvDecode(t *testing.T) {
+func TestExecutorScriptUsesArgvDecodeSnippet(t *testing.T) {
 	const decodeLoop = `while IFS= read -r _b64; do cmd_argv+=("$(printf '%s' "$_b64" | base64 -d)"); done < <(jq -r '.argv[] | @base64'`
 	if !strings.Contains(executorArgvDecodeSnippet, decodeLoop) {
 		t.Fatal("executorArgvDecodeSnippet no longer contains the decode loop this test checks for")
 	}
-	gitops, err := os.ReadFile(filepath.Join("..", "..", "images", "skill-github-gitops", "tool-executor.sh"))
-	if err != nil {
-		t.Fatalf("reading github-gitops tool-executor: %v", err)
-	}
-	for name, script := range map[string]string{
-		"pkg/sidecartools/tool-executor.sh":           sidecartools.ExecutorScript,
-		"images/skill-github-gitops/tool-executor.sh": string(gitops),
-	} {
-		if !strings.Contains(script, decodeLoop) {
-			t.Errorf("%s: argv decode loop differs from executorArgvDecodeSnippet", name)
-		}
+	if !strings.Contains(sidecartools.ExecutorScript, decodeLoop) {
+		t.Error("pkg/sidecartools/tool-executor.sh: argv decode loop differs from executorArgvDecodeSnippet")
 	}
 }

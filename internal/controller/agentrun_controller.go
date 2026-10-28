@@ -735,6 +735,9 @@ func (r *AgentRunReconciler) prepareTaskPrerequisites(
 	}
 	if len(sidecars) > 0 {
 		if err := r.ensureToolExecutorConfigMap(ctx, agentRun); err != nil {
+			if isToolExecutorConfigMapConflict(err) {
+				return nil, &ctrl.Result{}, r.failRun(ctx, agentRun, err.Error())
+			}
 			return nil, &ctrl.Result{}, err
 		}
 	}

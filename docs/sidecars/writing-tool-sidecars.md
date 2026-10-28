@@ -115,13 +115,13 @@ Key details:
 
 You may not need a custom image at all. The controller mounts the canonical
 `tool-executor.sh` ([`pkg/sidecartools/tool-executor.sh`](https://github.com/sympozium-ai/sympozium/blob/main/pkg/sidecartools/tool-executor.sh))
-read-only into **every** skill sidecar at `/sympozium/bin/tool-executor.sh`. Any image
-that contains `bash`, `jq`, `base64` and coreutils' `timeout` can serve
-`execute_command` and native tools by running it:
+read-only into **every** skill sidecar at `/sympozium/bin/tool-executor.sh`. An image
+that has the script's dependencies can serve `execute_command` and native tools by
+running it:
 
 ```yaml
 sidecar:
-  image: bitnami/kubectl:1.31
+  image: bitnami/kubectl:latest   # pin a digest in production
   command: ["/sympozium/bin/tool-executor.sh"]
   mountWorkspace: true
 ```
@@ -129,13 +129,28 @@ sidecar:
 The mount never changes a sidecar's entrypoint: a sidecar without `command` keeps
 running its image's own `CMD`, so set `command` as above to opt in. Build a custom image
 when you need your own binaries or startup steps (loading credentials, for example) — it
-can still `exec /sympozium/bin/tool-executor.sh` once setup is done.
+can still `exec /sympozium/bin/tool-executor.sh` once setup is done, as the github-gitops
+image does.
+
+### What the image needs
+
+| Needed | Notes |
+|--------|-------|
+| `bash` | The script is bash; `sh`-only images (Alpine's default, BusyBox) do not run it. |
+| `jq` | Parses requests and writes results. Rarely preinstalled. |
+| `base64`, `timeout` | coreutils or BusyBox versions both work. |
+| `mktemp`, `basename`, `cat`, `tr`, `mv`, `rm`, `sleep` | Present in any image with coreutils or BusyBox. |
+
+- **Debian/Ubuntu-based images** usually have everything except `jq`; check before relying on them. `bitnami/kubectl:latest` has all of it. Bitnami's free catalogue only publishes `latest` (versioned tags such as `bitnami/kubectl:1.31` were moved to `bitnamilegacy/`), so pin it by digest.
+- **Alpine-based images** need `apk add bash jq`; BusyBox provides the rest. The built-in skill images are built this way.
+- **Distroless and `scratch` images** have no shell at all and cannot run the script. Build a small image on top of a base that has the tools, or use one of the built-in skill images.
 
 The script reads these environment variables (set them under `sidecar.env` or in your image):
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `TOOL_EXECUTOR_MAX_TIMEOUT` | `120` | Upper bound, in seconds, on a request's `timeout`. The llmfit image sets `180`. |
+| `TOOL_EXECUTOR_DEFAULT_TIMEOUT` | `30` | Timeout, in seconds, for a request that sets none. The github-gitops image sets `60`. |
+| `TOOL_EXECUTOR_MAX_TIMEOUT` | `120` | Upper bound, in seconds, on a request's `timeout`. The llmfit image sets `180`, github-gitops `300`. |
 | `SYMPOZIUM_SKILL_PACK` | set by the controller | This sidecar's SkillPack name, for [target-based routing](#target-based-routing). |
 
 ---
@@ -146,7 +161,7 @@ A sidecar needs two things: your application logic, and `tool-executor.sh` to br
 
 ### Step 1: The tool executor
 
-Copy the standard `tool-executor.sh` ([`pkg/sidecartools/tool-executor.sh`](https://github.com/sympozium-ai/sympozium/blob/main/pkg/sidecartools/tool-executor.sh); the built-in skill images use the same file) into your image, or run the copy mounted at `/sympozium/bin/tool-executor.sh` (see [Using a Stock Image](#using-a-stock-image)). This script handles polling, request parsing, claiming, timeout enforcement, and response writing — you don't need to implement the IPC protocol yourself.
+Copy the standard `tool-executor.sh` ([`pkg/sidecartools/tool-executor.sh`](https://github.com/sympozium-ai/sympozium/blob/main/pkg/sidecartools/tool-executor.sh); every built-in skill image runs this file, github-gitops through a wrapper that loads its token first) into your image, or run the copy mounted at `/sympozium/bin/tool-executor.sh` (see [Using a Stock Image](#using-a-stock-image)). This script handles polling, request parsing, claiming, timeout enforcement, and response writing — you don't need to implement the IPC protocol yourself.
 
 Here's a minimal version:
 
@@ -258,7 +273,7 @@ CMD ["/usr/local/bin/tool-executor.sh"]
 ```
 
 !!! warning "Required packages"
-    Your sidecar image **must** include `bash`, `jq`, and `coreutils` for `tool-executor.sh` to work. The image must run as UID 1000 (`runAsNonRoot: true` is enforced).
+    Your sidecar image **must** include `bash`, `jq`, `base64` and `timeout` (coreutils or BusyBox) for `tool-executor.sh` to work — see [What the image needs](#what-the-image-needs). The image must run as UID 1000 (`runAsNonRoot: true` is enforced).
 
 ### Step 3: Build and push
 
